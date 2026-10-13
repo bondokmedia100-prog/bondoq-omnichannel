@@ -56,7 +56,7 @@ export default function AdminDashboard() {
       connection.on("whisper:new", (note) => setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old));
       for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached"]) connection.on(event, load);
     }).catch(() => { localStorage.removeItem("bondoq_token"); router.replace("/login"); });
-    return () => connection?.disconnect();
+    return () => { connection?.disconnect(); };
   }, [router]);
 
   async function openConversation(item: AnyRecord) {
