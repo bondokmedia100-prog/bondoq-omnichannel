@@ -26,7 +26,7 @@ export function encryptKalemlySecret(value: string): string {
   return `${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${ciphertext.toString("hex")}`;
 }
 
-function decryptKalemlySecret(value: string): string {
+export function decryptKalemlySecret(value: string): string {
   const [ivHex, tagHex, ciphertextHex] = value.split(":");
   const key = createHash("sha256").update(config.kalemlyEncryptionKey).digest();
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
