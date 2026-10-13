@@ -148,14 +148,15 @@ export default function AdminDashboard() {
 
 function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<AnyRecord | null>(null);
-  const [apiKey, setApiKey] = useState("");
+  const [authKey, setAuthKey] = useState("");
+  const [appKey, setAppKey] = useState("");
   const [qrCodePayload, setQrCodePayload] = useState("");
   const [qrImage, setQrImage] = useState("");
   const [phone, setPhone] = useState("");
   const [message, setMessage] = useState("اختبار من نظام خدمة عملاء حلواني بندق");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
-    const [testing, setTesting] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [webhookCopied, setWebhookCopied] = useState(false);
   const webhookUrl = `${API_URL}/webhooks/kalemlywa`;
 
@@ -178,8 +179,8 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
   async function save(event: FormEvent) {
     event.preventDefault(); setSaving(true); setNotice("");
     try {
-      const result = await api("/api/admin/integrations/kalemlywa", { method: "PUT", body: JSON.stringify({ instanceId: settings?.instanceId || "", ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}), qrCodePayload }) });
-      setSettings(result); setQrCodePayload(result.qrCodePayload || ""); setApiKey(""); setNotice("حُفظت إعدادات KalemlyWA مشفّرة.");
+      const result = await api("/api/admin/integrations/kalemlywa", { method: "PUT", body: JSON.stringify({ authKey: authKey.trim(), appKey: appKey.trim(), qrCodePayload }) });
+      setSettings(result); setQrCodePayload(result.qrCodePayload || ""); setAuthKey(""); setAppKey(""); setNotice("حُفظ مفتاحا KalemlyWA مشفّرين.");
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ الإعدادات"); }
     finally { setSaving(false); }
   }
@@ -192,6 +193,7 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
     } catch (error) { setNotice(error instanceof Error ? error.message : "فشل إرسال رسالة الاختبار"); }
     finally { setTesting(false); }
   }
+
   async function copyWebhookUrl() {
     try {
       await navigator.clipboard.writeText(webhookUrl);
@@ -205,21 +207,21 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
 
   return <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/50 p-3 backdrop-blur-sm" onClick={onClose}>
     <section className="panel max-h-[94vh] w-full max-w-3xl overflow-y-auto p-5 sm:p-6" onClick={(event) => event.stopPropagation()}>
-      <div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-bold text-emerald-700">WhatsApp Business · KalemlyWA</p><h2 className="mt-1 text-xl font-extrabold">إعداد اتصال واتساب</h2><p className="mt-1 text-xs leading-5 text-stone-500">المفتاح يُخزّن مشفّرًا ولا يظهر بعد الحفظ. لا تلصق رمز QR من جلسة غير موثوقة.</p></div><button onClick={onClose} aria-label="إغلاق" className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
+      <div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-bold text-emerald-700">WhatsApp Business · KalemlyWA</p><h2 className="mt-1 text-xl font-extrabold">إعداد اتصال واتساب</h2><p className="mt-1 text-xs leading-5 text-stone-500">أدخل مفتاح الحساب ومفتاح التطبيق كلًّا في خانته؛ يُخزّنان مشفّرين. حمولة QR اختيارية.</p></div><button onClick={onClose} aria-label="إغلاق" className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
       <div className="grid gap-5 md:grid-cols-[1fr_.9fr]">
         <div className="space-y-4">
           <form onSubmit={save} className="space-y-3 rounded-2xl bg-[#faf9f7] p-4">
             <label className="block text-xs font-bold text-stone-600">عنوان الإرسال<input readOnly value={settings?.endpoint || "جارٍ التحميل..."} className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-stone-100 px-3 text-[11px] font-normal text-stone-500" dir="ltr" /></label>
-            <label className="block text-xs font-bold text-stone-600">Instance ID<input required value={settings?.instanceId || ""} onChange={(event) => setSettings((old) => ({ ...(old || {}), instanceId: event.target.value }))} className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none focus:border-emerald-300" dir="ltr" /></label>
-            <label className="block text-xs font-bold text-stone-600">مفتاح API{settings?.apiKeyConfigured && <span className="mr-2 text-[10px] text-emerald-700">مفتاح محفوظ</span>}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={settings?.apiKeyConfigured ? "اتركه فارغًا للإبقاء على المفتاح الحالي" : "ألصق مفتاح KalemlyWA"} className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none focus:border-emerald-300" dir="ltr" autoComplete="new-password" /></label>
+            <label className="block text-xs font-bold text-stone-600">authkey · مفتاح الحساب{settings?.authKeyConfigured && <span className="mr-2 text-[10px] text-emerald-700">محفوظ</span>}<input type="password" value={authKey} onChange={(event) => setAuthKey(event.target.value)} placeholder={settings?.authKeyConfigured ? "اتركه فارغًا للإبقاء على المفتاح الحالي" : "ألصق authkey من دليل KalemlyWA"} className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none focus:border-emerald-300" dir="ltr" autoComplete="new-password" /></label>
+            <label className="block text-xs font-bold text-stone-600">appkey · مفتاح التطبيق{settings?.appKeyConfigured && <span className="mr-2 text-[10px] text-emerald-700">محفوظ</span>}<input type="password" value={appKey} onChange={(event) => setAppKey(event.target.value)} placeholder={settings?.appKeyConfigured ? "اتركه فارغًا للإبقاء على المفتاح الحالي" : "ألصق appkey لتطبيق Crm"} className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none focus:border-emerald-300" dir="ltr" autoComplete="new-password" /></label>
             <label className="block text-xs font-bold text-stone-600">QR pairing payload<input value={qrCodePayload} onChange={(event) => setQrCodePayload(event.target.value)} placeholder="ألصق نص أو رابط QR من لوحة KalemlyWA" className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none focus:border-emerald-300" dir="ltr" /></label>
             <button disabled={saving || !settings} className="h-10 w-full rounded-xl bg-emerald-700 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{saving ? "جارٍ الحفظ..." : "حفظ الإعدادات"}</button>
           </form>
-                    <div className="rounded-2xl border border-stone-200 bg-white p-4"><h3 className="text-xs font-extrabold">Webhook الوارد</h3><p className="mt-1 text-[10px] leading-5 text-stone-500">أضف العنوان أدناه في لوحة KalemlyWA، واضبط السر نفسه في متغير النشر `KALEMLYWA_WEBHOOK_SECRET`.</p><div className="mt-2 flex flex-col gap-2 sm:flex-row"><div dir="ltr" className="min-w-0 flex-1 select-all break-all rounded-lg bg-stone-50 px-3 py-2 font-mono text-xs leading-5 text-stone-700">{webhookUrl}</div><button type="button" onClick={copyWebhookUrl} className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-3 text-xs font-bold text-white hover:bg-emerald-800" aria-label="نسخ رابط Webhook">{webhookCopied ? <Check size={14} /> : <Copy size={14} />}{webhookCopied ? "تم النسخ" : "نسخ الرابط"}</button></div><p className={`mt-2 text-[10px] font-bold ${settings?.webhookSecretConfigured ? "text-emerald-700" : "text-amber-700"}`}>{settings?.webhookSecretConfigured ? "سر webhook مضبوط على الخادم" : "سر webhook غير مضبوط على الخادم"}</p></div>
+          <div className="rounded-2xl border border-stone-200 bg-white p-4"><h3 className="text-xs font-extrabold">Webhook الوارد</h3><p className="mt-1 text-[10px] leading-5 text-stone-500">أضف العنوان أدناه في لوحة KalemlyWA، واضبط السر نفسه في متغير النشر `KALEMLYWA_WEBHOOK_SECRET`.</p><div className="mt-2 flex flex-col gap-2 sm:flex-row"><div dir="ltr" className="min-w-0 flex-1 select-all break-all rounded-lg bg-stone-50 px-3 py-2 font-mono text-xs leading-5 text-stone-700">{webhookUrl}</div><button type="button" onClick={copyWebhookUrl} className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-3 text-xs font-bold text-white hover:bg-emerald-800" aria-label="نسخ رابط Webhook">{webhookCopied ? <Check size={14} /> : <Copy size={14} />}{webhookCopied ? "تم النسخ" : "نسخ الرابط"}</button></div><p className={`mt-2 text-[10px] font-bold ${settings?.webhookSecretConfigured ? "text-emerald-700" : "text-amber-700"}`}>{settings?.webhookSecretConfigured ? "سر webhook مضبوط على الخادم" : "سر webhook غير مضبوط على الخادم"}</p></div>
         </div>
         <div className="space-y-4">
           <div className="grid min-h-56 place-items-center rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-center">{qrImage ? <div><img src={qrImage} alt="رمز ربط واتساب" className="mx-auto h-52 w-52"/><p className="mt-2 text-[10px] text-stone-500">افتح WhatsApp المرتبط وامسح الرمز لتوصيل الجهاز.</p></div> : <div className="max-w-xs text-xs leading-6 text-stone-400"><QrCode size={28} className="mx-auto mb-2"/>لا توجد حمولة QR محفوظة. أدخل النص الذي يوفّره KalemlyWA يدويًا. لم يتم افتراض endpoint غير موثق لجلب الرمز.</div>}</div>
-          <form onSubmit={testConnection} className="space-y-3 rounded-2xl bg-emerald-50/70 p-4"><h3 className="text-xs font-extrabold text-emerald-900">اختبار إرسال مباشر</h3><label className="block text-[10px] font-bold text-stone-600">رقم الهاتف<input required value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="01xxxxxxxxx أو +201xxxxxxxxx" className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none" dir="ltr" /></label><label className="block text-[10px] font-bold text-stone-600">نص الاختبار<textarea required value={message} onChange={(event) => setMessage(event.target.value)} rows={2} className="mt-1 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label><button disabled={testing || !settings?.apiKeyConfigured} className="h-10 w-full rounded-xl bg-emerald-700 text-xs font-bold text-white disabled:opacity-50">{testing ? "جارٍ الإرسال..." : "إرسال رسالة اختبار"}</button></form>
+          <form onSubmit={testConnection} className="space-y-3 rounded-2xl bg-emerald-50/70 p-4"><h3 className="text-xs font-extrabold text-emerald-900">اختبار إرسال مباشر</h3><label className="block text-[10px] font-bold text-stone-600">رقم الهاتف<input required value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="01xxxxxxxxx أو +201xxxxxxxxx" className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none" dir="ltr" /></label><label className="block text-[10px] font-bold text-stone-600">نص الاختبار<textarea required value={message} onChange={(event) => setMessage(event.target.value)} rows={2} className="mt-1 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label><button disabled={testing || !settings?.authKeyConfigured || !settings?.appKeyConfigured} className="h-10 w-full rounded-xl bg-emerald-700 text-xs font-bold text-white disabled:opacity-50">{testing ? "جارٍ الإرسال..." : "إرسال رسالة اختبار"}</button></form>
         </div>
       </div>
       {notice && <p className={`mt-4 rounded-xl px-3 py-2 text-xs ${notice.includes("تعذر") || notice.includes("فشل") ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-800"}`}>{notice}</p>}
