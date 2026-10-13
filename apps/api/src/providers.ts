@@ -1,33 +1,11 @@
-import { Channel, Department, MessageKind } from "@prisma/client";
+import { Channel, MessageKind } from "@prisma/client";
 import { enqueueKalemlyMessage } from "./KalemlyWaService";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
-import { formatEgyptianPhone } from "./egyptianPhoneFormatter";
-
-export type NormalizedInbound = {
-  channel: Channel;
-  externalConversationId: string;
-  externalCustomerId: string;
-  customerPhone?: string;
-  customerName?: string;
-  profilePictureUrl?: string;
-  text?: string;
-  kind: MessageKind;
-  mediaUrl?: string;
-  latitude?: number;
-  longitude?: number;
-  externalId: string;
-  metadata?: Record<string, unknown>;
-  routingDepartment?: Department;
-  isComplaint?: boolean;
-};
-
-const routeChoice = (payload?: string): { routingDepartment: Department; isComplaint: boolean } | undefined => {
-  if (payload === "route_delivery" || payload === "1") return { routingDepartment: Department.DELIVERY, isComplaint: false };
-  if (payload === "route_cakes" || payload === "2") return { routingDepartment: Department.CAKES, isComplaint: false };
-  if (["route_menu", "route_branches", "3"].includes(payload || "")) return { routingDepartment: Department.CUSTOMER_CARE, isComplaint: false };
-  if (payload === "route_quality" || payload === "4") return { routingDepartment: Department.QUALITY, isComplaint: true };
-  return undefined;
-};
+import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
+import { routeChoice } from "./kalemlyWebhookParser";
+import type { NormalizedInbound } from "./kalemlyWebhookParser";
+export { parseKalemlyWebhook } from "./kalemlyWebhookParser";
+export type { NormalizedInbound } from "./kalemlyWebhookParser";
 
 async function postJson(url: string, payload: unknown, token: string) {
   const response = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -42,7 +20,7 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
       ? `${input.text || "موقع العميل"}\nhttps://maps.google.com/?q=${input.latitude},${input.longitude}`
       : input.text || "";
     return enqueueKalemlyMessage({
-      to: formatEgyptianPhone(input.recipient), message,
+      to: normalizePhoneNumber(input.recipient), message,
       ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : "document" } : {})
     });
   }
@@ -89,7 +67,7 @@ export async function sendRoutingMenu(channel: Channel, recipient: string) {
     { id: "route_quality", title: "4- شكوى" }
   ];
   if (channel === Channel.WHATSAPP) {
-    return sendToChannel({ channel, recipient: formatEgyptianPhone(recipient), text: prompt });
+    return sendToChannel({ channel, recipient, text: prompt });
   }
   if (channel === Channel.MESSENGER) {
     const settings = await getMessengerSettings();
@@ -130,52 +108,6 @@ function firstMedia(message: any): { kind: MessageKind; mediaUrl?: string } {
     return { kind, mediaUrl: attachment.payload?.url };
   }
   return { kind: MessageKind.TEXT };
-}
-
-export function parseKalemlyWebhook(body: any): NormalizedInbound[] {
-  const root = body?.data ?? body?.payload ?? body;
-  const candidates = root?.messages ?? root?.data?.messages ?? body?.messages;
-  const records = Array.isArray(candidates) ? candidates : [root];
-  const messages: NormalizedInbound[] = [];
-  for (const record of records) {
-    if (!record || record.key?.fromMe || record.fromMe || record.isFromMe) continue;
-    const envelope = record.data ?? record;
-    const key = envelope.key ?? record.key ?? {};
-    if (key.fromMe || key.from_me || envelope.fromMe || envelope.isFromMe) continue;
-    const rawMessage = envelope.message ?? record.message ?? {};
-    const content = typeof rawMessage === "object" ? rawMessage : {};
-    const rawPhone = envelope.from || envelope.sender || envelope.phone || envelope.number || envelope.remoteJid || key.remoteJid || record.from || record.sender || record.phone || record.number;
-    if (!rawPhone) continue;
-    let phone: string;
-    try { phone = formatEgyptianPhone(String(rawPhone)); } catch { continue; }
-
-    const image = content.imageMessage || envelope.image || record.image;
-    const audio = content.audioMessage || content.pttMessage || envelope.audio || envelope.voice || record.audio;
-    const document = content.documentMessage || envelope.document || record.document || record.file;
-    const location = content.locationMessage || envelope.location || record.location;
-    const extendedText = content.extendedTextMessage?.text || content.buttonsResponseMessage?.selectedDisplayText || content.templateButtonReplyMessage?.selectedDisplayText;
-    const text = typeof rawMessage === "string" ? rawMessage
-      : content.conversation || extendedText || image?.caption || document?.caption || envelope.text || envelope.body || record.text || record.body || record.caption || record.buttonReply?.id || record.buttonReply?.title;
-    const route = routeChoice(String(record.buttonReply?.id || record.buttonReply?.title || envelope.selectedButtonId || text || "").trim());
-    const file = image || audio || document;
-    const kind = location ? MessageKind.LOCATION : image ? MessageKind.IMAGE : audio ? MessageKind.AUDIO : document ? MessageKind.FILE : MessageKind.TEXT;
-    const externalId = key.id || envelope.messageId || envelope.id || record.messageId || record.id || `${phone}:${envelope.messageTimestamp || record.timestamp || Date.now()}`;
-    const avatarUrl = envelope.profilePictureUrl || envelope.profilePicUrl || envelope.avatarUrl || record.profilePictureUrl || record.avatarUrl;
-
-    messages.push({
-      channel: Channel.WHATSAPP, externalConversationId: phone, externalCustomerId: phone, customerPhone: phone,
-      customerName: envelope.pushName || envelope.name || envelope.contact?.name || record.pushName || record.name,
-      profilePictureUrl: avatarUrl ? String(avatarUrl) : undefined,
-      text: text === undefined ? undefined : String(text), kind,
-      mediaUrl: file?.url || file?.link || file?.mediaUrl || envelope.mediaUrl || record.mediaUrl,
-      latitude: location?.degreesLatitude ?? location?.latitude,
-      longitude: location?.degreesLongitude ?? location?.longitude,
-      externalId: `kalemly:${String(externalId)}`,
-      metadata: { provider: "kalemlywa", originalJid: String(rawPhone), mediaId: file?.id, mediaUrl: file?.url || envelope.mediaUrl },
-      ...(route || {})
-    });
-  }
-  return messages;
 }
 
 export function parseMetaWebhook(body: any): NormalizedInbound[] {
