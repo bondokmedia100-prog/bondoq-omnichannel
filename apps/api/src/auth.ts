@@ -1,4 +1,4 @@
-import type { NextFunction, Request, Response } from "express";
+import type { NextFunction, Request, RequestHandler, Response } from "express";
 import jwt from "jsonwebtoken";
 import { Role } from "@prisma/client";
 import { config } from "./config";
@@ -33,5 +33,5 @@ export function allowRoles(...roles: Role[]) {
   };
 }
 
-export const adminGuard = [authenticate, allowRoles(Role.ADMIN, Role.SUPERVISOR)];
-export const agentGuard = [authenticate, allowRoles(Role.AGENT, Role.ADMIN, Role.SUPERVISOR)];
+export const adminGuard: RequestHandler[] = [authenticate as RequestHandler, allowRoles(Role.ADMIN, Role.SUPERVISOR) as RequestHandler];
+export const agentGuard: RequestHandler[] = [authenticate as RequestHandler, allowRoles(Role.AGENT, Role.ADMIN, Role.SUPERVISOR) as RequestHandler];
