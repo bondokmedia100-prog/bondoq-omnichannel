@@ -59,7 +59,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   let nextAwaitingRouting = conversation.awaitingRouting;
   if (routeChoice) nextAwaitingRouting = false;
   else if (conversation.awaitingRouting && !isNewConversation) nextAwaitingRouting = false;
-  const shouldPreserveResolved = isRatingReply && [ConversationStatus.RESOLVED, ConversationStatus.CLOSED].includes(conversation.status);
+  const shouldPreserveResolved = isRatingReply && (conversation.status === ConversationStatus.RESOLVED || conversation.status === ConversationStatus.CLOSED);
   conversation = await prisma.conversation.update({
     where: { id: conversation.id },
     data: {
