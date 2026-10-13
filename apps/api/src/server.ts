@@ -76,7 +76,7 @@ app.get("/api/auth/me", authenticate, async (req: AuthedRequest, res) => {
   res.json(user);
 });
 
-app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res) => {
+app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const isAdmin = req.user!.role !== Role.AGENT;
   const channel = typeof req.query.channel === "string" ? req.query.channel : undefined;
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
@@ -87,7 +87,7 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res) => {
   res.json(conversations);
 });
 
-app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res) => {
+app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   let conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: {
     customer: { include: { orders: { orderBy: { createdAt: "desc" }, take: 10 } } }, assignedAgent: { select: { id: true, name: true } },
     messages: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: "asc" }, take: 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "asc" } }
@@ -103,7 +103,7 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res) =>
   res.json(conversation);
 });
 
-app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, res) => {
+app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: z.string().url().optional(), latitude: z.number().optional(), longitude: z.number().optional() }).safeParse(req.body);
   if (!parsed.success || (!parsed.data.text && parsed.data.kind === MessageKind.TEXT)) return res.status(400).json({ error: "الرسالة غير صالحة" });
   const mediaKind = parsed.data.kind === MessageKind.IMAGE || parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.FILE;
@@ -132,7 +132,7 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
   }
 });
 
-app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedRequest, res) => {
+app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ productId: z.string().min(1) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اختر منتجًا من الكتالوج" });
   const [conversation, product] = await Promise.all([
@@ -157,16 +157,16 @@ app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedReques
   } catch (error) { res.status(502).json({ error: error instanceof Error ? error.message : "تعذر إرسال المنتج للقناة" }); }
 });
 
-app.get("/api/products", agentGuard, async (_req, res) => res.json(await prisma.product.findMany({ where: { isAvailable: true }, orderBy: [{ category: "asc" }, { name: "asc" }] })));
-app.get("/api/admin/products", adminGuard, async (_req, res) => res.json(await prisma.product.findMany({ orderBy: [{ category: "asc" }, { name: "asc" }] })));
-app.post("/api/admin/products", adminGuard, async (req: AuthedRequest, res) => {
+app.get("/api/products", agentGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.product.findMany({ where: { isAvailable: true }, orderBy: [{ category: "asc" }, { name: "asc" }] })));
+app.get("/api/admin/products", adminGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.product.findMany({ orderBy: [{ category: "asc" }, { name: "asc" }] })));
+app.post("/api/admin/products", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ name: z.string().min(2).max(120), category: z.nativeEnum(ProductCategory), price: z.number().nonnegative(), imageUrl: httpsUrl.nullable().optional(), description: z.string().max(800).nullable().optional(), isAvailable: z.boolean().default(true) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "راجع اسم المنتج وقسمه وسعره ورابط صورته" });
   const product = await prisma.product.create({ data: { ...parsed.data, price: new Prisma.Decimal(parsed.data.price) } });
   await audit(req.user!.id, "PRODUCT_CREATED", undefined, { productId: product.id });
   res.status(201).json(product);
 });
-app.patch("/api/admin/products/:id", adminGuard, async (req: AuthedRequest, res) => {
+app.patch("/api/admin/products/:id", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ name: z.string().min(2).max(120).optional(), category: z.nativeEnum(ProductCategory).optional(), price: z.number().nonnegative().optional(), imageUrl: httpsUrl.nullable().optional(), description: z.string().max(800).nullable().optional(), isAvailable: z.boolean().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات المنتج غير صالحة" });
   const { price, ...fields } = parsed.data;
@@ -175,7 +175,7 @@ app.patch("/api/admin/products/:id", adminGuard, async (req: AuthedRequest, res)
   res.json(product);
 });
 
-app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest, res) => {
+app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ text: z.string().min(1).max(2000) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اكتب الملاحظة السرية" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { assignedAgent: { select: { role: true } } } });
@@ -187,7 +187,7 @@ app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest
   res.status(201).json(note);
 });
 
-app.patch("/api/conversations/:id/assignment", adminGuard, async (req: AuthedRequest, res) => {
+app.patch("/api/conversations/:id/assignment", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ agentId: z.string().nullable() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اختر الموظف الجديد" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
@@ -203,7 +203,7 @@ app.patch("/api/conversations/:id/assignment", adminGuard, async (req: AuthedReq
   res.json(updated);
 });
 
-app.patch("/api/conversations/:id/status", agentGuard, async (req: AuthedRequest, res) => {
+app.patch("/api/conversations/:id/status", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ status: z.nativeEnum(ConversationStatus) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "الحالة غير صالحة" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
@@ -239,7 +239,7 @@ app.patch("/api/conversations/:id/status", agentGuard, async (req: AuthedRequest
   res.json({ ...updated, csatDelivery });
 });
 
-app.get("/api/conversations/:id/messages/:messageId/media", agentGuard, async (req: AuthedRequest, res) => {
+app.get("/api/conversations/:id/messages/:messageId/media", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
   if (!message) return res.status(404).json({ error: "الملف غير موجود" });
   if (req.user!.role === Role.AGENT && message.conversation.assignedAgentId !== req.user!.id) return res.status(403).json({ error: "لا تملك صلاحية عرض هذا الملف" });
@@ -249,7 +249,7 @@ app.get("/api/conversations/:id/messages/:messageId/media", agentGuard, async (r
   } catch { res.status(404).json({ error: "تعذر تحميل الملف من المنصة" }); }
 });
 
-app.post("/api/conversations/:id/orders", agentGuard, async (req: AuthedRequest, res) => {
+app.post("/api/conversations/:id/orders", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ product: z.string().optional(), size: z.string().optional(), filling: z.string().optional(), cakeMessage: z.string().optional(), deliveryAt: z.string().datetime().optional(), deliveryAddress: z.string().optional(), notes: z.string().optional(), price: z.number().nonnegative().optional(), referenceImageMessageId: z.string().nullable().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "تفاصيل الطلب غير صالحة" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
@@ -265,7 +265,7 @@ app.post("/api/conversations/:id/orders", agentGuard, async (req: AuthedRequest,
   res.status(201).json(order);
 });
 
-app.patch("/api/orders/:id/status", agentGuard, async (req: AuthedRequest, res) => {
+app.patch("/api/orders/:id/status", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ status: z.nativeEnum(OrderStatus) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة الطلب غير صالحة" });
   const existing = await prisma.orderDetails.findUnique({ where: { id: req.params.id }, include: { conversation: true } });
@@ -302,7 +302,7 @@ app.patch("/api/orders/:id/status", agentGuard, async (req: AuthedRequest, res) 
   res.json({ ...order, notificationDelivery });
 });
 
-app.patch("/api/agents/me/presence", agentGuard, async (req: AuthedRequest, res) => {
+app.patch("/api/agents/me/presence", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ presence: z.nativeEnum(Presence) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "الحالة غير صالحة" });
   const userId = req.user!.id;
@@ -319,14 +319,14 @@ app.patch("/api/agents/me/presence", agentGuard, async (req: AuthedRequest, res)
   res.json({ presence });
 });
 
-app.get("/api/canned-responses", agentGuard, async (_req, res) => res.json(await prisma.cannedResponse.findMany({ where: { isActive: true }, orderBy: { title: "asc" } })));
+app.get("/api/canned-responses", agentGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.cannedResponse.findMany({ where: { isActive: true }, orderBy: { title: "asc" } })));
 
-app.get("/api/admin/integrations/kalemlywa", adminGuard, async (_req, res) => {
+app.get("/api/admin/integrations/kalemlywa", adminGuard, async (_req: express.Request, res: express.Response) => {
   const settings = await getKalemlySettings();
   res.json({ endpoint: settings.endpoint, instanceId: settings.instanceId, apiKeyConfigured: Boolean(settings.apiKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
 });
 
-app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedRequest, res) => {
+app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ apiKey: z.string().max(2048).optional(), instanceId: z.string().max(180).optional(), qrCodePayload: z.string().max(12000).optional(), clearQrCode: z.boolean().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "تحقق من مفتاح API ومعرّف الجهاز وحمولة QR" });
   const settings = await saveKalemlySettings(parsed.data);
@@ -334,7 +334,7 @@ app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedReque
   res.json({ endpoint: settings.endpoint, instanceId: settings.instanceId, apiKeyConfigured: Boolean(settings.apiKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
 });
 
-app.post("/api/admin/integrations/kalemlywa/test", adminGuard, async (req: AuthedRequest, res) => {
+app.post("/api/admin/integrations/kalemlywa/test", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ phone: z.string().min(8).max(32), message: z.string().min(1).max(500) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "أدخل رقم واتساب مصريًا صحيحًا ورسالة قصيرة" });
   try {
@@ -346,7 +346,7 @@ app.post("/api/admin/integrations/kalemlywa/test", adminGuard, async (req: Authe
   }
 });
 
-app.get("/api/admin/dashboard", adminGuard, async (_req, res) => {
+app.get("/api/admin/dashboard", adminGuard, async (_req: express.Request, res: express.Response) => {
   const today = startOfCairoDay();
   const [openChats, queue, slaBreached, agents, todayResponses, closedToday, recentAudit, allRatings] = await Promise.all([
     prisma.conversation.count({ where: { status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } } }),
@@ -375,8 +375,8 @@ app.get("/api/admin/dashboard", adminGuard, async (_req, res) => {
   res.json({ kpis: { openChats, queue, slaBreached, avgResponseSeconds: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length / 1000) : null, closedToday, avgCsat: ratings.length ? Number((ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)) : null, csatCount: ratings.length }, agents: employeeStats, recentAudit });
 });
 
-app.get("/api/admin/agents", adminGuard, async (_req, res) => res.json(await prisma.user.findMany({ where: { role: Role.AGENT }, select: { id: true, email: true, username: true, name: true, department: true, presence: true, isActive: true }, orderBy: { name: "asc" } })));
-app.post("/api/admin/agents", adminGuard, async (req: AuthedRequest, res) => {
+app.get("/api/admin/agents", adminGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.user.findMany({ where: { role: Role.AGENT }, select: { id: true, email: true, username: true, name: true, department: true, presence: true, isActive: true }, orderBy: { name: "asc" } })));
+app.post("/api/admin/agents", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ name: z.string().min(2), email: z.string().email(), password: z.string().min(10), department: z.nativeEnum(Department) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "راجع الاسم والبريد وكلمة المرور والقسم" });
   const username = parsed.data.email.split("@")[0].toLowerCase();
@@ -386,7 +386,7 @@ app.post("/api/admin/agents", adminGuard, async (req: AuthedRequest, res) => {
     res.status(201).json(user);
   } catch { res.status(409).json({ error: "البريد أو اسم المستخدم مستخدم بالفعل" }); }
 });
-app.patch("/api/admin/agents/:id", adminGuard, async (req: AuthedRequest, res) => {
+app.patch("/api/admin/agents/:id", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ isActive: z.boolean().optional(), password: z.string().min(10).optional(), department: z.nativeEnum(Department).optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات التعديل غير صالحة" });
   const data: Prisma.UserUpdateInput = {
