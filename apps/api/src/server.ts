@@ -16,6 +16,7 @@ import { answerTelegramCallback, fetchInboundMedia, parseKalemlyWebhook, parseMe
 import { ingestMessage } from "./ingestion";
 import { getKalemlySettings, safeProviderResponse, saveKalemlySettings, sendKalemlyTest, startKalemlyWaWorker, kalemlyExternalMessageId } from "./KalemlyWaService";
 import { startOfCairoDay } from "./cairoTime";
+import { getMessengerSettings, getTelegramSettings, saveMessengerSettings, saveTelegramSettings } from "./ChannelIntegrationService";
 
 const app = express();
 const server = http.createServer(app);
@@ -28,7 +29,9 @@ const audit = (actorId: string | null, action: string, conversationId?: string, 
 const MESSENGER_WINDOW_MS = 24 * 60 * 60 * 1000;
 const terminalStatuses: ConversationStatus[] = [ConversationStatus.CLOSED, ConversationStatus.RESOLVED];
 const httpsUrl = z.string().url().refine((value) => value.startsWith("https://"), "استخدم رابط HTTPS آمنًا");
+const usernameSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9._-]{3,32}$/, "اسم المستخدم من 3 إلى 32 حرفًا، ويقبل الحروف الإنجليزية والأرقام والنقطة والشرطة");
 const isMessenger = (channel: Channel) => channel === Channel.MESSENGER;
+const isUniqueConstraintError = (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 async function lastInboundAt(conversationId: string, stored?: Date | null) {
   if (stored) return stored;
   const latest = await prisma.message.findFirst({ where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
@@ -71,9 +74,22 @@ app.post("/api/auth/logout", authenticate, async (req: AuthedRequest, res) => {
 });
 
 app.get("/api/auth/me", authenticate, async (req: AuthedRequest, res) => {
-  const user = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { id: true, name: true, email: true, role: true, department: true, presence: true } });
+  const user = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { id: true, username: true, name: true, email: true, role: true, department: true, presence: true } });
   if (!user) return res.status(401).json({ error: "الحساب غير موجود" });
   res.json(user);
+});
+
+app.patch("/api/auth/me", authenticate, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ username: usernameSchema }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "اسم المستخدم غير صالح" });
+  try {
+    const user = await prisma.user.update({ where: { id: req.user!.id }, data: { username: parsed.data.username }, select: { id: true, username: true, name: true, email: true, role: true, department: true, presence: true } });
+    await audit(user.id, "USERNAME_UPDATED");
+    res.json(user);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "اسم المستخدم مستخدم بالفعل" });
+    throw error;
+  }
 });
 
 app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -346,6 +362,84 @@ app.post("/api/admin/integrations/kalemlywa/test", adminGuard, async (req: Authe
   }
 });
 
+app.get("/api/admin/integrations/messenger", adminGuard, async (_req: express.Request, res: express.Response) => {
+  const settings = await getMessengerSettings();
+  res.json({ pageId: settings.pageId, pageTokenConfigured: Boolean(settings.pageAccessToken), appSecretConfigured: Boolean(settings.appSecret), verifyTokenConfigured: Boolean(settings.verifyToken) });
+});
+
+app.put("/api/admin/integrations/messenger", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ pageId: z.string().max(180).optional(), pageAccessToken: z.string().max(4096).optional(), appSecret: z.string().max(2048).optional(), verifyToken: z.string().max(512).optional() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "تحقق من بيانات تطبيق Meta والصفحة" });
+  const settings = await saveMessengerSettings(parsed.data);
+  await audit(req.user!.id, "MESSENGER_SETTINGS_UPDATED", undefined, { pageIdConfigured: Boolean(settings.pageId), pageTokenConfigured: Boolean(settings.pageAccessToken), appSecretConfigured: Boolean(settings.appSecret), verifyTokenConfigured: Boolean(settings.verifyToken) });
+  res.json({ pageId: settings.pageId, pageTokenConfigured: Boolean(settings.pageAccessToken), appSecretConfigured: Boolean(settings.appSecret), verifyTokenConfigured: Boolean(settings.verifyToken) });
+});
+
+app.post("/api/admin/integrations/messenger/test", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const settings = await getMessengerSettings();
+  if (!settings.pageAccessToken) return res.status(400).json({ error: "احفظ رمز الوصول للصفحة أولًا" });
+  try {
+    const response = await fetch("https://graph.facebook.com/v21.0/me?fields=id,name", { headers: { Authorization: `Bearer ${settings.pageAccessToken}` }, signal: AbortSignal.timeout(15_000) });
+    const result = await response.json() as { id?: string; name?: string; error?: { message?: string } };
+    if (!response.ok) return res.status(502).json({ error: result.error?.message || "تعذر التحقق من رمز Meta" });
+    if (settings.pageId && settings.pageId !== result.id) return res.status(409).json({ error: "معرّف الصفحة لا يطابق الرمز المحفوظ" });
+    if (!settings.pageId && result.id) await saveMessengerSettings({ pageId: result.id });
+    await audit(req.user!.id, "MESSENGER_CONNECTION_TESTED", undefined, { pageId: result.id });
+    res.json({ ok: true, pageId: result.id, pageName: result.name });
+  } catch {
+    res.status(502).json({ error: "تعذر الاتصال بخدمة Meta؛ تحقق من الرمز وحاول مجددًا" });
+  }
+});
+
+app.get("/api/admin/integrations/telegram", adminGuard, async (_req: express.Request, res: express.Response) => {
+  const settings = await getTelegramSettings();
+  res.json({ botUsername: settings.botUsername, botTokenConfigured: Boolean(settings.botToken), webhookSecretConfigured: Boolean(settings.webhookSecret) });
+});
+
+app.put("/api/admin/integrations/telegram", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ botUsername: z.string().max(100).optional(), botToken: z.string().max(512).optional(), webhookSecret: z.string().max(256).regex(/^[A-Za-z0-9_-]*$/).optional() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "تحقق من اسم المستخدم والرمز السري لـ Telegram" });
+  const settings = await saveTelegramSettings(parsed.data);
+  await audit(req.user!.id, "TELEGRAM_SETTINGS_UPDATED", undefined, { botUsernameConfigured: Boolean(settings.botUsername), botTokenConfigured: Boolean(settings.botToken), webhookSecretConfigured: Boolean(settings.webhookSecret) });
+  res.json({ botUsername: settings.botUsername, botTokenConfigured: Boolean(settings.botToken), webhookSecretConfigured: Boolean(settings.webhookSecret) });
+});
+
+app.post("/api/admin/integrations/telegram/test", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const settings = await getTelegramSettings();
+  if (!settings.botToken) return res.status(400).json({ error: "احفظ رمز البوت أولًا" });
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/getMe`, { signal: AbortSignal.timeout(15_000) });
+    const result = await response.json() as { ok?: boolean; result?: { username?: string }; description?: string };
+    if (!response.ok || !result.ok) return res.status(502).json({ error: result.description || "تعذر التحقق من رمز Telegram" });
+    const botUsername = result.result?.username || "";
+    if (botUsername && botUsername !== settings.botUsername) await saveTelegramSettings({ botUsername });
+    await audit(req.user!.id, "TELEGRAM_CONNECTION_TESTED", undefined, { botUsername });
+    res.json({ ok: true, botUsername });
+  } catch {
+    res.status(502).json({ error: "تعذر الاتصال بخدمة Telegram؛ تحقق من الرمز وحاول مجددًا" });
+  }
+});
+
+app.post("/api/admin/integrations/telegram/webhook", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ url: httpsUrl }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "أدخل عنوان Webhook آمنًا يبدأ بـ HTTPS" });
+  const settings = await getTelegramSettings();
+  if (!settings.botToken || settings.webhookSecret.length < 16) return res.status(400).json({ error: "احفظ رمز البوت ورمز حماية Webhook بطول 16 حرفًا على الأقل أولًا" });
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/setWebhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: parsed.data.url, secret_token: settings.webhookSecret, allowed_updates: ["message", "callback_query"] }),
+      signal: AbortSignal.timeout(15_000)
+    });
+    const result = await response.json() as { ok?: boolean; description?: string };
+    if (!response.ok || !result.ok) return res.status(502).json({ error: result.description || "تعذر تسجيل Webhook لدى Telegram" });
+    await audit(req.user!.id, "TELEGRAM_WEBHOOK_CONFIGURED");
+    res.json({ ok: true });
+  } catch {
+    res.status(502).json({ error: "تعذر تسجيل Webhook لدى Telegram؛ تحقق من عنوان API وحاول مجددًا" });
+  }
+});
+
 app.get("/api/admin/dashboard", adminGuard, async (_req: express.Request, res: express.Response) => {
   const today = startOfCairoDay();
   const [openChats, queue, slaBreached, agents, todayResponses, closedToday, recentAudit, allRatings] = await Promise.all([
@@ -377,24 +471,33 @@ app.get("/api/admin/dashboard", adminGuard, async (_req: express.Request, res: e
 
 app.get("/api/admin/agents", adminGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.user.findMany({ where: { role: Role.AGENT }, select: { id: true, email: true, username: true, name: true, department: true, presence: true, isActive: true }, orderBy: { name: "asc" } })));
 app.post("/api/admin/agents", adminGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ name: z.string().min(2), email: z.string().email(), password: z.string().min(10), department: z.nativeEnum(Department) }).safeParse(req.body);
+  const parsed = z.object({ name: z.string().min(2), email: z.string().email(), username: usernameSchema.optional(), password: z.string().min(10), department: z.nativeEnum(Department) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "راجع الاسم والبريد وكلمة المرور والقسم" });
-  const username = parsed.data.email.split("@")[0].toLowerCase();
+  const { username: suppliedUsername, ...data } = parsed.data;
+  const username = suppliedUsername || parsed.data.email.split("@")[0].toLowerCase().replace(/[^a-z0-9._-]/g, "_").slice(0, 32);
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) return res.status(400).json({ error: "اكتب اسم مستخدم صالحًا من 3 إلى 32 حرفًا" });
   try {
-    const user = await prisma.user.create({ data: { ...parsed.data, email: parsed.data.email.toLowerCase(), username, role: Role.AGENT, passwordHash: await bcrypt.hash(parsed.data.password, 12) }, select: { id: true, name: true, email: true, username: true, role: true, department: true } });
+    const user = await prisma.user.create({ data: { ...data, email: parsed.data.email.toLowerCase(), username, role: Role.AGENT, passwordHash: await bcrypt.hash(parsed.data.password, 12) }, select: { id: true, name: true, email: true, username: true, role: true, department: true } });
     await audit(req.user!.id, "AGENT_CREATED", undefined, { agentId: user.id });
     res.status(201).json(user);
   } catch { res.status(409).json({ error: "البريد أو اسم المستخدم مستخدم بالفعل" }); }
 });
 app.patch("/api/admin/agents/:id", adminGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ isActive: z.boolean().optional(), password: z.string().min(10).optional(), department: z.nativeEnum(Department).optional() }).safeParse(req.body);
+  const parsed = z.object({ username: usernameSchema.optional(), isActive: z.boolean().optional(), password: z.string().min(10).optional(), department: z.nativeEnum(Department).optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات التعديل غير صالحة" });
   const data: Prisma.UserUpdateInput = {
+    ...(parsed.data.username === undefined ? {} : { username: parsed.data.username }),
     ...(parsed.data.isActive === undefined ? {} : { isActive: parsed.data.isActive, ...(parsed.data.isActive ? {} : { presence: Presence.OFFLINE, authVersion: { increment: 1 } }) }),
     ...(parsed.data.department === undefined ? {} : { department: parsed.data.department }),
     ...(parsed.data.password ? { passwordHash: await bcrypt.hash(parsed.data.password, 12), authVersion: { increment: 1 } } : {})
   };
-  const user = await prisma.user.update({ where: { id: req.params.id }, data, select: { id: true, name: true, email: true, department: true, isActive: true } });
+  let user;
+  try {
+    user = await prisma.user.update({ where: { id: req.params.id }, data, select: { id: true, name: true, email: true, username: true, department: true, isActive: true } });
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "اسم المستخدم مستخدم بالفعل" });
+    throw error;
+  }
   if (parsed.data.isActive === false) {
     await prisma.agentSession.updateMany({ where: { userId: user.id, endedAt: null }, data: { endedAt: new Date(), endState: Presence.OFFLINE } });
     await prisma.conversation.updateMany({ where: { assignedAgentId: user.id, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } }, data: { assignedAgentId: null, status: ConversationStatus.QUEUED } });
@@ -411,23 +514,26 @@ app.get("/api/admin/audit", adminGuard, async (req: AuthedRequest, res: express.
   res.json(logs);
 });
 
-app.get("/webhooks/meta", (req, res) => {
-  const valid = req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === config.metaVerifyToken;
+app.get("/webhooks/meta", async (req, res) => {
+  const settings = await getMessengerSettings();
+  if (!settings.verifyToken) return res.status(503).send("Meta verify token is not configured");
+  const valid = req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === settings.verifyToken;
   if (valid) return res.status(200).send(req.query["hub.challenge"]);
   res.sendStatus(403);
 });
 
-function verifyMetaSignature(req: express.Request) {
-  if (!config.metaAppSecret) return process.env.NODE_ENV !== "production";
+function verifyMetaSignature(req: express.Request, appSecret: string) {
+  if (!appSecret) return process.env.NODE_ENV !== "production";
   const signature = req.header("x-hub-signature-256");
   if (!signature || !Buffer.isBuffer((req as any).rawBody)) return false;
-  const expected = `sha256=${crypto.createHmac("sha256", config.metaAppSecret).update((req as any).rawBody).digest("hex")}`;
+  const expected = `sha256=${crypto.createHmac("sha256", appSecret).update((req as any).rawBody).digest("hex")}`;
   const actualBytes = Buffer.from(signature); const expectedBytes = Buffer.from(expected);
   return actualBytes.length === expectedBytes.length && crypto.timingSafeEqual(actualBytes, expectedBytes);
 }
 
 app.post("/webhooks/meta", async (req, res) => {
-  if (!verifyMetaSignature(req)) return res.sendStatus(401);
+  const settings = await getMessengerSettings();
+  if (!verifyMetaSignature(req, settings.appSecret)) return res.sendStatus(401);
   if (req.body.object !== "page") return res.sendStatus(404);
   res.sendStatus(200);
   try { for (const message of parseMetaWebhook(req.body)) await ingestMessage(message); }
@@ -455,8 +561,9 @@ app.post("/webhooks/kalemlywa", async (req, res) => {
 });
 
 app.post("/webhooks/telegram", async (req, res) => {
-  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
-  if (secret && req.header("x-telegram-bot-api-secret-token") !== secret) return res.sendStatus(401);
+  const settings = await getTelegramSettings();
+  if (!settings.webhookSecret && process.env.NODE_ENV === "production") return res.status(503).json({ error: "Telegram webhook secret is not configured" });
+  if (settings.webhookSecret && !secretMatches(settings.webhookSecret, req.header("x-telegram-bot-api-secret-token") || "")) return res.sendStatus(401);
   res.sendStatus(200);
   if (req.body.callback_query?.id) void answerTelegramCallback(String(req.body.callback_query.id)).catch((error) => console.warn("Telegram callback acknowledgement failed", error));
   try { for (const message of parseTelegramWebhook(req.body)) await ingestMessage(message); }
