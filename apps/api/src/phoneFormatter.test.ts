@@ -15,6 +15,11 @@ test("accepts international E.164 numbers and WhatsApp JIDs", () => {
   assert.equal(normalizePhoneNumber("0044 7911 123456"), "447911123456");
 });
 
+test("accepts international numbers with different country-code lengths", () => {
+  assert.equal(normalizePhoneNumber("+1 415 555 2671"), "14155552671");
+  assert.equal(normalizePhoneNumber("+91 98765 43210"), "919876543210");
+});
+
 test("rejects ambiguous non-Egyptian local numbers and non-person JIDs", () => {
   assert.throws(() => normalizePhoneNumber("02079460000"));
   assert.throws(() => normalizePhoneNumber("123456@g.us"));
