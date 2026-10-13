@@ -21,6 +21,10 @@ npm run dev
 
 Open `http://localhost:3000`. The API URL is also used for the Socket.IO connection. Configure the API's CORS policy to allow the frontend origin.
 
+## Railway deployment
+
+Use `/apps/web` as the service root and set the build-time `NEXT_PUBLIC_API_URL` to the public API origin. Set the API's `WEB_ORIGIN` to the frontend origin so browser requests and Socket.IO are allowed.
+
 ## Screens
 
 - `/login` - sign-in; routes users based on their account role.
