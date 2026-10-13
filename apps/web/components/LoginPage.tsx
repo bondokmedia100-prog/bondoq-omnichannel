@@ -62,5 +62,5 @@ export default function LoginPage() {
 }
 
 function Brand({ inverse = false }: { inverse?: boolean }) {
-  return <div className="flex items-center gap-3"><div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#ffc107] text-2xl font-black text-[#9f2024] shadow-md">ب</div><div><p className={`text-xl font-extrabold ${inverse ? "text-white" : "text-[#2d2522]"}`}>حلواني بندق</p><p className={`text-[10px] tracking-[.2em] ${inverse ? "text-white/55" : "text-stone-400"}`}>BONDOQ SWEETS</p></div></div>;
+  return <div className="flex items-center gap-3"><div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#ffc107] text-2xl font-black text-[#9f2024] shadow-md">ب</div><div><p className={`text-xl font-extrabold ${inverse ? "text-white" : "text-[#2d2522]"}`}>حلواني بندق</p><p className={`text-[10px] ${inverse ? "text-white/55" : "text-stone-400"}`}>حلويات تصنع لحظات جميلة</p></div></div>;
 }
