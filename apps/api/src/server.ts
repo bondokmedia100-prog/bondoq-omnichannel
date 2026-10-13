@@ -106,7 +106,8 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res) =>
 app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, res) => {
   const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: z.string().url().optional(), latitude: z.number().optional(), longitude: z.number().optional() }).safeParse(req.body);
   if (!parsed.success || (!parsed.data.text && parsed.data.kind === MessageKind.TEXT)) return res.status(400).json({ error: "الرسالة غير صالحة" });
-  if ([MessageKind.IMAGE, MessageKind.AUDIO, MessageKind.FILE].includes(parsed.data.kind) && !parsed.data.mediaUrl || parsed.data.kind === MessageKind.LOCATION && (parsed.data.latitude === undefined || parsed.data.longitude === undefined)) return res.status(400).json({ error: "يلزم إرفاق رابط الوسيط أو إحداثيات الموقع" });
+  const mediaKind = parsed.data.kind === MessageKind.IMAGE || parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.FILE;
+  if (mediaKind && !parsed.data.mediaUrl || parsed.data.kind === MessageKind.LOCATION && (parsed.data.latitude === undefined || parsed.data.longitude === undefined)) return res.status(400).json({ error: "يلزم إرفاق رابط الوسيط أو إحداثيات الموقع" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (req.user!.role === Role.AGENT && conversation.assignedAgentId !== req.user!.id) return res.status(403).json({ error: "ليس لديك صلاحية الرد على هذه المحادثة" });
