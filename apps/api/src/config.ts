@@ -16,7 +16,7 @@ export const config = {
   kalemlyWebhookSecret: process.env.KALEMLYWA_WEBHOOK_SECRET || "",
   kalemlyEncryptionKey: process.env.KALEMLYWA_CONFIG_ENCRYPTION_KEY || process.env.JWT_SECRET || "local-dev-only-change-me",
   metaAppSecret: process.env.META_APP_SECRET || "",
-  metaVerifyToken: required("META_VERIFY_TOKEN", process.env.NODE_ENV === "production" ? undefined : "bondoq-webhook-verify"),
+  metaVerifyToken: process.env.META_VERIFY_TOKEN || (process.env.NODE_ENV === "production" ? "" : "bondoq-webhook-verify"),
   metaPageToken: process.env.META_PAGE_ACCESS_TOKEN || "",
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || "",
   redisUrl: process.env.REDIS_URL || "redis://localhost:6379",
