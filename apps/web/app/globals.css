@@ -1,0 +1,29 @@
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+:root { color-scheme: light; --red: #d32f2f; --gold: #ffc107; --cream: #fffdf7; --ink: #25211f; --muted: #89827c; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #faf9f7; color: var(--ink); font-family: "Cairo", system-ui, sans-serif; }
+button, input, textarea, select { font: inherit; }
+button { cursor: pointer; }
+::selection { background: #ffecb3; }
+.panel { border: 1px solid #eee9e2; border-radius: 18px; background: white; box-shadow: 0 6px 24px rgba(67,45,31,.035); }
+.soft-scroll { scrollbar-width: thin; scrollbar-color: #ded8cf transparent; }
+.soft-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.soft-scroll::-webkit-scrollbar-thumb { background: #ded8cf; border-radius: 20px; }
+.sla-pulse { animation: pulse-red 1.2s ease-in-out infinite; }
+@keyframes pulse-red { 50% { box-shadow: 0 0 0 5px rgba(211,47,47,.13); } }
+.print-ticket { display: none; }
+@media print {
+  @page { margin: 8mm; }
+  body * { visibility: hidden !important; }
+  .print-ticket, .print-ticket * { visibility: visible !important; }
+  .print-ticket { display: block !important; position: fixed; inset: 0; width: 100%; padding: 8mm; background: white; color: #161616; font: 12pt/1.65 Arial, sans-serif; }
+  .print-ticket h1 { margin: 0 0 12px; font-size: 18pt; }
+  .print-ticket p { margin: 5px 0; }
+  .ticket-rule { margin: 10px 0; border-top: 1px dashed #777; }
+  .ticket-image img { display: block; max-width: 100%; max-height: 65mm; margin: 12px auto; object-fit: contain; }
+  .ticket-footer { text-align: center; font-size: 10pt; }
+}
+@media (max-width: 850px) { .agent-app { height: auto !important; min-height: 100dvh !important; overflow: visible !important; } .workspace-grid { grid-template-columns: minmax(0,1fr) !important; height: auto !important; min-height: 0 !important; overflow: visible !important; } .workspace-list { min-height: 290px; max-height: 360px; } .workspace-chat { height: min(74dvh,660px); min-height: 540px; } .workspace-profile { max-height: none; min-height: 320px; } }
