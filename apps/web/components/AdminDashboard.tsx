@@ -3,7 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Activity, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, CakeSlice, Check, Clock3, FileText, Headset, LogOut, MessageCircle, MoreHorizontal, QrCode, Search, Send, ShieldAlert, UserRound, Users, X } from "lucide-react";
+import { Activity, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, CakeSlice, Check, Clock3, Copy, FileText, Headset, LogOut, MessageCircle, MoreHorizontal, QrCode, Search, Send, ShieldAlert, UserRound, Users, X } from "lucide-react";
 import { API_URL, api, getToken } from "@/lib/api";
 import QRCode from "qrcode";
 import AccountSettingsModal from "./AccountSettingsModal";
@@ -155,7 +155,9 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
   const [message, setMessage] = useState("اختبار من نظام خدمة عملاء حلواني بندق");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
+    const [testing, setTesting] = useState(false);
+  const [webhookCopied, setWebhookCopied] = useState(false);
+  const webhookUrl = `${API_URL}/webhooks/kalemlywa`;
 
   useEffect(() => {
     api("/api/admin/integrations/kalemlywa").then((result) => {
@@ -190,6 +192,16 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
     } catch (error) { setNotice(error instanceof Error ? error.message : "فشل إرسال رسالة الاختبار"); }
     finally { setTesting(false); }
   }
+  async function copyWebhookUrl() {
+    try {
+      await navigator.clipboard.writeText(webhookUrl);
+      setWebhookCopied(true);
+      setNotice("تم نسخ رابط Webhook.");
+    } catch {
+      setWebhookCopied(false);
+      setNotice("تعذر النسخ تلقائيًا؛ حدد الرابط وانسخه يدويًا.");
+    }
+  }
 
   return <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/50 p-3 backdrop-blur-sm" onClick={onClose}>
     <section className="panel max-h-[94vh] w-full max-w-3xl overflow-y-auto p-5 sm:p-6" onClick={(event) => event.stopPropagation()}>
@@ -203,7 +215,7 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
             <label className="block text-xs font-bold text-stone-600">QR pairing payload<input value={qrCodePayload} onChange={(event) => setQrCodePayload(event.target.value)} placeholder="ألصق نص أو رابط QR من لوحة KalemlyWA" className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-xs font-normal outline-none focus:border-emerald-300" dir="ltr" /></label>
             <button disabled={saving || !settings} className="h-10 w-full rounded-xl bg-emerald-700 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{saving ? "جارٍ الحفظ..." : "حفظ الإعدادات"}</button>
           </form>
-          <div className="rounded-2xl border border-stone-200 bg-white p-4"><h3 className="text-xs font-extrabold">Webhook الوارد</h3><p className="mt-1 text-[10px] leading-5 text-stone-500">أضف العنوان أدناه في لوحة KalemlyWA، واضبط السر نفسه في متغير النشر `KALEMLYWA_WEBHOOK_SECRET`.</p><input readOnly value={`${API_URL}/webhooks/kalemlywa`} className="mt-2 h-9 w-full rounded-lg bg-stone-50 px-2 text-[10px] text-stone-600" dir="ltr"/><p className={`mt-2 text-[10px] font-bold ${settings?.webhookSecretConfigured ? "text-emerald-700" : "text-amber-700"}`}>{settings?.webhookSecretConfigured ? "سر webhook مضبوط على الخادم" : "سر webhook غير مضبوط على الخادم"}</p></div>
+                    <div className="rounded-2xl border border-stone-200 bg-white p-4"><h3 className="text-xs font-extrabold">Webhook الوارد</h3><p className="mt-1 text-[10px] leading-5 text-stone-500">أضف العنوان أدناه في لوحة KalemlyWA، واضبط السر نفسه في متغير النشر `KALEMLYWA_WEBHOOK_SECRET`.</p><div className="mt-2 flex flex-col gap-2 sm:flex-row"><div dir="ltr" className="min-w-0 flex-1 select-all break-all rounded-lg bg-stone-50 px-3 py-2 font-mono text-xs leading-5 text-stone-700">{webhookUrl}</div><button type="button" onClick={copyWebhookUrl} className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-3 text-xs font-bold text-white hover:bg-emerald-800" aria-label="نسخ رابط Webhook">{webhookCopied ? <Check size={14} /> : <Copy size={14} />}{webhookCopied ? "تم النسخ" : "نسخ الرابط"}</button></div><p className={`mt-2 text-[10px] font-bold ${settings?.webhookSecretConfigured ? "text-emerald-700" : "text-amber-700"}`}>{settings?.webhookSecretConfigured ? "سر webhook مضبوط على الخادم" : "سر webhook غير مضبوط على الخادم"}</p></div>
         </div>
         <div className="space-y-4">
           <div className="grid min-h-56 place-items-center rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-center">{qrImage ? <div><img src={qrImage} alt="رمز ربط واتساب" className="mx-auto h-52 w-52"/><p className="mt-2 text-[10px] text-stone-500">افتح WhatsApp المرتبط وامسح الرمز لتوصيل الجهاز.</p></div> : <div className="max-w-xs text-xs leading-6 text-stone-400"><QrCode size={28} className="mx-auto mb-2"/>لا توجد حمولة QR محفوظة. أدخل النص الذي يوفّره KalemlyWA يدويًا. لم يتم افتراض endpoint غير موثق لجلب الرمز.</div>}</div>
