@@ -1,0 +1,277 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  SUPERVISOR
+  AGENT
+}
+
+enum Department {
+  CAKES
+  DELIVERY
+  CUSTOMER_CARE
+  QUALITY
+}
+
+enum Presence {
+  ONLINE
+  BUSY
+  BREAK
+  OFFLINE
+}
+
+enum Channel {
+  WHATSAPP
+  MESSENGER
+  TELEGRAM
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  QUEUED
+  RESOLVED
+  CLOSED
+}
+
+enum ProductCategory {
+  EASTERN
+  WESTERN
+  CAKES
+}
+
+enum OrderStatus {
+  DRAFT
+  CONFIRMED
+  PREPARING
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  COMPLETED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL
+}
+
+enum MessageKind {
+  TEXT
+  IMAGE
+  AUDIO
+  LOCATION
+  FILE
+  SYSTEM
+}
+
+model User {
+  id              String         @id @default(cuid())
+  email           String         @unique
+  username        String         @unique
+  name            String
+  passwordHash    String
+  authVersion     Int            @default(0)
+  role            Role           @default(AGENT)
+  department      Department?
+  presence        Presence       @default(OFFLINE)
+  isActive        Boolean        @default(true)
+  lastSeenAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  assignedChats   Conversation[] @relation("AssignedAgent")
+  sessions        AgentSession[]
+  auditLogs       AuditLog[]
+  whisperNotes    WhisperNote[]
+  sentMessages    Message[]       @relation("MessageAuthor")
+  csatSurveys     CsatSurvey[]    @relation("CsatAgent")
+}
+
+model AgentSession {
+  id         String    @id @default(cuid())
+  userId     String
+  startedAt  DateTime  @default(now())
+  endedAt    DateTime?
+  startState Presence  @default(ONLINE)
+  endState   Presence?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startedAt])
+}
+
+model Customer {
+  id                 String         @id @default(cuid())
+  name               String?
+  phone              String?
+  email              String?
+  avatarUrl          String?
+  lastLatitude       Float?
+  lastLongitude      Float?
+  channelIdentifiers Json           @default("{}")
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  conversations      Conversation[]
+  orders             OrderDetails[]
+}
+
+model Conversation {
+  id                    String             @id @default(cuid())
+  customerId            String
+  channel               Channel
+  externalConversationId String
+  externalCustomerId    String
+  status                ConversationStatus @default(OPEN)
+  assignedAgentId       String?
+  subject               String?
+  unreadCount           Int                @default(0)
+  lastMessageAt         DateTime           @default(now())
+  lastAgentResponseAt   DateTime?
+  firstResponseAt       DateTime?
+  slaBreachedAt         DateTime?
+  lastInboundAt         DateTime?
+  awaitingRouting       Boolean            @default(false)
+  routingDepartment     Department?
+  isComplaint           Boolean            @default(false)
+  closedAt              DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+  customer              Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  assignedAgent         User?              @relation("AssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  messages              Message[]
+  whisperNotes          WhisperNote[]
+  orderDetails          OrderDetails[]
+  auditLogs             AuditLog[]
+  csatSurvey            CsatSurvey?
+
+  @@unique([channel, externalConversationId])
+  @@index([assignedAgentId, status, lastMessageAt])
+  @@index([status, slaBreachedAt])
+}
+
+model Message {
+  id             String           @id @default(cuid())
+  conversationId String
+  authorId       String?
+  direction      MessageDirection
+  kind           MessageKind      @default(TEXT)
+  text           String?
+  mediaUrl       String?
+  latitude       Float?
+  longitude      Float?
+  externalId     String?          @unique
+  metadata       Json             @default("{}")
+  transcription  String?          @db.Text
+  productId      String?
+  createdAt      DateTime         @default(now())
+  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author         User?            @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  product        Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+  cakeReferenceOrders OrderDetails[] @relation("CakeReferenceImage")
+
+  @@index([conversationId, createdAt])
+}
+
+model WhisperNote {
+  id             String       @id @default(cuid())
+  conversationId String
+  authorId       String
+  text           String
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author         User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model OrderDetails {
+  id             String       @id @default(cuid())
+  customerId     String
+  conversationId String?
+  product        String?
+  size           String?
+  filling        String?
+  cakeMessage    String?
+  deliveryAt     DateTime?
+  deliveryAddress String?
+  notes          String?
+  price          Decimal?     @db.Decimal(10, 2)
+  currency       String       @default("EGP")
+  referenceImageMessageId String?
+  status         OrderStatus  @default(DRAFT)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  customer       Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  referenceImage Message?     @relation("CakeReferenceImage", fields: [referenceImageMessageId], references: [id], onDelete: SetNull)
+
+  @@index([customerId, createdAt])
+}
+
+model IntegrationSetting {
+  id                       String   @id
+  endpoint                 String
+  instanceId               String?
+  apiKeyCiphertext         String?  @db.Text
+  qrCodePayloadCiphertext  String?  @db.Text
+  updatedAt                DateTime @updatedAt
+}
+
+model Product {
+  id          String          @id @default(cuid())
+  name        String
+  category    ProductCategory
+  price       Decimal         @db.Decimal(10, 2)
+  imageUrl    String?
+  description String?         @db.Text
+  isAvailable Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  messages    Message[]
+
+  @@index([category, isAvailable])
+}
+
+model CsatSurvey {
+  id             String       @id @default(cuid())
+  conversationId String       @unique
+  agentId        String?
+  rating         Int?
+  requestedAt    DateTime     @default(now())
+  ratedAt        DateTime?
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agent          User?        @relation("CsatAgent", fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([agentId, ratedAt])
+  @@index([rating, ratedAt])
+}
+
+model AuditLog {
+  id             String       @id @default(cuid())
+  actorId        String?
+  conversationId String?
+  action         String
+  details        Json         @default("{}")
+  createdAt      DateTime     @default(now())
+  actor          User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([conversationId, createdAt])
+}
+
+model CannedResponse {
+  id        String   @id @default(cuid())
+  shortcut  String   @unique
+  title     String
+  content   String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
