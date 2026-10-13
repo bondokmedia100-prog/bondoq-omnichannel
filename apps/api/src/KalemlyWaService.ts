@@ -3,7 +3,7 @@ import { Job, Queue, QueueEvents, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { prisma } from "./prisma";
 import { config } from "./config";
-import { formatEgyptianPhone } from "./egyptianPhoneFormatter";
+import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 
 const queueName = "kalemlywa-outbound";
 const redis = () => new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -78,7 +78,7 @@ export async function saveKalemlySettings(input: { authKey?: string; appKey?: st
 async function postMessage(input: KalemlyWaMessage) {
   const settings = await getKalemlySettings();
   if (!settings.authKey || !settings.appKey) throw new Error("أكمل authkey وappkey في إعدادات KalemlyWA أولًا");
-  const to = formatEgyptianPhone(input.to);
+  const to = normalizePhoneNumber(input.to);
   const endpoint = new URL(settings.endpoint);
   if (endpoint.protocol !== "https:" || endpoint.hostname !== "whatsapp.kalemly.com") throw new Error("KalemlyWA endpoint must use the verified HTTPS host whatsapp.kalemly.com");
   const headers = { "Content-Type": "application/json" };
