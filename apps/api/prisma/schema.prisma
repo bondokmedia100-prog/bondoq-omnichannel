@@ -45,6 +45,12 @@ enum ProductCategory {
   EASTERN
   WESTERN
   CAKES
+  BAKERY
+  KAHK
+  CHOCOLATE
+  MOULID
+  OCCASIONS
+  MIX_BONDOQ
 }
 
 enum OrderStatus {
@@ -220,6 +226,8 @@ model IntegrationSetting {
   instanceId               String?
   apiKeyCiphertext         String?  @db.Text
   qrCodePayloadCiphertext  String?  @db.Text
+  appSecretCiphertext      String?  @db.Text
+  verifyTokenCiphertext    String?  @db.Text
   updatedAt                DateTime @updatedAt
 }
 
