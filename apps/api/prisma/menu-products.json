@@ -1,0 +1,610 @@
+[
+  {
+    "id": "menu-1-01",
+    "name": "علبة حجازية بالحبة الكاملة 400جرام",
+    "category": "EASTERN",
+    "price": 90,
+    "imageFile": "13d5e9cc72915ecfcffe.webp",
+    "description": null
+  },
+  {
+    "id": "menu-1-02",
+    "name": "علبة حلاوة شعر",
+    "category": "EASTERN",
+    "price": 35,
+    "imageFile": "2047fa8544929831c08e.png",
+    "description": null
+  },
+  {
+    "id": "menu-1-03",
+    "name": "فورمة كنافة نابلسية قشطة",
+    "category": "EASTERN",
+    "price": 65,
+    "imageFile": "dea1b10cbf9cf1bf7df8.png",
+    "description": "السعر يبدأ من 65 جنيه مصري"
+  },
+  {
+    "id": "menu-1-04",
+    "name": "فورمة كنافة نابلسية جبنة",
+    "category": "EASTERN",
+    "price": 80,
+    "imageFile": "3b4fafdcdc61ea94639d.png",
+    "description": "السعر يبدأ من 80 جنيه مصري"
+  },
+  {
+    "id": "menu-1-05",
+    "name": "قرص مشبك دمياطي",
+    "category": "EASTERN",
+    "price": 15,
+    "imageFile": "e9a3189781312ecc904e.png",
+    "description": "السعر يبدأ من 15 جنيه مصري"
+  },
+  {
+    "id": "menu-1-06",
+    "name": "علبة حمص مقشر",
+    "category": "EASTERN",
+    "price": 50,
+    "imageFile": "121dbf33788b438ba5dd.png",
+    "description": null
+  },
+  {
+    "id": "menu-1-07",
+    "name": "علبة جلاش مكسرات",
+    "category": "EASTERN",
+    "price": 95,
+    "imageFile": "0cf38ac1553ff44fabfa.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-1-08",
+    "name": "علبة جلاش كريمة",
+    "category": "EASTERN",
+    "price": 70,
+    "imageFile": "b3820a774233d01afb2b.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-1-09",
+    "name": "شكلمة كريز",
+    "category": "EASTERN",
+    "price": 115,
+    "imageFile": "4d778154f8b76dd37147.jpg",
+    "description": "السعر يبدأ من 115 جنيه مصري"
+  },
+  {
+    "id": "menu-1-10",
+    "name": "بسيمة مكسرات",
+    "category": "EASTERN",
+    "price": 68,
+    "imageFile": "d8e51d8643f7b388c570.jpg",
+    "description": "السعر يبدأ من 68 جنيه مصري"
+  },
+  {
+    "id": "menu-2-01",
+    "name": "ميني تيراميسو مانجو",
+    "category": "WESTERN",
+    "price": 60,
+    "imageFile": "e43cd30d3b5e68890109.webp",
+    "description": null
+  },
+  {
+    "id": "menu-2-02",
+    "name": "تارت مانجو",
+    "category": "WESTERN",
+    "price": 32,
+    "imageFile": "242f763dcdd5bb40dcdd.webp",
+    "description": null
+  },
+  {
+    "id": "menu-2-03",
+    "name": "ميني تورتة مانجو",
+    "category": "WESTERN",
+    "price": 60,
+    "imageFile": "72951627c6008af2d8d7.webp",
+    "description": null
+  },
+  {
+    "id": "menu-2-04",
+    "name": "تيراميسو مانجو لارج",
+    "category": "WESTERN",
+    "price": 180,
+    "imageFile": "8dd454396971e7579398.webp",
+    "description": null
+  },
+  {
+    "id": "menu-2-05",
+    "name": "تورتةهاف بستاشيو & مانجو داير شرايح شوكليت",
+    "category": "WESTERN",
+    "price": 425,
+    "imageFile": "dcd8805e39336a59ed30.jpg",
+    "description": "السعر يبدأ من 425 جنيه مصري"
+  },
+  {
+    "id": "menu-2-06",
+    "name": "تورته هاف نوتيلا &مانجو داير شرايح شوكليت",
+    "category": "WESTERN",
+    "price": 375,
+    "imageFile": "ac0d82c63f7c186942d3.jpg",
+    "description": "السعر يبدأ من 375 جنيه مصري"
+  },
+  {
+    "id": "menu-2-07",
+    "name": "تورتة هاف مانجو & لوتس داير شرايح شوكليت",
+    "category": "WESTERN",
+    "price": 375,
+    "imageFile": "3c60b4cd3196821a2a58.jpg",
+    "description": "السعر يبدأ من 375 جنيه مصري"
+  },
+  {
+    "id": "menu-2-08",
+    "name": "تورتة هاف شوكليت مانجو داير شرايح شوكليت",
+    "category": "WESTERN",
+    "price": 375,
+    "imageFile": "07355a0af4292dd8efad.jpg",
+    "description": "السعر يبدأ من 375 جنيه مصري"
+  },
+  {
+    "id": "menu-2-09",
+    "name": "تورتة مانجو داير شرايح شوكليت",
+    "category": "WESTERN",
+    "price": 280,
+    "imageFile": "c161c0ec70c2d3a96da8.jpg",
+    "description": "السعر يبدأ من 280 جنيه مصري"
+  },
+  {
+    "id": "menu-2-10",
+    "name": "تورتة مانجو داير جرانا مكسرات",
+    "category": "WESTERN",
+    "price": 260,
+    "imageFile": "4216ca7a7a75a694d1de.jpg",
+    "description": "السعر يبدأ من 260 جنيه مصري"
+  },
+  {
+    "id": "menu-3-01",
+    "name": "كب كيك مانجو",
+    "category": "BAKERY",
+    "price": 24,
+    "imageFile": "6bf3951416f91f5faa97.webp",
+    "description": null
+  },
+  {
+    "id": "menu-3-02",
+    "name": "كرواسون مانجو",
+    "category": "BAKERY",
+    "price": 24,
+    "imageFile": "ca38dac516f8ad7850c9.webp",
+    "description": null
+  },
+  {
+    "id": "menu-3-03",
+    "name": "دنش مانجو",
+    "category": "BAKERY",
+    "price": 23,
+    "imageFile": "9c7da023f6bcbcaf883f.webp",
+    "description": null
+  },
+  {
+    "id": "menu-3-04",
+    "name": "دوناتس مانجو",
+    "category": "BAKERY",
+    "price": 23,
+    "imageFile": "48484c90031ccfc192c7.webp",
+    "description": null
+  },
+  {
+    "id": "menu-3-05",
+    "name": "كرواسون جبنة بالفلفل",
+    "category": "BAKERY",
+    "price": 23,
+    "imageFile": "bcd6e8ee12cee5a6a5f3.png",
+    "description": null
+  },
+  {
+    "id": "menu-3-06",
+    "name": "علبة ميني كرواسون شيكولاتة",
+    "category": "BAKERY",
+    "price": 100,
+    "imageFile": "863e19d7a6c7a6588c11.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-3-07",
+    "name": "علبة قراقيش حليب",
+    "category": "BAKERY",
+    "price": 55,
+    "imageFile": "f9a0f22ab6eaba2b3bba.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-3-08",
+    "name": "علبة قرص سادة",
+    "category": "BAKERY",
+    "price": 55,
+    "imageFile": "d0af0572c0978b19e7a3.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-3-09",
+    "name": "كب كيك ريد فيلفت",
+    "category": "BAKERY",
+    "price": 24,
+    "imageFile": "0209e17fa016af2e3558.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-3-10",
+    "name": "علبة بقسماط سمسم",
+    "category": "BAKERY",
+    "price": 50,
+    "imageFile": "f8c2a07849cbdb57d075.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-4-01",
+    "name": "علبه ميكس نواعم VIP",
+    "category": "KAHK",
+    "price": 950,
+    "imageFile": "e055e694ebb1515485ac.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-4-02",
+    "name": "معمول عجوة",
+    "category": "KAHK",
+    "price": 95,
+    "imageFile": "0743fd5e72a08aa8e097.jpg",
+    "description": "السعر يبدأ من 95 جنيه مصري"
+  },
+  {
+    "id": "menu-4-03",
+    "name": "بسكويت كوفي",
+    "category": "KAHK",
+    "price": 120,
+    "imageFile": "a5eca82e3459d4513461.jpg",
+    "description": "السعر يبدأ من 120 جنيه مصري"
+  },
+  {
+    "id": "menu-4-04",
+    "name": "بسكويت بالقرفه",
+    "category": "KAHK",
+    "price": 120,
+    "imageFile": "70d96024b254d11b5ec5.jpg",
+    "description": "السعر يبدأ من 120 جنيه مصري"
+  },
+  {
+    "id": "menu-4-05",
+    "name": "بسكويت بالشيكولاته",
+    "category": "KAHK",
+    "price": 120,
+    "imageFile": "20d667e43ddf1beb3194.jpg",
+    "description": "السعر يبدأ من 120 جنيه مصري"
+  },
+  {
+    "id": "menu-4-06",
+    "name": "كحك لوز",
+    "category": "KAHK",
+    "price": 155,
+    "imageFile": "05d8681e04d152fd4ee6.jpg",
+    "description": "السعر يبدأ من 155 جنيه مصري"
+  },
+  {
+    "id": "menu-4-07",
+    "name": "كحك بندق",
+    "category": "KAHK",
+    "price": 160,
+    "imageFile": "0ee4ccce7948e3ad2506.webp",
+    "description": "السعر يبدأ من 160 جنيه مصري"
+  },
+  {
+    "id": "menu-4-08",
+    "name": "بسكويت جوز هند",
+    "category": "KAHK",
+    "price": 120,
+    "imageFile": "27fb843492dae8c8961c.jpg",
+    "description": "السعر يبدأ من 120 جنيه مصري"
+  },
+  {
+    "id": "menu-4-09",
+    "name": "بسكويت فانيليا",
+    "category": "KAHK",
+    "price": 120,
+    "imageFile": "856d71b595c1e636e7bd.jpg",
+    "description": "السعر يبدأ من 120 جنيه مصري"
+  },
+  {
+    "id": "menu-4-10",
+    "name": "بسكويت نشادر",
+    "category": "KAHK",
+    "price": 120,
+    "imageFile": "1a6fbd42bb4b4c55cc4f.jpg",
+    "description": "السعر يبدأ من 120 جنيه مصري"
+  },
+  {
+    "id": "menu-5-01",
+    "name": "سبيكه مكسرات",
+    "category": "CHOCOLATE",
+    "price": 88,
+    "imageFile": "e772e076627b2d6671fa.jpg",
+    "description": "السعر يبدأ من 88 جنيه مصري"
+  },
+  {
+    "id": "menu-5-02",
+    "name": "جوز هند كارولينا",
+    "category": "CHOCOLATE",
+    "price": 75,
+    "imageFile": "c588593b4a5eb46f1ffa.jpg",
+    "description": "السعر يبدأ من 75 جنيه مصري"
+  },
+  {
+    "id": "menu-5-03",
+    "name": "مربع مكسرات كارولينا",
+    "category": "CHOCOLATE",
+    "price": 88,
+    "imageFile": "92904ef00424df388d41.jpg",
+    "description": "السعر يبدأ من 88 جنيه مصري"
+  },
+  {
+    "id": "menu-5-04",
+    "name": "طبيعي مكسرات",
+    "category": "CHOCOLATE",
+    "price": 88,
+    "imageFile": "817bfbd2339e9263a48d.jpg",
+    "description": "السعر يبدأ من 88 جنيه مصري"
+  },
+  {
+    "id": "menu-5-05",
+    "name": "هاف بول كارولينا",
+    "category": "CHOCOLATE",
+    "price": 88,
+    "imageFile": "3d7c38323f5f5108d049.jpg",
+    "description": "السعر يبدأ من 88 جنيه مصري"
+  },
+  {
+    "id": "menu-5-06",
+    "name": "قلب لوز كارولينا",
+    "category": "CHOCOLATE",
+    "price": 80,
+    "imageFile": "d1ecb21c565592731f63.jpg",
+    "description": "السعر يبدأ من 80 جنيه مصري"
+  },
+  {
+    "id": "menu-5-07",
+    "name": "لوتس كارولينا",
+    "category": "CHOCOLATE",
+    "price": 80,
+    "imageFile": "d4016f2dff07c6d76d70.jpg",
+    "description": "السعر يبدأ من 80 جنيه مصري"
+  },
+  {
+    "id": "menu-5-08",
+    "name": "اوريو كارولينا",
+    "category": "CHOCOLATE",
+    "price": 80,
+    "imageFile": "f1a476eafe8c1520da30.jpg",
+    "description": "السعر يبدأ من 80 جنيه مصري"
+  },
+  {
+    "id": "menu-5-09",
+    "name": "جذع سادة كارولينا",
+    "category": "CHOCOLATE",
+    "price": 64,
+    "imageFile": "240a804f9b0befda7793.jpg",
+    "description": "السعر يبدأ من 64 جنيه مصري"
+  },
+  {
+    "id": "menu-5-10",
+    "name": "مونشيرى سادة كارولينا",
+    "category": "CHOCOLATE",
+    "price": 64,
+    "imageFile": "4e2a27d1515216e2eb1c.jpg",
+    "description": "السعر يبدأ من 64 جنيه مصري"
+  },
+  {
+    "id": "menu-6-01",
+    "name": "علبة مشكل فواخر خشب 1 كيلو",
+    "category": "MOULID",
+    "price": 370,
+    "imageFile": "e35c1282d58f509cc7b3.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-02",
+    "name": "علبة مشكل سيلفر 2 كيلو",
+    "category": "MOULID",
+    "price": 320,
+    "imageFile": "ac171b2b1f0092b088bb.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-03",
+    "name": "علبة مشكل سيلفر كيلو ونص",
+    "category": "MOULID",
+    "price": 240,
+    "imageFile": "16af9e00195648226223.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-04",
+    "name": "علبة مشكل كروكاند (علفات)",
+    "category": "MOULID",
+    "price": 200,
+    "imageFile": "01589030ce61b5c6e00e.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-05",
+    "name": "علبة مشكل فواخر جلد 2 كيلو",
+    "category": "MOULID",
+    "price": 720,
+    "imageFile": "cde92aafe1abb50019bc.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-06",
+    "name": "علبة مشكل سيلفر نصف كيلو",
+    "category": "MOULID",
+    "price": 80,
+    "imageFile": "edfecb2dde5c9b091a07.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-07",
+    "name": "علبة مشكل فواخر جلد 1كيلو",
+    "category": "MOULID",
+    "price": 370,
+    "imageFile": "259c02bcd21f832387b8.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-08",
+    "name": "علبة مشكل جولد 1 كيلو",
+    "category": "MOULID",
+    "price": 205,
+    "imageFile": "8e4a407bb9c06078f18e.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-09",
+    "name": "علبة مشكل سيلفر 1كيلو",
+    "category": "MOULID",
+    "price": 160,
+    "imageFile": "dac444adce1c3275a87e.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-6-10",
+    "name": "قشطة مكسرات",
+    "category": "MOULID",
+    "price": 59,
+    "imageFile": "c7edf55461f84cd192d5.jpg",
+    "description": "السعر يبدأ من 59 جنيه مصري"
+  },
+  {
+    "id": "menu-7-01",
+    "name": "جاتوه مناسبات فانيليا",
+    "category": "OCCASIONS",
+    "price": 15,
+    "imageFile": "c1865c4dcde2ab9c7895.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-7-02",
+    "name": "جاتوه مناسبات شوكولاتة",
+    "category": "OCCASIONS",
+    "price": 15,
+    "imageFile": "aaf5efe825a33f821f91.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-7-03",
+    "name": "قطعة باتيه مينى",
+    "category": "OCCASIONS",
+    "price": 5,
+    "imageFile": "0a3e94f9c4bc6e8b445e.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-7-04",
+    "name": "قطعة باتون ساليه",
+    "category": "OCCASIONS",
+    "price": 2,
+    "imageFile": "92e1c4e06df67981a32f.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-7-05",
+    "name": "قطعة جلاش سواريه",
+    "category": "OCCASIONS",
+    "price": 5,
+    "imageFile": "c88be6d87c5bf8c17a91.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-7-06",
+    "name": "قطعة مينى بيتزا",
+    "category": "OCCASIONS",
+    "price": 5,
+    "imageFile": "6c7c3919213869c80044.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-01",
+    "name": "علبة مشبك لبناني 4 قطع",
+    "category": "MIX_BONDOQ",
+    "price": 25,
+    "imageFile": "39d21ccf15fb9a9d82b9.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-02",
+    "name": "قشطوطة فراولة",
+    "category": "MIX_BONDOQ",
+    "price": 40,
+    "imageFile": "cc5b916c6ce2211f7e90.webp",
+    "description": null
+  },
+  {
+    "id": "menu-8-03",
+    "name": "زلابية شوكولاته",
+    "category": "MIX_BONDOQ",
+    "price": 30,
+    "imageFile": "b20bb7e6eea09d1d63ef.jpg",
+    "description": "السعر يبدأ من 30 جنيه مصري"
+  },
+  {
+    "id": "menu-8-04",
+    "name": "قشطوطة فادج",
+    "category": "MIX_BONDOQ",
+    "price": 40,
+    "imageFile": "a0eddf5818bad42b9fb9.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-05",
+    "name": "قشطوطة ريدفيلفت",
+    "category": "MIX_BONDOQ",
+    "price": 40,
+    "imageFile": "6362334a4315ac236692.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-06",
+    "name": "قشطوطة مانجو",
+    "category": "MIX_BONDOQ",
+    "price": 40,
+    "imageFile": "0f9a042824c8bbb3f4b5.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-07",
+    "name": "قشطوطة لوتس",
+    "category": "MIX_BONDOQ",
+    "price": 40,
+    "imageFile": "c0a4f18050bf16038763.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-08",
+    "name": "قشطوطة كراميل",
+    "category": "MIX_BONDOQ",
+    "price": 40,
+    "imageFile": "437495178c5eb7a51537.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-09",
+    "name": "طاجن ام على بالمكسرات",
+    "category": "MIX_BONDOQ",
+    "price": 45,
+    "imageFile": "801e095ccd34c8b310a0.jpg",
+    "description": null
+  },
+  {
+    "id": "menu-8-10",
+    "name": "طاجن تريليتشا",
+    "category": "MIX_BONDOQ",
+    "price": 45,
+    "imageFile": "795143346048c04939dc.jpg",
+    "description": null
+  }
+]
