@@ -9,9 +9,9 @@ const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
 export const slaQueue = new Queue("conversation-sla", { connection });
 
 export async function assignConversation(conversationId: string, department?: Department | null) {
-  const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
-  if (conversation.awaitingRouting) return conversation;
-  const targetDepartment = department ?? conversation.routingDepartment;
+  const currentConversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
+  if (currentConversation.awaitingRouting) return currentConversation;
+  const targetDepartment = department ?? currentConversation.routingDepartment;
   const agents = await prisma.user.findMany({
     where: { role: "AGENT", isActive: true, presence: Presence.ONLINE, ...(targetDepartment ? { department: targetDepartment } : {}) },
     select: { id: true },
