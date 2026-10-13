@@ -339,7 +339,8 @@ app.get("/api/canned-responses", agentGuard, async (_req: express.Request, res: 
 
 app.get("/api/admin/integrations/kalemlywa", adminGuard, async (_req: express.Request, res: express.Response) => {
   const settings = await getKalemlySettings();
-  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
+  const webhookSecret = config.kalemlyWebhookSecret || settings.appKey;
+  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookAuthConfigured: Boolean(webhookSecret), webhookUrlToken: webhookSecret ? kalemlyWebhookUrlToken(webhookSecret) : "" });
 });
 
 app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -347,7 +348,8 @@ app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedReque
   if (!parsed.success) return res.status(400).json({ error: "تحقق من authkey وappkey وحمولة QR" });
   const settings = await saveKalemlySettings(parsed.data);
   await audit(req.user!.id, "KALEMLYWA_SETTINGS_UPDATED", undefined, { authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodeUpdated: parsed.data.qrCodePayload !== undefined || Boolean(parsed.data.clearQrCode) });
-  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
+  const webhookSecret = config.kalemlyWebhookSecret || settings.appKey;
+  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookAuthConfigured: Boolean(webhookSecret), webhookUrlToken: webhookSecret ? kalemlyWebhookUrlToken(webhookSecret) : "" });
 });
 
 app.post("/api/admin/integrations/kalemlywa/test", adminGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -546,11 +548,34 @@ function secretMatches(expected: string, supplied: string) {
   return expectedBytes.length === suppliedBytes.length && crypto.timingSafeEqual(expectedBytes, suppliedBytes);
 }
 
+function kalemlyWebhookUrlToken(secret: string) {
+  return crypto.createHmac("sha256", secret).update("bondoq/kalemlywa/webhook-url/v1").digest("hex");
+}
+
+function kalemlyWebhookCredentials(req: express.Request) {
+  const authorization = req.header("authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  const payloads = [req.body, req.body?.data, req.body?.payload].filter((value) => value && typeof value === "object");
+  return [
+    req.header("x-kalemly-webhook-secret"),
+    req.header("x-webhook-secret"),
+    req.header("x-api-key"),
+    req.header("apikey"),
+    req.header("api-key"),
+    req.header("x-app-key"),
+    req.header("appkey"),
+    bearer,
+    typeof req.query.token === "string" ? req.query.token : undefined,
+    ...payloads.flatMap((payload) => [payload.appkey, payload.app_key, payload.apiKey, payload.api_key, payload.apikey, payload["api-key"]])
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
 app.post("/webhooks/kalemlywa", async (req, res) => {
-  const expected = config.kalemlyWebhookSecret;
-  if (!expected) return res.status(503).json({ error: "KalemlyWA webhook secret is not configured" });
-  const supplied = req.header("x-kalemly-webhook-secret") || req.header("x-webhook-secret") || "";
-  if (!secretMatches(expected, supplied)) return res.sendStatus(401);
+  const settings = await getKalemlySettings();
+  const expected = [config.kalemlyWebhookSecret, settings.appKey].filter((value): value is string => Boolean(value));
+  if (!expected.length) return res.status(503).json({ error: "KalemlyWA webhook credentials are not configured" });
+  const supplied = kalemlyWebhookCredentials(req);
+  if (!expected.some((credential) => supplied.some((value) => secretMatches(credential, value) || secretMatches(kalemlyWebhookUrlToken(credential), value)))) return res.sendStatus(401);
   try {
     for (const message of parseKalemlyWebhook(req.body)) await ingestMessage(message);
     res.sendStatus(200);
