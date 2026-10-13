@@ -406,7 +406,7 @@ app.patch("/api/admin/agents/:id", adminGuard, async (req: AuthedRequest, res: e
   res.json(user);
 });
 
-app.get("/api/admin/audit", adminGuard, async (req, res) => {
+app.get("/api/admin/audit", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const logs = await prisma.auditLog.findMany({ take: 100, orderBy: { createdAt: "desc" }, include: { actor: { select: { name: true } }, conversation: { select: { id: true, channel: true } } } });
   res.json(logs);
 });
