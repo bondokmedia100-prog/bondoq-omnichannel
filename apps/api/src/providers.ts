@@ -1,6 +1,6 @@
 import { Channel, Department, MessageKind } from "@prisma/client";
-import { config } from "./config";
 import { enqueueKalemlyMessage } from "./KalemlyWaService";
+import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
 import { formatEgyptianPhone } from "./egyptianPhoneFormatter";
 
 export type NormalizedInbound = {
@@ -47,33 +47,35 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
     });
   }
   if (input.channel === Channel.MESSENGER) {
-    if (!config.metaPageToken) throw new Error("Meta Page access token is not configured");
+    const settings = await getMessengerSettings();
+    if (!settings.pageAccessToken) throw new Error("Meta Page access token is not configured");
     const attachmentType = kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : "file";
     const message = kind === MessageKind.TEXT ? { text: input.text || "" }
       : kind === MessageKind.LOCATION ? { text: `موقع: https://maps.google.com/?q=${input.latitude},${input.longitude}` }
       : { attachment: { type: attachmentType, payload: { url: input.mediaUrl, is_reusable: true } } };
     const result = await postJson("https://graph.facebook.com/v21.0/me/messages", {
       recipient: { id: input.recipient }, messaging_type: "RESPONSE", message
-    }, config.metaPageToken);
+    }, settings.pageAccessToken);
     if (kind === MessageKind.IMAGE && input.text?.trim()) {
       try {
         await postJson("https://graph.facebook.com/v21.0/me/messages", {
           recipient: { id: input.recipient }, messaging_type: "RESPONSE", message: { text: input.text }
-        }, config.metaPageToken);
+        }, settings.pageAccessToken);
       } catch (error) {
         return { ...result, captionDelivery: "failed", captionError: error instanceof Error ? error.message : "unknown" };
       }
     }
     return result;
   }
-  if (!config.telegramToken) throw new Error("Telegram bot token is not configured");
+  const settings = await getTelegramSettings();
+  if (!settings.botToken) throw new Error("Telegram bot token is not configured");
   const method = kind === MessageKind.IMAGE ? "sendPhoto" : kind === MessageKind.AUDIO ? "sendAudio" : kind === MessageKind.FILE ? "sendDocument" : kind === MessageKind.LOCATION ? "sendLocation" : "sendMessage";
   const payload = kind === MessageKind.LOCATION ? { chat_id: input.recipient, latitude: input.latitude, longitude: input.longitude }
     : kind === MessageKind.IMAGE ? { chat_id: input.recipient, photo: input.mediaUrl, caption: input.text }
     : kind === MessageKind.AUDIO ? { chat_id: input.recipient, audio: input.mediaUrl, caption: input.text }
     : kind === MessageKind.FILE ? { chat_id: input.recipient, document: input.mediaUrl, caption: input.text }
     : { chat_id: input.recipient, text: input.text || "" };
-  const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
   if (!response.ok) throw new Error(`Telegram send failed (${response.status}): ${await response.text()}`);
   return response.json();
 }
@@ -90,14 +92,16 @@ export async function sendRoutingMenu(channel: Channel, recipient: string) {
     return sendToChannel({ channel, recipient: formatEgyptianPhone(recipient), text: prompt });
   }
   if (channel === Channel.MESSENGER) {
-    if (!config.metaPageToken) throw new Error("Meta Page access token is not configured");
+    const settings = await getMessengerSettings();
+    if (!settings.pageAccessToken) throw new Error("Meta Page access token is not configured");
     return postJson("https://graph.facebook.com/v21.0/me/messages", {
       recipient: { id: recipient }, messaging_type: "RESPONSE",
       message: { text: prompt, quick_replies: choices.map((item) => ({ content_type: "text", title: item.title, payload: item.id })) }
-    }, config.metaPageToken);
+    }, settings.pageAccessToken);
   }
-  if (!config.telegramToken) throw new Error("Telegram bot token is not configured");
-  const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/sendMessage`, {
+  const settings = await getTelegramSettings();
+  if (!settings.botToken) throw new Error("Telegram bot token is not configured");
+  const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: recipient, text: prompt, reply_markup: { inline_keyboard: [choices.map((item) => ({ text: item.title, callback_data: item.id }))] } })
   });
@@ -106,8 +110,9 @@ export async function sendRoutingMenu(channel: Channel, recipient: string) {
 }
 
 export async function answerTelegramCallback(callbackId: string) {
-  if (!config.telegramToken) return;
-  await fetch(`https://api.telegram.org/bot${config.telegramToken}/answerCallbackQuery`, {
+  const settings = await getTelegramSettings();
+  if (!settings.botToken) return;
+  await fetch(`https://api.telegram.org/bot${settings.botToken}/answerCallbackQuery`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callback_query_id: callbackId })
   });
 }
@@ -217,12 +222,13 @@ export function parseTelegramWebhook(body: any): NormalizedInbound[] {
 
 export async function fetchInboundMedia(channel: Channel, metadata: Record<string, unknown>, mediaUrl?: string) {
   let url = mediaUrl || String(metadata.attachmentUrl || "");
-  if (channel === Channel.TELEGRAM && metadata.fileId && config.telegramToken) {
-    const infoResponse = await fetch(`https://api.telegram.org/bot${config.telegramToken}/getFile?file_id=${encodeURIComponent(String(metadata.fileId))}`);
+  const telegramSettings = channel === Channel.TELEGRAM ? await getTelegramSettings() : null;
+  if (channel === Channel.TELEGRAM && metadata.fileId && telegramSettings?.botToken) {
+    const infoResponse = await fetch(`https://api.telegram.org/bot${telegramSettings.botToken}/getFile?file_id=${encodeURIComponent(String(metadata.fileId))}`);
     if (!infoResponse.ok) throw new Error(`Telegram file lookup failed (${infoResponse.status})`);
     const info = await infoResponse.json() as { result?: { file_path?: string } };
     if (!info.result?.file_path) throw new Error("Telegram file path is unavailable");
-    url = `https://api.telegram.org/file/bot${config.telegramToken}/${info.result.file_path}`;
+    url = `https://api.telegram.org/file/bot${telegramSettings.botToken}/${info.result.file_path}`;
   }
   if (!url) throw new Error("Media URL is unavailable for this message");
   const mediaAddress = new URL(url);
