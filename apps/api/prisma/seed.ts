@@ -1,5 +1,6 @@
 import { PrismaClient, Department, ProductCategory, Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import menuProducts from "./menu-products.json";
 
 const prisma = new PrismaClient();
 
@@ -45,8 +46,19 @@ async function main() {
   for (const [shortcut, title, content] of responses) {
     await prisma.cannedResponse.upsert({ where: { shortcut }, update: { title, content }, create: { shortcut, title, content } });
   }
-  for (const product of products) {
-    await prisma.product.upsert({ where: { id: product.id }, update: product, create: product });
+  const webOrigin = (process.env.WEB_ORIGIN || "http://localhost:3000").replace(/\/+$/, "");
+  const fullCatalog = [
+    ...products,
+    ...menuProducts.map((product) => ({
+      ...product,
+      category: product.category as ProductCategory,
+      price: product.price.toFixed(2),
+      imageUrl: `${webOrigin}/menu/${product.imageFile}`
+    }))
+  ];
+  for (const product of fullCatalog) {
+    const { imageFile: _imageFile, ...record } = product as typeof product & { imageFile?: string };
+    await prisma.product.upsert({ where: { id: record.id }, update: record, create: record });
   }
   console.info("Bondoq demo accounts, canned responses, and sample products seeded.");
 }
