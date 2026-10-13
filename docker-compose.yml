@@ -56,6 +56,80 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     ports:
+      - "127.0.0.1:4000:4000"
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  postgres_data:
+  redis_data:
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bondoq
+      POSTGRES_USER: bondoq
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bondoq-local-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bondoq -d bondoq"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  api:
+    build: ./apps/api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 4000
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      DATABASE_URL: postgresql://bondoq:${POSTGRES_PASSWORD:-bondoq-local-password}@postgres:5432/bondoq?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-replace-with-a-long-random-secret-before-deploying}
+      BONDOQ_ADMIN_PASSWORD: ${BONDOQ_ADMIN_PASSWORD:-}
+      BONDOQ_AGENT_PASSWORD: ${BONDOQ_AGENT_PASSWORD:-}
+      BONDOQ_QUALITY_PASSWORD: ${BONDOQ_QUALITY_PASSWORD:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-bondoq-webhook-verify}
+      META_PAGE_ACCESS_TOKEN: ${META_PAGE_ACCESS_TOKEN:-}
+      KALEMLYWA_API_URL: ${KALEMLYWA_API_URL:-https://whatsapp.kalemly.com/api/send-message}
+      KALEMLYWA_API_KEY: ${KALEMLYWA_API_KEY:-}
+      KALEMLYWA_INSTANCE_ID: ${KALEMLYWA_INSTANCE_ID:-}
+      KALEMLYWA_WEBHOOK_SECRET: ${KALEMLYWA_WEBHOOK_SECRET:-}
+      KALEMLYWA_CONFIG_ENCRYPTION_KEY: ${KALEMLYWA_CONFIG_ENCRYPTION_KEY:-${JWT_SECRET:-replace-with-a-long-random-secret-before-deploying}}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_TRANSCRIPTION_MODEL: ${OPENAI_TRANSCRIPTION_MODEL:-whisper-1}
+    command: ["sh", "-c", "npx prisma db push && npm run db:seed && node dist/src/server.js"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
       - "4000:4000"
 
   web:
