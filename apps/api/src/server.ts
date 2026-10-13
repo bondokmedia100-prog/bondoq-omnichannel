@@ -339,15 +339,15 @@ app.get("/api/canned-responses", agentGuard, async (_req: express.Request, res: 
 
 app.get("/api/admin/integrations/kalemlywa", adminGuard, async (_req: express.Request, res: express.Response) => {
   const settings = await getKalemlySettings();
-  res.json({ endpoint: settings.endpoint, instanceId: settings.instanceId, apiKeyConfigured: Boolean(settings.apiKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
+  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
 });
 
 app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ apiKey: z.string().max(2048).optional(), instanceId: z.string().max(180).optional(), qrCodePayload: z.string().max(12000).optional(), clearQrCode: z.boolean().optional() }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "تحقق من مفتاح API ومعرّف الجهاز وحمولة QR" });
+  const parsed = z.object({ authKey: z.string().max(2048).optional(), appKey: z.string().max(2048).optional(), qrCodePayload: z.string().max(12000).optional(), clearQrCode: z.boolean().optional() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "تحقق من authkey وappkey وحمولة QR" });
   const settings = await saveKalemlySettings(parsed.data);
-  await audit(req.user!.id, "KALEMLYWA_SETTINGS_UPDATED", undefined, { apiKeyConfigured: Boolean(settings.apiKey), instanceIdConfigured: Boolean(settings.instanceId), qrCodeUpdated: parsed.data.qrCodePayload !== undefined || Boolean(parsed.data.clearQrCode) });
-  res.json({ endpoint: settings.endpoint, instanceId: settings.instanceId, apiKeyConfigured: Boolean(settings.apiKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
+  await audit(req.user!.id, "KALEMLYWA_SETTINGS_UPDATED", undefined, { authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodeUpdated: parsed.data.qrCodePayload !== undefined || Boolean(parsed.data.clearQrCode) });
+  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookSecretConfigured: Boolean(config.kalemlyWebhookSecret) });
 });
 
 app.post("/api/admin/integrations/kalemlywa/test", adminGuard, async (req: AuthedRequest, res: express.Response) => {
