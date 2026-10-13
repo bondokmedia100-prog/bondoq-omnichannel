@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { MessageCircle, Send, X } from "lucide-react";
+import { Check, Copy, MessageCircle, Send, X } from "lucide-react";
 import { API_URL, api } from "@/lib/api";
 
 type AnyRecord = Record<string, any>;
@@ -112,7 +112,18 @@ function TextField({ label, value, onChange, secret, configured, placeholder }: 
 }
 
 function WebhookInfo({ title, url, children }: { title: string; url: string; children: ReactNode }) {
-  return <div className="space-y-3 rounded-2xl border border-stone-200 bg-white p-4"><h3 className="text-sm font-extrabold">{title}</h3><input readOnly value={url} className="h-10 w-full rounded-lg bg-stone-50 px-2 text-[10px] text-stone-600" dir="ltr" /><div className="space-y-2 text-[10px] leading-5 text-stone-500">{children}</div></div>;
+  const [copyState, setCopyState] = useState<"copied" | "failed" | "">("");
+
+  async function copyUrl() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
+  return <div className="space-y-3 rounded-2xl border border-stone-200 bg-white p-4"><h3 className="text-sm font-extrabold">{title}</h3><div className="flex flex-col gap-2 sm:flex-row"><div dir="ltr" className="min-w-0 flex-1 select-all break-all rounded-lg bg-stone-50 px-3 py-2 font-mono text-xs leading-5 text-stone-700">{url}</div><button type="button" onClick={copyUrl} className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-blue-700 px-3 text-xs font-bold text-white hover:bg-blue-800" aria-label="نسخ رابط Webhook">{copyState === "copied" ? <Check size={14} /> : <Copy size={14} />}{copyState === "copied" ? "تم النسخ" : "نسخ الرابط"}</button></div>{copyState === "failed" && <p className="text-[10px] text-amber-700" role="status">تعذر النسخ تلقائيًا؛ حدّد الرابط أعلاه وانسخه يدويًا.</p>}<div className="space-y-2 text-[10px] leading-5 text-stone-500">{children}</div></div>;
 }
 
 function StatusLine({ label, ready }: { label: string; ready?: boolean }) {
