@@ -63,7 +63,7 @@ export default function AgentWorkspace() {
       connection.on("admin:viewing", (event) => setWatching(Boolean(event.viewing)));
       connection.on("sla:breached", () => setNotice("تنبيه: تجاوزت هذه المحادثة مهلة الرد المحددة."));
     }).catch(() => { localStorage.removeItem("bondoq_token"); router.replace("/login"); });
-    return () => connection?.disconnect();
+    return () => { connection?.disconnect(); };
   }, [router]);
 
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
