@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Archive, ArrowDown, ArrowLeft, CakeSlice, Check, CheckCircle2, Clock3, ImagePlus, MapPin, MessageCircle, MoreHorizontal, Paperclip, Phone, Printer, Search, Send, UserRound, Users } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, Bell, BellOff, CakeSlice, Check, CheckCircle2, Clock3, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, Paperclip, Phone, Printer, Search, Send, UserRound, Users } from "lucide-react";
 import { API_URL, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
 import AccountSettingsModal from "./AccountSettingsModal";
+import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
 const channels = [{ id: "ALL", label: "الكل" }, { id: "WHATSAPP", label: "واتساب" }, { id: "MESSENGER", label: "ماسنجر" }, { id: "TELEGRAM", label: "تليجرام" }];
@@ -33,45 +34,109 @@ export default function AgentWorkspace() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [now, setNow] = useState(Date.now());
   const [savedOrder, setSavedOrder] = useState<AnyRecord | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
+  const sendingRef = useRef(false);
+  const detailRequest = useRef(0);
+  const detailLoadingIdRef = useRef("");
+  const loadingMessagesRef = useRef(new Map<string, AnyRecord[]>());
+  const notifiedMessagesRef = useRef(new Set<string>());
+  const chatLoadRequest = useRef(0);
+  const socketRef = useRef<Socket | null>(null);
+  const activeIdRef = useRef("");
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const messageEndRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
   const [order, setOrder] = useState({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", referenceImageMessageId: "" });
 
-  async function loadChats() { try { setConversations(await api("/api/conversations")); } catch { /* auth redirect is handled by the session bootstrap */ } }
+  async function loadChats() {
+    const request = ++chatLoadRequest.current;
+    try { const chats = await api("/api/conversations"); if (request === chatLoadRequest.current) setConversations(chats); }
+    catch { /* auth redirect is handled by the session bootstrap */ }
+  }
   async function openChat(id: string) {
-    if (activeId && activeId !== id) socket?.emit("conversation:leave", activeId);
+    if (activeIdRef.current && activeIdRef.current !== id) socketRef.current?.emit("conversation:leave", activeIdRef.current);
+    if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", referenceImageMessageId: "" });
-    setActiveId(id); setNotice("");
-    try { setDetail(await api(`/api/conversations/${id}`)); setSavedOrder(null); socket?.emit("conversation:join", id); }
-    catch (error) { setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); }
+    const request = ++detailRequest.current;
+    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setActiveId(id); setDetail(null); setNotice("");
+    socketRef.current?.emit("conversation:join", id);
+    try {
+      const conversation = await api(`/api/conversations/${id}`);
+      if (request === detailRequest.current) {
+        const queuedMessages = loadingMessagesRef.current.get(id) || [];
+        loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
+        setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) }); setSavedOrder(null);
+      }
+    } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
 
   useEffect(() => {
     if (!getToken()) return router.replace("/login");
     let connection: Socket | undefined;
-    api("/api/auth/me").then(async (profile) => {
+    let current = true;
+    const initialize = async () => {
+      const profile = await api("/api/auth/me");
+      if (!current) return;
       if (profile.role !== "AGENT") return router.replace("/admin/dashboard");
       setUser(profile); setPresence(profile.presence);
-      const [chats, replies, catalog] = await Promise.all([api("/api/conversations"), api("/api/canned-responses"), api("/api/products")]);
-      setConversations(chats); setCanned(replies); setProducts(catalog);
-      if (chats.length) { setActiveId(chats[0].id); setDetail(await api(`/api/conversations/${chats[0].id}`)); }
-      connection = io(API_URL, { auth: { token: getToken() } }); setSocket(connection);
-      if (chats.length) connection.emit("conversation:join", chats[0].id);
+      connection = io(API_URL, { auth: { token: getToken() } }); socketRef.current = connection; setSocket(connection);
       connection.on("conversation:assigned", () => loadChats());
       connection.on("message:new", (event) => {
         loadChats();
         const conversationId = event.conversationId || event.conversation?.id;
         if (event.message?.direction === "INBOUND" && conversationId) {
-          setIncomingNotice({ conversationId, customerName: event.customer?.name || "عميل جديد" });
+          const messageId = event.message.id;
+          if (!messageId || !notifiedMessagesRef.current.has(messageId)) {
+            if (messageId) {
+              notifiedMessagesRef.current.add(messageId);
+              if (notifiedMessagesRef.current.size > 100) notifiedMessagesRef.current.delete(notifiedMessagesRef.current.values().next().value!);
+            }
+            playIncomingMessageTone();
+            setIncomingNotice({ conversationId, customerName: event.customer?.name || event.conversation?.customer?.name || "عميل جديد", channel: event.conversation?.channel, preview: messageNotificationPreview(event.message) });
+          }
         }
-        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: [...(old.messages || []), event.message], customer: event.customer || old.customer } : old);
+        if (event.message && conversationId === detailLoadingIdRef.current) {
+          loadingMessagesRef.current.set(conversationId, mergeMessages(loadingMessagesRef.current.get(conversationId) || [], event.message));
+        }
+        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: event.customer || old.customer } : old);
       });
-      connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((item: AnyRecord) => item.id === event.message.id ? event.message : item) } : old));
+      connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
       connection.on("whisper:new", (note) => { setDetail((old: AnyRecord) => old ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old); setNotice("أرسل المدير توجيهًا سريًا جديدًا"); });
       connection.on("admin:viewing", (event) => setWatching(Boolean(event.viewing)));
       connection.on("sla:breached", () => setNotice("تنبيه: تجاوزت هذه المحادثة مهلة الرد المحددة."));
-    }).catch(() => { localStorage.removeItem("bondoq_token"); router.replace("/login"); });
-    return () => { connection?.disconnect(); };
+      const [chats, replies, catalog] = await Promise.all([api("/api/conversations"), api("/api/canned-responses"), api("/api/products")]);
+      if (!current) return;
+      setConversations(chats); setCanned(replies); setProducts(catalog);
+      if (chats.length && !activeIdRef.current) {
+        const id = chats[0].id; const request = ++detailRequest.current;
+        activeIdRef.current = id; detailLoadingIdRef.current = id; setActiveId(id); connection.emit("conversation:join", id);
+        const conversation = await api(`/api/conversations/${id}`);
+        if (current && request === detailRequest.current) {
+          const queuedMessages = loadingMessagesRef.current.get(id) || [];
+          loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
+          setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) });
+        }
+      }
+    };
+    initialize().catch(() => { if (current) { localStorage.removeItem("bondoq_token"); router.replace("/login"); } });
+    return () => { current = false; if (socketRef.current === connection) socketRef.current = null; connection?.disconnect(); };
   }, [router]);
+
+  useEffect(() => { setSoundEnabled(isNotificationSoundEnabled()); }, []);
+
+  useEffect(() => {
+    if (!detail || !messageEndRef.current) return;
+    if (stickToBottom.current) {
+      messageEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+      setShowJumpToBottom(false);
+    } else setShowJumpToBottom(true);
+  }, [detail?.id, detail?.messages?.length]);
 
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
 
@@ -92,13 +157,76 @@ export default function AgentWorkspace() {
     try { const response = await api("/api/agents/me/presence", { method: "PATCH", body: JSON.stringify({ presence: next }) }); setPresence(response.presence); }
     catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث الحالة"); }
   }
-  async function submitReply() {
-    if (!text.trim() || !activeId) return;
+  async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; previewUrl?: string }, conversationId = activeId, alreadyLocked = false) {
+    if (!conversationId) return;
     if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل الرد."); return; }
-    try { await api(`/api/conversations/${activeId}/reply`, { method: "POST", body: JSON.stringify({ text: text.trim() }) }); setText(""); setShowCanned(false); setDetail(await api(`/api/conversations/${activeId}`)); loadChats(); }
-    catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال الرد. تحقق من إعداد ربط القناة."); }
+    if (!alreadyLocked && sendingRef.current) return;
+    if (!alreadyLocked) { sendingRef.current = true; setSending(true); }
+    const localId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const pendingMessage = { id: localId, conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind: payload.kind || "TEXT", text: payload.text, mediaAssetId: payload.mediaAssetId, localPreviewUrl: payload.previewUrl, deliveryStatus: "PENDING" };
+    setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old);
+    setText((current) => current === payload.text ? "" : current);
+    setShowCanned(false); setNotice("");
+    try {
+      const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId }) });
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => item.id !== localId), message) } : old);
+      void loadChats();
+    } catch (error) {
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== localId) } : old);
+      setText((current) => current || payload.text || "");
+      setNotice(error instanceof Error ? error.message : "تعذر إرسال الرد. تحقق من إعداد ربط القناة.");
+    } finally {
+      sendingRef.current = false; setSending(false);
+      if (payload.previewUrl) URL.revokeObjectURL(payload.previewUrl);
+    }
+  }
+  async function submitReply() {
+    const message = text.trim();
+    if (!message) return;
+    await deliverReply({ text: message });
   }
   function sendReply(event: FormEvent) { event.preventDefault(); void submitReply(); }
+  async function uploadAndSend(file: File) {
+    if (!activeId) return;
+    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل إرسال الملف."); return; }
+    if (sendingRef.current) return;
+    if (file.size > 12 * 1024 * 1024) { setNotice("حجم الملف الأقصى 12 ميجابايت."); return; }
+    const conversationId = activeId;
+    const extensionType: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", webm: file.type.startsWith("audio/") ? "audio/webm" : "application/octet-stream", aac: "audio/aac", pdf: "application/pdf", txt: "text/plain", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
+    const extension = file.name.split(".").pop()?.toLowerCase() || "";
+    const contentType = (file.type || extensionType[extension] || "").split(";")[0].toLowerCase();
+    const kind = contentType.startsWith("image/") ? "IMAGE" : contentType.startsWith("audio/") ? "AUDIO" : "FILE";
+    const previewUrl = kind === "IMAGE" || kind === "AUDIO" ? URL.createObjectURL(file) : undefined;
+    sendingRef.current = true; setNotice("جارٍ رفع الملف..."); setSending(true);
+    try {
+      const response = await fetch(`${API_URL}/api/media`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": contentType || "application/octet-stream", "X-File-Name": encodeURIComponent(file.name) }, body: file });
+      const uploaded = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(uploaded.error || `تعذر رفع الملف (${response.status})`);
+      setNotice("");
+      await deliverReply({ text: text.trim() || undefined, kind, mediaAssetId: uploaded.id, previewUrl }, conversationId, true);
+    } catch (error) {
+      sendingRef.current = false; setSending(false);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setNotice(error instanceof Error ? error.message : "تعذر رفع الملف أو إرساله");
+    }
+  }
+  async function toggleRecording() {
+    if (recorderRef.current && recording) { recorderRef.current.stop(); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const supported = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"].find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, supported ? { mimeType: supported } : undefined);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop()); recorderRef.current = null; setRecording(false);
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const extension = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
+        void uploadAndSend(new File([blob], `voice-note-${Date.now()}.${extension}`, { type: blob.type }));
+      };
+      recorderRef.current = recorder; recorder.start(); setRecording(true); setNotice("التسجيل جارٍ. اضغط الميكروفون مجددًا للإرسال.");
+    } catch { setNotice("تعذر بدء التسجيل. تحقق من إذن استخدام الميكروفون في المتصفح."); }
+  }
   async function saveOrder(event: FormEvent) {
     event.preventDefault(); if (!detail) return;
     try {
@@ -117,7 +245,7 @@ export default function AgentWorkspace() {
   }
   async function closeConversation() {
     if (!activeId) return;
-    try { await api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "CLOSED" }) }); await loadChats(); setDetail(null); setActiveId(""); }
+    try { await api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "CLOSED" }) }); ++detailRequest.current; detailLoadingIdRef.current = ""; loadingMessagesRef.current.delete(activeId); socketRef.current?.emit("conversation:leave", activeId); activeIdRef.current = ""; await loadChats(); setDetail(null); setActiveId(""); }
     catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إغلاق المحادثة"); }
   }
   async function resolveConversation() {
@@ -133,10 +261,8 @@ export default function AgentWorkspace() {
     try {
       const result = await api(`/api/conversations/${activeId}/products`, { method: "POST", body: JSON.stringify({ productId: product.id }) });
       setShowProducts(false);
-      if (result.captionDelivery === "failed") {
-        setText(`${product.name}\nالسعر: ${Number(product.price).toFixed(2)} جنيه${product.description ? `\n${product.description}` : ""}`);
-        setNotice("أُرسلت الصورة؛ تعذر إرسال السعر والوصف تلقائيًا، فجهزتهما في مربع الرد للإرسال يدويًا.");
-      } else setNotice(`تم إرسال ${product.name} للعميل.`);
+      if (result.imageDelivery === "failed") setNotice(`وصلت تفاصيل ${product.name} للعميل، لكن تعذر إرسال الصورة.`);
+      else setNotice(`تم إرسال تفاصيل وصورة ${product.name} للعميل.`);
       setDetail(await api(`/api/conversations/${activeId}`)); loadChats();
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال المنتج"); }
@@ -154,12 +280,12 @@ export default function AgentWorkspace() {
   return <main className="agent-app h-screen min-h-[700px] overflow-hidden bg-[#f6f5f2] text-stone-800">
     <header className="flex h-[68px] items-center justify-between border-b border-stone-200 bg-white px-4 sm:px-6">
       <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-[#d32f2f] text-lg font-black text-[#ffc107]">ب</div><div><b className="text-sm">حلواني بندق</b><p className="text-[10px] text-stone-400">مساحة العمل · محادثاتك المخصصة</p></div></div>
-      <div className="flex items-center gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
+      <div className="flex items-center gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-9 w-9 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={17} /> : <BellOff size={17} />}</button><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
     </header>
 
-    {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">رد جديد من {incomingNotice.customerName}</p><p className="mt-1 text-[10px] text-stone-500">وصلت رسالة عميل إلى إحدى محادثاتك.</p></div><button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button><button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
+     {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">رسالة جديدة من {incomingNotice.customerName}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "رسالة واردة"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div><button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button><button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
 
-    <section className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
+    <section data-chat-open={Boolean(activeId)} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
       <aside className="workspace-list panel flex min-h-0 flex-col overflow-hidden">
         <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{conversations.length} محادثة مسندة إليك</p></div><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="بحث عن عميل..." className="w-full bg-transparent text-xs outline-none" /></label>
           <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{channels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
@@ -169,25 +295,28 @@ export default function AgentWorkspace() {
       </aside>
 
       <section className="workspace-chat panel flex min-h-0 flex-col overflow-hidden bg-[#fffdf7]">
+        <input ref={uploadInputRef} type="file" className="hidden" accept="image/jpeg,image/png,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,audio/webm,audio/aac,application/pdf,text/plain,.doc,.docx,.xls,.xlsx" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadAndSend(file); }} />
         {detail ? <>
+            <button type="button" onClick={() => { ++detailRequest.current; detailLoadingIdRef.current = ""; loadingMessagesRef.current.delete(activeId); socketRef.current?.emit("conversation:leave", activeId); activeIdRef.current = ""; setActiveId(""); setDetail(null); setIncomingNotice(null); }} className="mobile-chat-back"><ArrowLeft size={16} /> رجوع للمحادثات</button>
             <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-stone-100 bg-white px-4"><div className="flex min-w-0 items-center gap-3"><Avatar name={detail.customer?.name || "ع"} src={detail.customer?.avatarUrl} /><div className="min-w-0"><h2 className="truncate text-sm font-extrabold">{detail.customer?.name || "عميل جديد"} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</h2><div className="flex items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}</div></div></div><div className="flex items-center gap-1"><button onClick={() => api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "PENDING" }) }).then(() => setNotice("تم تأجيل المحادثة للمتابعة لاحقًا."))} title="تأجيل" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><Clock3 size={17} /></button><button onClick={resolveConversation} title="تم الحل وإرسال استبيان الرضا" className="grid h-9 w-9 place-items-center rounded-lg text-emerald-600 hover:bg-emerald-50"><CheckCircle2 size={17} /></button><button onClick={closeConversation} title="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-emerald-50 hover:text-emerald-700"><Archive size={17} /></button><button title="خيارات" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><MoreHorizontal size={18} /></button></div></div>
            {metaChannel && <div className={`flex shrink-0 items-center gap-2 px-4 py-2 text-[10px] font-bold ${!metaWindowOpen ? "bg-red-50 text-red-700" : expiringSoon ? "bg-[#FFC107]/20 text-[#8c650a]" : "bg-emerald-50 text-emerald-700"}`}><Clock3 size={14} />{metaWindowOpen ? `نافذة Meta مفتوحة · متبقي ${formatCountdown(windowRemaining)}` : "انتهت نافذة الـ24 ساعة للرد الحر"}{detail.isComplaint && <span className="mr-auto rounded-full bg-red-100 px-2 py-0.5 text-red-700">تحويل للجودة</span>}</div>}
           {watching && <div className="flex h-9 shrink-0 items-center gap-2 border-b border-blue-100 bg-blue-50 px-4 text-[11px] font-semibold text-blue-700"><Users size={14} /> المدير يراقب هذه المحادثة معك الآن</div>}
           {notice && <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-100 bg-amber-50 px-4 py-2 text-[11px] text-amber-900"><span>{notice}</span><button onClick={() => setNotice("")}><span>×</span></button></div>}
-          <div className="soft-scroll flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-7">
+           <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-7">
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
              {(detail.messages || []).map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} onUseAsCakeImage={message.direction === "INBOUND" && message.kind === "IMAGE" ? () => { setOrder((old) => ({ ...old, referenceImageMessageId: message.id })); setNotice("أُرفقت صورة العميل في نموذج الطلب."); } : undefined} />)}
             {(detail.whisperNotes || []).map((note: AnyRecord) => <div key={`whisper-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-[#f0d786] bg-[#fff8e1] px-4 py-3 text-xs leading-6 text-[#755916]"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><CakeSlice size={14} /> توجيه سري من {note.author?.name || "المدير"}<span className="mr-auto text-[9px] font-normal text-[#aa8a36]">{ago(note.createdAt)}</span></div>{note.text}</div>)}
-            <div className="mt-auto" />
+             <div className="mt-auto" /><div ref={messageEndRef} />
+             {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
           <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
             {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
             {showCanned && <div className="soft-scroll absolute bottom-[calc(100%-4px)] right-4 z-10 max-h-60 w-[min(340px,calc(100%-32px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply) => <button key={reply.id} onClick={() => { setText(reply.content); setShowCanned(false); }} className="flex w-full flex-col rounded-xl px-3 py-2 text-right hover:bg-[#fff8e9]"><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
             <form onSubmit={sendReply}><div className="rounded-2xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea rows={2} value={text} disabled={!metaWindowOpen} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !showCanned) { e.preventDefault(); void submitReply(); } }} placeholder={metaWindowOpen ? "اكتب ردك هنا... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-32 min-h-[62px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
-                <div className="flex flex-wrap items-center justify-between gap-1 border-t border-stone-100 px-2 py-2"><div className="flex items-center gap-1"><button type="button" disabled={!metaWindowOpen} title="ردود جاهزة" onClick={() => { setText(text.startsWith("/") ? text : "/"); setShowCanned(!showCanned); }} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-[#bd8e21] hover:bg-amber-50 disabled:opacity-40">/ رد جاهز</button><button type="button" disabled={!metaWindowOpen} onClick={() => setShowProducts(true)} className="flex items-center gap-1 rounded-lg bg-[#fff8e9] px-2 py-1.5 text-[10px] font-bold text-[#9b7219] disabled:opacity-40"><CakeSlice size={14} /> إرسال منتج</button><button type="button" title="إرفاق صورة" onClick={() => setNotice("إرفاق وسائط جديدة يحتاج إعداد تخزين ملفات وربطه بمزود القناة.")} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><Paperclip size={16} /></button><button type="button" title="إضافة موقع" onClick={() => setNotice("إرسال الموقع متاح من واجهة API بعد تحديد الإحداثيات.")} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><MapPin size={16} /></button></div><button disabled={!text.trim() || !metaWindowOpen} className="flex h-9 items-center gap-2 rounded-xl bg-[#d32f2f] px-4 text-xs font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span className="hidden sm:inline">إرسال</span><Send size={15} /></button></div>
+                <div className="flex flex-wrap items-center justify-between gap-1 border-t border-stone-100 px-2 py-2"><div className="flex items-center gap-1"><button type="button" disabled={!metaWindowOpen} title="ردود جاهزة" onClick={() => { setText(text.startsWith("/") ? text : "/"); setShowCanned(!showCanned); }} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-[#bd8e21] hover:bg-amber-50 disabled:opacity-40">/ رد جاهز</button><button type="button" disabled={!metaWindowOpen} onClick={() => setShowProducts(true)} className="flex items-center gap-1 rounded-lg bg-[#fff8e9] px-2 py-1.5 text-[10px] font-bold text-[#9b7219] disabled:opacity-40"><CakeSlice size={14} /> إرسال منتج</button><button type="button" title="إرفاق ملف" disabled={!metaWindowOpen || sending} onClick={() => uploadInputRef.current?.click()} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 disabled:opacity-40"><Paperclip size={16} /></button><button type="button" title={recording ? "إيقاف التسجيل وإرساله" : "تسجيل رسالة صوتية"} disabled={!metaWindowOpen || sending} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-400 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button><button type="button" title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-8 w-8 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={16} /> : <BellOff size={16} />}</button><button type="button" title="إضافة موقع" onClick={() => setNotice("إرسال الموقع متاح من واجهة API بعد تحديد الإحداثيات.")} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><MapPin size={16} /></button></div><button disabled={!text.trim() || !metaWindowOpen || sending} className="flex h-9 items-center gap-2 rounded-xl bg-[#d32f2f] px-4 text-xs font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span className="hidden sm:inline">{sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={15} /></button></div>
               </div></form><p className="mt-2 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
           </div>
-        </> : <div className="grid flex-1 place-items-center text-center"><div><div className="mx-auto grid h-16 w-16 place-items-center rounded-3xl bg-[#fff2dd] text-[#c38f22]"><MessageCircle size={28} /></div><h2 className="mt-4 font-extrabold">اختر محادثة للبدء</h2><p className="mt-1 text-xs text-stone-400">ستظهر لك الرسائل وتفاصيل العميل هنا.</p></div></div>}
+        </> : activeId ? <div className="grid flex-1 place-items-center text-xs text-stone-400">جارٍ تحميل المحادثة...</div> : <div className="grid flex-1 place-items-center text-center"><div><div className="mx-auto grid h-16 w-16 place-items-center rounded-3xl bg-[#fff2dd] text-[#c38f22]"><MessageCircle size={28} /></div><h2 className="mt-4 font-extrabold">اختر محادثة للبدء</h2><p className="mt-1 text-xs text-stone-400">ستظهر لك الرسائل وتفاصيل العميل هنا.</p></div></div>}
       </section>
 
       <aside className="workspace-profile panel soft-scroll flex min-h-0 flex-col gap-4 overflow-y-auto p-4">
@@ -218,11 +347,11 @@ function Message({ message, conversationId, onUseAsCakeImage }: { message: AnyRe
   const outgoing = message.direction === "OUTBOUND";
   const hasMedia = ["IMAGE", "AUDIO", "FILE"].includes(message.kind);
   return <div className={`flex ${outgoing ? "justify-start" : "justify-end"}`}><div className={`max-w-[82%] rounded-2xl px-4 py-3 shadow-sm ${outgoing ? "rounded-tr-sm bg-white" : "rounded-tl-sm bg-[#fff0d1]"}`}>
-    {hasMedia && (message.kind === "IMAGE" && outgoing && message.mediaUrl ? <img src={message.mediaUrl} alt="منتج حلواني بندق" className="mb-2 max-h-56 rounded-xl object-cover" /> : <ProtectedMedia conversationId={conversationId} message={message} />)}
+    {hasMedia && (message.localPreviewUrl ? message.kind === "IMAGE" ? <img src={message.localPreviewUrl} alt="صورة قيد الإرسال" className="mb-2 max-h-56 rounded-xl object-cover" /> : message.kind === "AUDIO" ? <audio controls src={message.localPreviewUrl} className="mb-2 max-w-full" /> : <span className="mb-2 block text-xs">ملف مرفق قيد الإرسال</span> : message.mediaAssetId ? <ProtectedMedia conversationId={conversationId} message={message} /> : message.kind === "IMAGE" && outgoing && message.mediaUrl ? <img src={message.mediaUrl} alt="منتج حلواني بندق" className="mb-2 max-h-56 rounded-xl object-cover" /> : <ProtectedMedia conversationId={conversationId} message={message} />)}
     {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
     {onUseAsCakeImage && <button onClick={onUseAsCakeImage} className="mb-2 block rounded-lg bg-white/80 px-2.5 py-1.5 text-[10px] font-bold text-[#9a7014]">إرفاق صورة التورتة بنموذج الطلب</button>}
     {message.kind === "LOCATION" ? <a className="flex items-center gap-2 text-sm text-blue-700 underline" href={`https://maps.google.com/?q=${message.latitude},${message.longitude}`} target="_blank"><MapPin size={16} /> فتح موقع العميل</a> : message.text && <p className="whitespace-pre-wrap text-sm leading-7">{message.text}</p>}
-    <div className="mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{outgoing && (message.author?.name || "تم الإرسال")}{outgoing && " · "}{formatCairoTime(message.createdAt)}{outgoing && <Check size={11} className="text-emerald-600" />}</div>
+    <div className="mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{outgoing && (message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.author?.name || "تم الإرسال")}{outgoing && " · "}{formatCairoTime(message.createdAt)}{outgoing && message.deliveryStatus !== "PENDING" && <Check size={11} className="text-emerald-600" />}</div>
   </div></div>;
 }
 function ProtectedMedia({ conversationId, message }: { conversationId: string; message: AnyRecord }) {

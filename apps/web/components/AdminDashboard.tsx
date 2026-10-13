@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Activity, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, CakeSlice, Check, Clock3, Copy, FileText, Headset, LogOut, MessageCircle, MoreHorizontal, QrCode, Search, Send, ShieldAlert, UserRound, Users, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, CakeSlice, Check, Clock3, Copy, FileText, Headset, LogOut, MessageCircle, MoreHorizontal, QrCode, Search, Send, ShieldAlert, UserRound, Users, Volume2, VolumeX, X } from "lucide-react";
 import { API_URL, api, getToken } from "@/lib/api";
 import QRCode from "qrcode";
 import AccountSettingsModal from "./AccountSettingsModal";
 import { MessengerSettingsModal, TelegramSettingsModal } from "./ChannelIntegrationModals";
+import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
 const channelLabel: Record<string, string> = { WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" };
@@ -34,12 +35,32 @@ export default function AdminDashboard() {
   const [showMessenger, setShowMessenger] = useState(false);
   const [showTelegram, setShowTelegram] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
+  const [incomingNotifications, setIncomingNotifications] = useState<AnyRecord[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [socket, setSocket] = useState<Socket | null>(null);
+  const detailRequest = useRef(0);
+  const detailLoadingIdRef = useRef("");
+  const loadingMessagesRef = useRef(new Map<string, AnyRecord[]>());
+  const loadRequest = useRef(0);
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const messageEndRef = useRef<HTMLDivElement>(null);
+  const notifiedMessagesRef = useRef(new Set<string>());
+  const stickToBottom = useRef(true);
+
+  useEffect(() => { setSoundEnabled(isNotificationSoundEnabled()); }, []);
+  useEffect(() => {
+    if (!selected || !detail || !messageEndRef.current) return;
+    if (stickToBottom.current) { messageEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }
+    else setShowJumpToBottom(true);
+  }, [selected?.id, detail?.id, detail?.messages?.length]);
 
   async function load() {
+    const request = ++loadRequest.current;
     try {
       const [stats, chats, staff] = await Promise.all([api("/api/admin/dashboard"), api("/api/conversations"), api("/api/admin/agents")]);
-      setData(stats); setConversations(chats); setAgents(staff);
+      if (request === loadRequest.current) { setData(stats); setConversations(chats); setAgents(staff); }
     } catch (e) { setError(e instanceof Error ? e.message : "تعذر تحميل لوحة التحكم"); }
   }
   useEffect(() => {
@@ -53,9 +74,22 @@ export default function AdminDashboard() {
       connection.on("message:new", (event) => {
         load();
         const conversationId = event.conversationId || event.conversation?.id;
-        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: [...(old.messages || []), event.message] } : old);
+        if (event.message?.direction === "INBOUND" && conversationId) {
+          const messageId = event.message.id;
+          if (!messageId || !notifiedMessagesRef.current.has(messageId)) {
+            if (messageId) {
+              notifiedMessagesRef.current.add(messageId);
+              if (notifiedMessagesRef.current.size > 100) notifiedMessagesRef.current.delete(notifiedMessagesRef.current.values().next().value!);
+            }
+            playIncomingMessageTone();
+            setIncomingNotifications((old) => [{ id: messageId || `${conversationId}-${Date.now()}`, conversationId, customerName: event.customer?.name || event.conversation?.customer?.name || "عميل جديد", channel: event.conversation?.channel, preview: messageNotificationPreview(event.message), createdAt: event.message.createdAt || new Date().toISOString() }, ...old].slice(0, 8));
+            setShowNotifications(true);
+          }
+        }
+        if (event.message && conversationId === detailLoadingIdRef.current) loadingMessagesRef.current.set(conversationId, mergeMessages(loadingMessagesRef.current.get(conversationId) || [], event.message));
+        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old);
       });
-      connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((item: AnyRecord) => item.id === event.message.id ? event.message : item) } : old));
+      connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
       connection.on("csat:low", (event) => { setCsatAlert(`تقييم منخفض (${event.rating}/5) من ${event.customer?.name || "عميل"}.`); load(); });
       connection.on("csat:received", load);
       connection.on("csat:delivery-failed", (event) => { setCsatAlert(`تعذر إرسال استبيان الرضا للمحادثة ${event.conversationId}.`); load(); });
@@ -67,11 +101,24 @@ export default function AdminDashboard() {
 
   async function openConversation(item: AnyRecord) {
     if (selected && selected.id !== item.id) socket?.emit("conversation:leave", selected.id);
-    setSelected(item); setError("");
+    const request = ++detailRequest.current;
+    if (detailLoadingIdRef.current && detailLoadingIdRef.current !== item.id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
+    detailLoadingIdRef.current = item.id; stickToBottom.current = true; setShowJumpToBottom(false); setSelected(item); setDetail(null); setError(""); socket?.emit("conversation:join", item.id);
     try {
-      setDetail(await api(`/api/conversations/${item.id}`));
-      socket?.emit("conversation:join", item.id);
-    } catch (e) { setError(e instanceof Error ? e.message : "تعذر فتح المحادثة"); }
+      const conversation = await api(`/api/conversations/${item.id}`);
+      if (request === detailRequest.current) {
+        const queuedMessages = loadingMessagesRef.current.get(item.id) || [];
+        loadingMessagesRef.current.delete(item.id); detailLoadingIdRef.current = "";
+        setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) });
+      }
+    } catch (e) { if (request === detailRequest.current) setError(e instanceof Error ? e.message : "تعذر فتح المحادثة"); }
+  }
+  function closeConversationPreview() {
+    ++detailRequest.current;
+    if (selected) socket?.emit("conversation:leave", selected.id);
+    if (selected) loadingMessagesRef.current.delete(selected.id);
+    detailLoadingIdRef.current = "";
+    setSelected(null); setDetail(null); setShowJumpToBottom(false);
   }
   async function sendWhisper(e: FormEvent) {
     e.preventDefault(); if (!selected || !whisper.trim()) return;
@@ -97,10 +144,12 @@ export default function AdminDashboard() {
     <header className="sticky top-0 z-20 border-b border-stone-200/80 bg-white/95 backdrop-blur"><div className="mx-auto flex h-[74px] max-w-[1500px] items-center justify-between px-4 sm:px-7">
       <div className="flex items-center gap-3"><BrandMark /><div><div className="text-lg font-extrabold text-stone-800">مركز القيادة</div><div className="text-[11px] text-stone-400">المراقبة الحية وإدارة الفريق</div></div></div>
       <div className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 sm:flex"><span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" /> النظام متصل</div>
-      <div className="flex items-center gap-2"><button aria-label="التنبيهات" className="relative grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-stone-100"><Bell size={18} />{kpis.slaBreached > 0 && <i className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500" />}</button><span className="hidden text-sm font-bold text-stone-700 sm:inline">{user?.name || "المدير"}</span><button onClick={() => setShowAccount(true)} title="إعدادات الحساب" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-amber-50 hover:text-amber-700"><UserRound size={18} /></button><button onClick={logout} title="تسجيل الخروج" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-red-50 hover:text-red-600"><LogOut size={18} /></button></div>
-    </div></header>
+       <div className="flex items-center gap-2"><button type="button" aria-label="فتح إشعارات الرسائل" onClick={() => setShowNotifications((open) => !open)} className="relative grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-stone-100"><Bell size={18} />{incomingNotifications.length > 0 ? <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{incomingNotifications.length}</span> : kpis.slaBreached > 0 && <i className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500" />}</button><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-10 w-10 place-items-center rounded-xl ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><span className="hidden text-sm font-bold text-stone-700 sm:inline">{user?.name || "المدير"}</span><button onClick={() => setShowAccount(true)} title="إعدادات الحساب" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-amber-50 hover:text-amber-700"><UserRound size={18} /></button><button onClick={logout} title="تسجيل الخروج" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-red-50 hover:text-red-600"><LogOut size={18} /></button></div>
+     </div></header>
 
-    <div className="mx-auto max-w-[1500px] px-4 pt-7 sm:px-7">
+     {showNotifications && <><div className="fixed inset-0 z-40 bg-stone-900/20" onClick={() => setShowNotifications(false)} aria-hidden="true" /><aside dir="rtl" role="dialog" aria-label="إشعارات الرسائل الجديدة" className="fixed inset-y-0 right-0 z-50 flex w-[min(380px,100vw)] flex-col border-l border-stone-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div><h2 className="text-sm font-extrabold">رسائل جديدة</h2><p className="mt-1 text-[10px] text-stone-400">تظهر هنا آخر الرسائل الواردة مباشرة</p></div><div className="flex items-center gap-2">{incomingNotifications.length > 0 && <button type="button" onClick={() => setIncomingNotifications([])} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-stone-500 hover:bg-stone-100">مسح الكل</button>}<button type="button" onClick={() => setShowNotifications(false)} aria-label="إغلاق الإشعارات" className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={18} /></button></div></div><div className="soft-scroll flex-1 overflow-y-auto p-3">{incomingNotifications.length ? incomingNotifications.map((notification) => <button key={notification.id} type="button" onClick={() => { const item = conversations.find((chat) => chat.id === notification.conversationId) || { id: notification.conversationId, customer: { name: notification.customerName }, channel: notification.channel }; setIncomingNotifications((old) => old.filter((entry) => entry.id !== notification.id)); setShowNotifications(false); void openConversation(item); }} className="mb-2 flex w-full flex-col rounded-xl border border-stone-100 bg-[#fffdf7] p-3 text-right transition hover:border-amber-200 hover:bg-[#fff8e9]"><span className="flex w-full items-center justify-between gap-2"><b className="truncate text-xs text-stone-800">{notification.customerName}</b><span className="shrink-0 text-[9px] text-stone-400">{timeAgo(notification.createdAt)}</span></span><span className="mt-1 text-[9px] font-bold text-emerald-700">{channelLabel[notification.channel] || "قناة جديدة"}</span><span className="mt-1 line-clamp-3 w-full text-xs leading-5 text-stone-600">{notification.preview}</span></button>) : <div className="grid h-full place-items-center px-8 text-center text-xs text-stone-400"><div><Bell size={26} className="mx-auto mb-3 text-stone-300" />لا توجد رسائل جديدة الآن.</div></div>}</div></aside></>}
+
+     <div className="mx-auto max-w-[1500px] px-4 pt-7 sm:px-7">
         <div className="mb-6 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-bold text-[#c69125]">حلواني بندق</p><h1 className="mt-1 text-2xl font-extrabold text-stone-800">نظرة عامة <span className="text-stone-400">/ اليوم</span></h1></div><div className="flex flex-wrap gap-2"><button onClick={() => setShowKalemly(true)} className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-white px-4 py-2.5 text-sm font-bold text-emerald-800 shadow-sm hover:bg-emerald-50"><QrCode size={17} /> إعداد واتساب</button><button onClick={() => setShowMessenger(true)} className="flex items-center gap-2 rounded-xl border border-blue-200 bg-white px-4 py-2.5 text-sm font-bold text-blue-800 shadow-sm hover:bg-blue-50"><MessageCircle size={17} /> إعداد ماسنجر</button><button onClick={() => setShowTelegram(true)} className="flex items-center gap-2 rounded-xl border border-sky-200 bg-white px-4 py-2.5 text-sm font-bold text-sky-800 shadow-sm hover:bg-sky-50"><Send size={17} /> إعداد تليجرام</button><button onClick={() => setShowProducts(true)} className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm font-bold text-stone-700 shadow-sm hover:border-amber-200"><CakeSlice size={17} className="text-amber-600" /> كتالوج المنتجات</button><button onClick={() => setShowStaff(true)} className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm font-bold text-stone-700 shadow-sm hover:border-red-200"><Users size={17} className="text-[#d32f2f]" /> إدارة الفريق</button></div></div>
       {csatAlert && <div className="mb-4 flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700"><span>{csatAlert}</span><button onClick={() => setCsatAlert("")}><X size={16} /></button></div>}
       {error && <div className="mb-4 flex items-center justify-between rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700"><span>{error}</span><button onClick={() => setError("")}><X size={16} /></button></div>}
@@ -130,11 +179,13 @@ export default function AdminDashboard() {
       </section>
     </div>
 
-    {selected && detail && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setSelected(null); setDetail(null); socket?.emit("conversation:leave", selected!.id); }}><div className="panel flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
-      <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div className="flex items-center gap-3"><Avatar name={detail.customer?.name || "عميل"} /><div><h3 className="font-extrabold">{detail.customer?.name || "عميل جديد"}</h3><p className="text-xs text-stone-400">{channelLabel[detail.channel]} · {detail.assignedAgent?.name || "غير مسندة"}</p></div></div><button onClick={() => { setSelected(null); setDetail(null); socket?.emit("conversation:leave", selected!.id); }} className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
+    {selected && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={closeConversationPreview}><div className="panel flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      {detail ? <>
+      <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div className="flex items-center gap-3"><Avatar name={detail.customer?.name || "عميل"} /><div><h3 className="font-extrabold">{detail.customer?.name || "عميل جديد"}</h3><p className="text-xs text-stone-400">{channelLabel[detail.channel]} · {detail.assignedAgent?.name || "غير مسندة"}</p></div></div><button onClick={closeConversationPreview} className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
       <div className="flex flex-wrap items-center gap-3 border-b border-stone-100 bg-[#fffdf7] px-5 py-3"><span className="text-xs font-bold text-stone-600">تحويل / استلام</span><select value={detail.assignedAgentId || ""} onChange={(e) => reassign(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إبقاء في الطابور</option>{user?.id && <option value={user.id}>استلام بنفسي · {user.name}</option>}{agents.filter((a) => a.isActive).map((a) => <option key={a.id} value={a.id}>{a.name} · {presenceLabel[a.presence]}</option>)}</select><span className="mr-auto text-xs text-stone-400">{detail.slaBreachedAt ? "تجاوزت مهلة الرد" : "مراقبة مباشرة"}</span></div>
-       <div className="soft-scroll flex-1 space-y-3 overflow-y-auto bg-[#fffdf7] px-5 py-4">{(detail.messages || []).map((message: AnyRecord) => <div key={message.id} className={`flex ${message.direction === "OUTBOUND" ? "justify-start" : "justify-end"}`}><div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-7 ${message.direction === "OUTBOUND" ? "rounded-tr-sm bg-white shadow-sm" : "rounded-tl-sm bg-[#fce8c5]"}`}>{message.kind === "AUDIO" && <AdminProtectedAudio conversationId={detail.id} messageId={message.id} />}{message.kind === "IMAGE" && message.mediaUrl && <img src={message.mediaUrl} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" />}{message.text || (message.kind === "LOCATION" ? `موقع: ${message.latitude}, ${message.longitude}` : message.kind === "AUDIO" ? "رسالة صوتية" : "مرفق")}{message.transcription && <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs leading-6 text-stone-600">تفريغ صوتي: {message.transcription}</p>}{message.direction === "OUTBOUND" && <p className="mt-1 text-[10px] text-stone-400">{message.author?.name || "فريق بندق"} · {timeAgo(message.createdAt)}</p>}</div></div>)}</div>
+       <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex-1 space-y-3 overflow-y-auto bg-[#fffdf7] px-5 py-4">{(detail.messages || []).map((message: AnyRecord) => <div key={message.id} className={`flex ${message.direction === "OUTBOUND" ? "justify-start" : "justify-end"}`}><div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-7 ${message.direction === "OUTBOUND" ? "rounded-tr-sm bg-white shadow-sm" : "rounded-tl-sm bg-[#fce8c5]"}`}>{["IMAGE", "AUDIO", "FILE"].includes(message.kind) && (message.mediaAssetId || message.direction === "INBOUND" ? <AdminProtectedMedia conversationId={detail.id} message={message} /> : message.kind === "IMAGE" && message.mediaUrl ? <img src={message.mediaUrl} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" /> : message.mediaUrl ? <a href={message.mediaUrl} target="_blank" rel="noreferrer" className="mb-2 block text-xs font-bold text-blue-700 underline">فتح المرفق</a> : null)}{message.text || (message.kind === "LOCATION" ? `موقع: ${message.latitude}, ${message.longitude}` : message.kind === "AUDIO" ? "رسالة صوتية" : "مرفق")}{message.transcription && <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs leading-6 text-stone-600">تفريغ صوتي: {message.transcription}</p>}{message.direction === "OUTBOUND" && <p className="mt-1 text-[10px] text-stone-400">{message.author?.name || "فريق بندق"} · {timeAgo(message.createdAt)}</p>}</div></div>)}<div ref={messageEndRef} />{showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}</div>
       <div className="space-y-2 border-t border-stone-100 bg-white p-4"><form onSubmit={sendAdminReply} className="flex gap-2"><input value={adminReply} onChange={(e) => setAdminReply(e.target.value)} placeholder="رد مباشر للعميل بصفتك مديرًا..." className="min-w-0 flex-1 rounded-xl border border-stone-200 px-3 text-sm outline-none focus:border-red-200" /><button disabled={!adminReply.trim()} className="grid h-10 w-11 place-items-center rounded-xl bg-[#d32f2f] text-white hover:bg-[#b71c1c] disabled:opacity-40" title="إرسال رد مباشر"><Send size={16} /></button></form><form onSubmit={sendWhisper} className="flex gap-2"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#fff5d8] text-[#ae811e]"><Headset size={17} /></div><input value={whisper} onChange={(e) => setWhisper(e.target.value)} placeholder="توجيه سري للموظف... لا يظهر للعميل" className="min-w-0 flex-1 rounded-xl border border-[#efdda9] bg-[#fffaf0] px-3 text-sm outline-none focus:border-[#d6aa43]" /><button className="grid h-10 w-11 place-items-center rounded-xl bg-[#d5a52e] text-white hover:bg-[#be8d18]" title="إرسال همسة"><Send size={16} /></button></form><p className="pr-12 text-[10px] text-stone-400">الرد المباشر يظهر للعميل، والهمسة للموظف فقط.</p></div>
+      </> : <div className="grid min-h-72 flex-1 place-items-center text-sm text-stone-400">جارٍ تحميل المحادثة...</div>}
     </div></div>}
 
       {showStaff && <StaffManagementModal onClose={() => setShowStaff(false)} onDone={load} />}
@@ -244,16 +295,20 @@ function formatDuration(seconds?: number | null) { if (seconds == null) return "
 function timeAgo(value?: string) { if (!value) return "الآن"; const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000)); return minutes < 1 ? "الآن" : minutes < 60 ? `منذ ${minutes} د` : `منذ ${Math.floor(minutes / 60)} س`; }
 function auditText(action: string) { const map: Record<string, string> = { MESSAGE_SENT: "تم إرسال رد للعميل", WHISPER_SENT: "تم إرسال توجيه سري", CONVERSATION_REASSIGNED: "تم تحويل محادثة", CONVERSATION_CLOSED: "تم إغلاق محادثة", SLA_BREACHED: "تجاوزت محادثة مهلة الرد", CONVERSATION_OPENED: "تم فتح محادثة للمراجعة", AGENT_CREATED: "تمت إضافة موظف", PRESENCE_CHANGED: "تم تحديث حالة موظف", CSAT_RECEIVED: "تم استلام تقييم خدمة", PRODUCT_SENT: "تم إرسال منتج للعميل" }; return map[action] || action.replaceAll("_", " "); }
 
-function AdminProtectedAudio({ conversationId, messageId }: { conversationId: string; messageId: string }) {
+function AdminProtectedMedia({ conversationId, message }: { conversationId: string; message: AnyRecord }) {
   const [url, setUrl] = useState("");
   useEffect(() => {
     let objectUrl = "";
-    fetch(`${API_URL}/api/conversations/${conversationId}/messages/${messageId}/media`, { headers: { Authorization: `Bearer ${getToken()}` } })
+    let current = true;
+    fetch(`${API_URL}/api/conversations/${conversationId}/messages/${message.id}/media`, { headers: { Authorization: `Bearer ${getToken()}` } })
       .then((response) => response.ok ? response.blob() : Promise.reject())
-      .then((blob) => { objectUrl = URL.createObjectURL(blob); setUrl(objectUrl); }).catch(() => {});
-    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [conversationId, messageId]);
-  return url ? <audio controls src={url} className="mb-2 max-w-full" /> : <span className="mb-2 block text-[10px] text-stone-400">جارٍ تحميل الرسالة الصوتية...</span>;
+      .then((blob) => { objectUrl = URL.createObjectURL(blob); if (current) setUrl(objectUrl); else URL.revokeObjectURL(objectUrl); }).catch(() => {});
+    return () => { current = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [conversationId, message.id]);
+  if (!url) return <span className="mb-2 block text-[10px] text-stone-400">جارٍ تحميل المرفق...</span>;
+  if (message.kind === "IMAGE") return <img src={url} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" />;
+  if (message.kind === "AUDIO") return <audio controls src={url} className="mb-2 max-w-full" />;
+  return <a href={url} download className="mb-2 block text-xs font-bold text-blue-700 underline">تنزيل المرفق</a>;
 }
 
 function StaffManagementModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
@@ -300,7 +355,7 @@ function StaffManagementModal({ onClose, onDone }: { onClose: () => void; onDone
 
 function ProductManagementModal({ onClose }: { onClose: () => void }) {
   const [products, setProducts] = useState<AnyRecord[]>([]);
-  const [form, setForm] = useState({ name: "", category: "CAKES", price: "", imageUrl: "", description: "" });
+  const [form, setForm] = useState({ name: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" });
   const [editingId, setEditingId] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -308,20 +363,34 @@ function ProductManagementModal({ onClose }: { onClose: () => void }) {
   async function save(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError("");
     try {
-      const body = { ...form, price: Number(form.price), imageUrl: form.imageUrl || null, description: form.description || null };
+      const body = { ...form, price: Number(form.price), imageUrl: form.imageAssetId ? null : form.imageUrl || null, imageAssetId: form.imageAssetId || null, description: form.description || null };
       const product = editingId
         ? await api(`/api/admin/products/${editingId}`, { method: "PATCH", body: JSON.stringify(body) })
         : await api("/api/admin/products", { method: "POST", body: JSON.stringify(body) });
       setProducts((old) => editingId ? old.map((item) => item.id === editingId ? product : item) : [...old, product]);
-      setEditingId(""); setForm({ name: "", category: "CAKES", price: "", imageUrl: "", description: "" });
+      setEditingId(""); setForm({ name: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" });
     }
     catch (e) { setError(e instanceof Error ? e.message : "تعذر حفظ المنتج"); }
     finally { setSaving(false); }
   }
   function edit(product: AnyRecord) {
     setEditingId(product.id);
-    setForm({ name: product.name, category: product.category, price: String(product.price), imageUrl: product.imageUrl || "", description: product.description || "" });
+    setForm({ name: product.name, category: product.category, price: String(product.price), imageUrl: product.imageUrl || "", imageAssetId: product.imageAssetId || "", description: product.description || "" });
     setError("");
+  }
+  async function uploadProductImage(file?: File) {
+    if (!file) return;
+    if (!file.type.startsWith("image/") || file.type === "image/svg+xml") { setError("اختر صورة JPG أو PNG أو WebP."); return; }
+    if (file.size > 12 * 1024 * 1024) { setError("حجم الصورة الأقصى 12 ميجابايت."); return; }
+    setSaving(true); setError("");
+    try {
+      const response = await fetch(`${API_URL}/api/media`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": file.type, "X-File-Name": encodeURIComponent(file.name) }, body: file });
+      const asset = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(asset.error || `تعذر رفع الصورة (${response.status})`);
+      setForm((old) => ({ ...old, imageAssetId: asset.id, imageUrl: asset.url }));
+      setError("تم تحميل الصورة. احفظ المنتج لتثبيتها في الكتالوج.");
+    } catch (error) { setError(error instanceof Error ? error.message : "تعذر رفع صورة المنتج"); }
+    finally { setSaving(false); }
   }
   async function toggle(product: AnyRecord) {
     try { const updated = await api(`/api/admin/products/${product.id}`, { method: "PATCH", body: JSON.stringify({ isAvailable: !product.isAvailable }) }); setProducts((old) => old.map((item) => item.id === product.id ? updated : item)); }
@@ -336,10 +405,11 @@ function ProductManagementModal({ onClose }: { onClose: () => void }) {
           <input required minLength={2} placeholder="اسم المنتج" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs"><option value="EASTERN">حلويات شرقية</option><option value="WESTERN">حلويات غربية</option><option value="CAKES">تورتات</option><option value="BAKERY">مخبوزات</option><option value="KAHK">كحك وبسكويت</option><option value="CHOCOLATE">شوكولاتة</option><option value="MOULID">حلاوة المولد</option><option value="OCCASIONS">مناسبات</option><option value="MIX_BONDOQ">ميكس بندق</option></select>
           <input required type="number" min="0" step="0.01" placeholder="السعر بالجنيه" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
-          <input type="url" placeholder="رابط صورة HTTPS" value={form.imageUrl} onChange={(e) => setForm({ ...form, imageUrl: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
+          <label className="block text-xs font-bold text-stone-600">تحميل صورة من جهازك<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { void uploadProductImage(event.target.files?.[0]); event.target.value = ""; }} className="mt-1 block w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-normal" /></label>
+          <input type="url" placeholder="أو رابط صورة HTTPS" value={form.imageUrl} onChange={(e) => setForm({ ...form, imageUrl: e.target.value, imageAssetId: "" })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
           <textarea placeholder="وصف مختصر" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="w-full rounded-xl border border-stone-200 px-3 py-2 text-xs" />
           <button disabled={saving} className="h-10 w-full rounded-xl bg-[#d32f2f] text-xs font-bold text-white">{saving ? "جارٍ الحفظ..." : editingId ? "حفظ التعديلات" : "حفظ المنتج"}</button>
-          {editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ name: "", category: "CAKES", price: "", imageUrl: "", description: "" }); }} className="h-9 w-full rounded-xl bg-stone-100 text-xs font-bold text-stone-600">إلغاء التعديل</button>}
+          {editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ name: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" }); }} className="h-9 w-full rounded-xl bg-stone-100 text-xs font-bold text-stone-600">إلغاء التعديل</button>}
         </form>
        <div className="space-y-2"><h4 className="mb-2 text-sm font-extrabold">المنتجات ({products.length})</h4><div className="max-h-[480px] space-y-2 overflow-y-auto">{products.map((product) => <div key={product.id} className="flex items-center gap-2 rounded-xl border border-stone-100 p-3 sm:gap-3"><div className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-lg bg-amber-50">{product.imageUrl ? <img src={product.imageUrl} alt="" className="h-full w-full object-cover" /> : <CakeSlice size={18} className="text-amber-700" />}</div><div className="min-w-0 flex-1"><b className="block truncate text-xs">{product.name}</b><span className="text-[10px] text-stone-400">{categoryLabel[product.category] || product.category} · {Number(product.price).toFixed(2)} ج.م</span></div><button onClick={() => edit(product)} className="rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-800">تعديل</button><button onClick={() => toggle(product)} className={`rounded-lg px-2 py-1.5 text-[10px] font-bold ${product.isAvailable ? "bg-emerald-50 text-emerald-700" : "bg-stone-100 text-stone-500"}`}>{product.isAvailable ? "متوفر" : "غير متوفر"}</button></div>)}</div></div>
       </div>
