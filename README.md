@@ -31,7 +31,7 @@
 ## قنوات الرسائل
 
 - WhatsApp يرسل عبر KalemlyWA إلى `https://whatsapp.kalemly.com/api/send-message`، وتُستقبل الرسائل عبر `POST /webhooks/kalemlywa`. أضف `KALEMLYWA_WEBHOOK_SECRET` إلى بيئة API وأرسل القيمة في ترويسة `x-kalemly-webhook-secret` عند إعداد Webhook لدى المزود.
-- إعداد KalemlyWA متاح للمدير من زر «إعداد واتساب». مفتاح API وحمولة QR يُخزّنان مشفّرين. لا يوجد افتراض لنقطة API تجلب QR؛ انسخ payload الذي يقدمه KalemlyWA والصقه في الشاشة لعرض الرمز.
+- إعداد KalemlyWA متاح للمدير من زر «إعداد واتساب». يدخل المدير authkey وappkey كلًّا على حدة، ويُخزّنان مشفّرين. لا يحتاج API إلى Instance ID؛ وحمولة QR اختيارية وتُنسخ من KalemlyWA عند الحاجة.
 - إعداد Messenger متاح للمدير من زر «إعداد Messenger»؛ تُخزّن مفاتيح الصفحة وMeta مشفّرة ويمكن اختبار Page Access Token من الواجهة. سجّل `GET/POST /webhooks/meta` لدى Meta مع اشتراك أحداث الرسائل، وتظل نافذة الـ24 ساعة خاصة بـ Messenger.
 - إعداد Telegram متاح للمدير من زر «إعداد Telegram»؛ تُخزّن بيانات البوت مشفّرة، ويمكن اختبارها وتسجيل `POST /webhooks/telegram` تلقائيًا باستخدام رمز حماية Webhook.
 - الإرسال الصادر للنصوص والصور والصوت والموقع مهيأ في `apps/api/src/providers.ts`. ملفات الصور/الصوت الصادرة يجب أن تكون روابط يمكن لمزود المنصة الوصول إليها. إعداد التخزين ورفع الملفات ليس مضمّنًا.
