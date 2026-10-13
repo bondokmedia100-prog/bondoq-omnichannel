@@ -29,6 +29,7 @@ export default function AgentWorkspace() {
   const [presence, setPresence] = useState("ONLINE");
   const [watching, setWatching] = useState(false);
   const [notice, setNotice] = useState("");
+  const [incomingNotice, setIncomingNotice] = useState<AnyRecord | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [now, setNow] = useState(Date.now());
   const [savedOrder, setSavedOrder] = useState<AnyRecord | null>(null);
@@ -59,6 +60,9 @@ export default function AgentWorkspace() {
       connection.on("message:new", (event) => {
         loadChats();
         const conversationId = event.conversationId || event.conversation?.id;
+        if (event.message?.direction === "INBOUND" && conversationId) {
+          setIncomingNotice({ conversationId, customerName: event.customer?.name || "عميل جديد" });
+        }
         if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: [...(old.messages || []), event.message], customer: event.customer || old.customer } : old);
       });
       connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((item: AnyRecord) => item.id === event.message.id ? event.message : item) } : old));
@@ -152,6 +156,8 @@ export default function AgentWorkspace() {
       <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-[#d32f2f] text-lg font-black text-[#ffc107]">ب</div><div><b className="text-sm">حلواني بندق</b><p className="text-[10px] text-stone-400">مساحة العمل · محادثاتك المخصصة</p></div></div>
       <div className="flex items-center gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
     </header>
+
+    {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">رد جديد من {incomingNotice.customerName}</p><p className="mt-1 text-[10px] text-stone-500">وصلت رسالة عميل إلى إحدى محادثاتك.</p></div><button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button><button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
 
     <section className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
       <aside className="workspace-list panel flex min-h-0 flex-col overflow-hidden">
