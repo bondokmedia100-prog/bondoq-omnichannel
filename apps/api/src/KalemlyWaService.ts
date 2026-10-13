@@ -34,31 +34,41 @@ export function decryptKalemlySecret(value: string): string {
   return Buffer.concat([decipher.update(Buffer.from(ciphertextHex, "hex")), decipher.final()]).toString("utf8");
 }
 
+function parseKalemlyCredentials(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed.authKey === "string" && typeof parsed.appKey === "string") return parsed as { authKey: string; appKey: string };
+  } catch {}
+  return { authKey: value, appKey: value };
+}
+
 export async function getKalemlySettings() {
   const saved = await prisma.integrationSetting.findUnique({ where: { id: settingId } });
+  const credentials = saved?.apiKeyCiphertext ? parseKalemlyCredentials(decryptKalemlySecret(saved.apiKeyCiphertext)) : null;
   return {
     endpoint: saved?.endpoint || config.kalemlyApiUrl,
-    apiKey: saved?.apiKeyCiphertext ? decryptKalemlySecret(saved.apiKeyCiphertext) : config.kalemlyApiKey,
-    instanceId: saved?.instanceId || config.kalemlyInstanceId,
+    authKey: credentials?.authKey || config.kalemlyAuthKey,
+    appKey: credentials?.appKey || config.kalemlyAppKey,
     qrCodePayload: saved?.qrCodePayloadCiphertext ? decryptKalemlySecret(saved.qrCodePayloadCiphertext) : ""
   };
 }
 
-export async function saveKalemlySettings(input: { apiKey?: string; instanceId?: string; qrCodePayload?: string; clearQrCode?: boolean }) {
-  const existing = await prisma.integrationSetting.findUnique({ where: { id: settingId } });
+export async function saveKalemlySettings(input: { authKey?: string; appKey?: string; qrCodePayload?: string; clearQrCode?: boolean }) {
+  const current = await getKalemlySettings();
+  const authKey = input.authKey?.trim() || current.authKey;
+  const appKey = input.appKey?.trim() || current.appKey;
+  const credentialsCiphertext = authKey || appKey ? encryptKalemlySecret(JSON.stringify({ authKey, appKey })) : null;
   await prisma.integrationSetting.upsert({
     where: { id: settingId },
     update: {
       endpoint: config.kalemlyApiUrl,
-      instanceId: input.instanceId?.trim() || config.kalemlyInstanceId || existing?.instanceId || null,
-      ...(input.apiKey?.trim() ? { apiKeyCiphertext: encryptKalemlySecret(input.apiKey.trim()) } : {}),
+      ...(credentialsCiphertext ? { apiKeyCiphertext: credentialsCiphertext } : {}),
       ...(input.clearQrCode ? { qrCodePayloadCiphertext: null } : input.qrCodePayload === undefined ? {} : { qrCodePayloadCiphertext: input.qrCodePayload.trim() ? encryptKalemlySecret(input.qrCodePayload.trim()) : null })
     },
     create: {
       id: settingId,
       endpoint: config.kalemlyApiUrl,
-      instanceId: input.instanceId?.trim() || config.kalemlyInstanceId || null,
-      apiKeyCiphertext: input.apiKey?.trim() ? encryptKalemlySecret(input.apiKey.trim()) : null,
+      apiKeyCiphertext: credentialsCiphertext,
       qrCodePayloadCiphertext: input.qrCodePayload?.trim() ? encryptKalemlySecret(input.qrCodePayload.trim()) : null
     }
   });
@@ -67,25 +77,16 @@ export async function saveKalemlySettings(input: { apiKey?: string; instanceId?:
 
 async function postMessage(input: KalemlyWaMessage) {
   const settings = await getKalemlySettings();
-  if (!settings.apiKey || !settings.instanceId) throw new Error("أكمل API Key وInstance ID في إعدادات KalemlyWA أولًا");
+  if (!settings.authKey || !settings.appKey) throw new Error("أكمل authkey وappkey في إعدادات KalemlyWA أولًا");
   const to = formatEgyptianPhone(input.to);
   const endpoint = new URL(settings.endpoint);
   if (endpoint.protocol !== "https:" || endpoint.hostname !== "whatsapp.kalemly.com") throw new Error("KalemlyWA endpoint must use the verified HTTPS host whatsapp.kalemly.com");
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${settings.apiKey}`,
-    "Content-Type": "application/json",
-    "X-API-Key": settings.apiKey,
-    appkey: settings.apiKey,
-    authkey: settings.apiKey,
-    instance_id: settings.instanceId
-  };
+  const headers = { "Content-Type": "application/json" };
   const payload = {
-    api_key: settings.apiKey,
-    appkey: settings.apiKey,
-    authkey: settings.apiKey,
-    instance_id: settings.instanceId,
+    authkey: settings.authKey,
+    appkey: settings.appKey,
     to,
-    number: to,
+    type: input.file ? input.mediaType || "document" : "text",
     message: input.message,
     ...(input.file ? { file: input.file, media: input.mediaType || "document", media_type: input.mediaType || "document", caption: input.message } : {})
   };
