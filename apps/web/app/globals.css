@@ -26,4 +26,14 @@ button { cursor: pointer; }
   .ticket-image img { display: block; max-width: 100%; max-height: 65mm; margin: 12px auto; object-fit: contain; }
   .ticket-footer { text-align: center; font-size: 10pt; }
 }
-@media (max-width: 850px) { .agent-app { height: auto !important; min-height: 100dvh !important; overflow: visible !important; } .workspace-grid { grid-template-columns: minmax(0,1fr) !important; height: auto !important; min-height: 0 !important; overflow: visible !important; } .workspace-list { min-height: 290px; max-height: 360px; } .workspace-chat { height: min(74dvh,660px); min-height: 540px; } .workspace-profile { max-height: none; min-height: 320px; } }
+.mobile-chat-back { display: none; }
+@media (max-width: 850px) {
+  .agent-app { height: 100dvh !important; min-height: 0 !important; overflow: hidden !important; }
+  .workspace-grid { grid-template-columns: minmax(0,1fr) !important; height: calc(100dvh - 68px) !important; min-height: 0 !important; overflow: hidden !important; }
+  .workspace-list { min-height: 0; max-height: none; }
+  .workspace-chat { display: none !important; height: 100%; min-height: 0; }
+  .workspace-profile { display: none; }
+  .workspace-grid[data-chat-open="true"] .workspace-list { display: none; }
+  .workspace-grid[data-chat-open="true"] .workspace-chat { display: flex !important; }
+  .mobile-chat-back { display: flex; height: 38px; flex: 0 0 auto; align-items: center; gap: 6px; border-bottom: 1px solid #f0ece6; padding: 0 14px; color: #8b6b28; font-size: 11px; font-weight: 700; }
+}

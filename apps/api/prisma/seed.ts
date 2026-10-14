@@ -21,15 +21,6 @@ const responses = [
   ["/شكوى", "متابعة شكوى", "نعتذر لك عن التجربة، ونشكرك لتنبيهنا. شاركنا رقم الطلب وتفاصيل ما حدث وسيتابع فريق خدمة العملاء الموضوع معك."]
 ];
 
-const products = [
-  { id: "seed-basbousa", name: "بسبوسة بندق", category: ProductCategory.EASTERN, price: "220.00", imageUrl: "https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=900&auto=format&fit=crop&q=85", description: "صينية بسبوسة بالمكسرات" },
-  { id: "seed-kunafa", name: "كنافة بالقشطة", category: ProductCategory.EASTERN, price: "280.00", imageUrl: "https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=900&auto=format&fit=crop&q=85", description: "كنافة طازجة بالقشطة" },
-  { id: "seed-cookies", name: "علبة كوكيز مشكلة", category: ProductCategory.WESTERN, price: "190.00", imageUrl: "https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=900&auto=format&fit=crop&q=85", description: "تشكيلة كوكيز مخبوزة يوميًا" },
-  { id: "seed-cheesecake", name: "تشيز كيك الفراولة", category: ProductCategory.WESTERN, price: "320.00", imageUrl: "https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=900&auto=format&fit=crop&q=85", description: "تشيز كيك بطبقة فراولة" },
-  { id: "seed-chocolate-cake", name: "تورتة شوكولاتة", category: ProductCategory.CAKES, price: "480.00", imageUrl: "https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=900&auto=format&fit=crop&q=85", description: "تورتة شوكولاتة بلجيكي" },
-  { id: "seed-celebration-cake", name: "تورتة مناسبات", category: ProductCategory.CAKES, price: "620.00", imageUrl: "https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=900&auto=format&fit=crop&q=85", description: "تورتة قابلة للتخصيص حسب المناسبة" }
-];
-
 async function main() {
   if (process.env.NODE_ENV === "production" && (!process.env.BONDOQ_ADMIN_PASSWORD || !process.env.BONDOQ_AGENT_PASSWORD)) {
     throw new Error("Set BONDOQ_ADMIN_PASSWORD and BONDOQ_AGENT_PASSWORD before seeding production accounts");
@@ -43,19 +34,22 @@ async function main() {
       create: { email: person.email, username, name: person.name, role: person.role, department: person.department, passwordHash }
     });
   }
+  for (let index = 1; index <= 8; index += 1) {
+    const id = `branch-${index}`;
+    await prisma.branch.upsert({ where: { id }, update: {}, create: { id, name: `الفرع ${index}` } });
+  }
   for (const [shortcut, title, content] of responses) {
     await prisma.cannedResponse.upsert({ where: { shortcut }, update: { title, content }, create: { shortcut, title, content } });
   }
+  await prisma.autoReplyRule.createMany({ data: [{ id: "default-welcome", name: "رسالة الترحيب", keywords: [], responseText: "أهلًا بك في حلواني بندق. اختر كيف نقدر نساعدك:", isWelcome: true, priority: 100 }], skipDuplicates: true });
   const webOrigin = (process.env.WEB_ORIGIN || "http://localhost:3000").replace(/\/+$/, "");
-  const fullCatalog = [
-    ...products,
-    ...menuProducts.map((product) => ({
+  const fullCatalog = menuProducts.map((product) => ({
       ...product,
       category: product.category as ProductCategory,
       price: product.price.toFixed(2),
       imageUrl: `${webOrigin}/menu/${product.imageFile}`
-    }))
-  ];
+    }));
+  await prisma.product.deleteMany({ where: { id: { startsWith: "seed-" } } });
   for (const product of fullCatalog) {
     const { imageFile: _imageFile, ...record } = product as typeof product & { imageFile?: string };
     await prisma.product.upsert({ where: { id: record.id }, update: record, create: record });

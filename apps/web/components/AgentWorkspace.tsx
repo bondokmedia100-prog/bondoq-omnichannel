@@ -8,6 +8,8 @@ import { API_URL, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
 import AccountSettingsModal from "./AccountSettingsModal";
+import PushNotificationsButton from "./PushNotificationsButton";
+import InstallAppButton from "./InstallAppButton";
 import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
@@ -39,6 +41,8 @@ export default function AgentWorkspace() {
   const [sending, setSending] = useState(false);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [sendingProducts, setSendingProducts] = useState(false);
   const sendingRef = useRef(false);
   const detailRequest = useRef(0);
   const detailLoadingIdRef = useRef("");
@@ -62,7 +66,7 @@ export default function AgentWorkspace() {
   async function openChat(id: string) {
     if (activeIdRef.current && activeIdRef.current !== id) socketRef.current?.emit("conversation:leave", activeIdRef.current);
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
-    if (activeId !== id) setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", referenceImageMessageId: "" });
+    if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", referenceImageMessageId: "" }); setSelectedProductIds([]); }
     const request = ++detailRequest.current;
     activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setActiveId(id); setDetail(null); setNotice("");
     socketRef.current?.emit("conversation:join", id);
@@ -83,10 +87,22 @@ export default function AgentWorkspace() {
     const initialize = async () => {
       const profile = await api("/api/auth/me");
       if (!current) return;
-      if (profile.role !== "AGENT") return router.replace("/admin/dashboard");
+      if (profile.role !== "AGENT" && profile.role !== "BRANCH_USER") return router.replace("/admin/dashboard");
       setUser(profile); setPresence(profile.presence);
       connection = io(API_URL, { auth: { token: getToken() } }); socketRef.current = connection; setSocket(connection);
+      connection.on("connect", () => { void loadChats(); if (activeIdRef.current) void openChat(activeIdRef.current); });
+      connection.on("canned:updated", () => { void api("/api/canned-responses").then(setCanned).catch(() => {}); });
       connection.on("conversation:assigned", () => loadChats());
+      connection.on("conversation:unassigned", (event) => {
+        void loadChats();
+        if (event.id === activeIdRef.current) {
+          socketRef.current?.emit("conversation:leave", event.id);
+          activeIdRef.current = "";
+          setActiveId("");
+          setDetail(null);
+          setNotice("أُعيدت المحادثة إلى الطابور لأن إسنادها تغيّر.");
+        }
+      });
       connection.on("message:new", (event) => {
         loadChats();
         const conversationId = event.conversationId || event.conversation?.id;
@@ -114,7 +130,11 @@ export default function AgentWorkspace() {
       if (!current) return;
       setConversations(chats); setCanned(replies); setProducts(catalog);
       if (chats.length && !activeIdRef.current) {
-        const id = chats[0].id; const request = ++detailRequest.current;
+        const requestedId = new URLSearchParams(window.location.search).get("conversation");
+        const requestedChat = requestedId && chats.find((chat: AnyRecord) => chat.id === requestedId);
+        const id = requestedChat?.id || chats[0].id;
+        if (requestedChat) window.history.replaceState(null, "", window.location.pathname);
+        const request = ++detailRequest.current;
         activeIdRef.current = id; detailLoadingIdRef.current = id; setActiveId(id); connection.emit("conversation:join", id);
         const conversation = await api(`/api/conversations/${id}`);
         if (current && request === detailRequest.current) {
@@ -154,7 +174,13 @@ export default function AgentWorkspace() {
   const referenceImage = order.referenceImageMessageId ? detail?.messages?.find((message: AnyRecord) => message.id === order.referenceImageMessageId) : null;
 
   async function changePresence(next: string) {
-    try { const response = await api("/api/agents/me/presence", { method: "PATCH", body: JSON.stringify({ presence: next }) }); setPresence(response.presence); }
+    try {
+      const response = await api("/api/agents/me/presence", { method: "PATCH", body: JSON.stringify({ presence: next }) });
+      setPresence(response.presence);
+      if (response.presence === "OFFLINE") {
+        activeIdRef.current = ""; setActiveId(""); setDetail(null); await loadChats();
+      }
+    }
     catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث الحالة"); }
   }
   async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; previewUrl?: string }, conversationId = activeId, alreadyLocked = false) {
@@ -256,16 +282,34 @@ export default function AgentWorkspace() {
       setDetail(await api(`/api/conversations/${activeId}`)); loadChats();
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث حالة المحادثة"); }
   }
-  async function sendProduct(product: AnyRecord) {
-    if (!activeId) return;
+  async function sendSelectedProducts(productIds = selectedProductIds) {
+    if (!activeId || !productIds.length || sendingProducts) return;
+    const conversationId = activeId;
+    const selected = products.filter((product) => productIds.includes(product.id));
+    const pendingIds = selected.map((product, index) => `pending-product-${Date.now()}-${index}`);
+    const pending = selected.map((product, index) => ({ id: pendingIds[index], conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind: "TEXT", text: `${product.name}\nالسعر: ${Number(product.price).toFixed(2)} جنيه`, deliveryStatus: "PENDING" }));
+    setSendingProducts(true);
+    setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pending) } : old);
     try {
-      const result = await api(`/api/conversations/${activeId}/products`, { method: "POST", body: JSON.stringify({ productId: product.id }) });
+      const result = await api(`/api/conversations/${conversationId}/products`, { method: "POST", body: JSON.stringify({ productIds }) });
       setShowProducts(false);
-      if (result.imageDelivery === "failed") setNotice(`وصلت تفاصيل ${product.name} للعميل، لكن تعذر إرسال الصورة.`);
-      else setNotice(`تم إرسال تفاصيل وصورة ${product.name} للعميل.`);
-      setDetail(await api(`/api/conversations/${activeId}`)); loadChats();
+      setSelectedProductIds([]);
+      const failedImages = result.items?.filter((item: AnyRecord) => item.captionDelivery === "sent" && item.imageDelivery === "failed") || [];
+      const failedCaptions = result.items?.filter((item: AnyRecord) => item.captionDelivery !== "sent") || [];
+      setNotice(failedCaptions.length ? `تعذر إرسال ${failedCaptions.length} من المنتجات المحددة.` : failedImages.length ? `وصلت تفاصيل ${result.items.length} منتجات، وتعذر إرسال صورة ${failedImages.length} منها.` : `تم إرسال ${result.items?.length || selected.length} منتجات مع صورها.`);
+      const sentMessages = (result.items || []).flatMap((item: AnyRecord) => [item.textMessage, item.imageMessage].filter(Boolean));
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => !pendingIds.includes(item.id)), sentMessages) } : old);
+      void loadChats();
     }
-    catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال المنتج"); }
+    catch (error) {
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => !pendingIds.includes(item.id)) } : old);
+      setNotice(error instanceof Error ? error.message : "تعذر إرسال المنتجات المحددة");
+    } finally { setSendingProducts(false); }
+  }
+  function toggleProductSelection(productId: string) {
+    if (selectedProductIds.includes(productId)) setSelectedProductIds((current) => current.filter((id) => id !== productId));
+    else if (selectedProductIds.length >= 12) setNotice("يمكن اختيار 12 منتجًا كحد أقصى في الإرسال الواحد.");
+    else setSelectedProductIds((current) => [...current, productId]);
   }
   function printOrder() {
     if (!savedOrder) { setNotice("احفظ نموذج الطلب أولًا ثم اطبع أمر التحضير."); return; }
@@ -280,7 +324,7 @@ export default function AgentWorkspace() {
   return <main className="agent-app h-screen min-h-[700px] overflow-hidden bg-[#f6f5f2] text-stone-800">
     <header className="flex h-[68px] items-center justify-between border-b border-stone-200 bg-white px-4 sm:px-6">
       <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-[#d32f2f] text-lg font-black text-[#ffc107]">ب</div><div><b className="text-sm">حلواني بندق</b><p className="text-[10px] text-stone-400">مساحة العمل · محادثاتك المخصصة</p></div></div>
-      <div className="flex items-center gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-9 w-9 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={17} /> : <BellOff size={17} />}</button><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
+      <div className="flex items-center gap-1 sm:gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><PushNotificationsButton /><InstallAppButton /><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-9 w-9 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={17} /> : <BellOff size={17} />}</button><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
     </header>
 
      {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">رسالة جديدة من {incomingNotice.customerName}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "رسالة واردة"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div><button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button><button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
@@ -333,7 +377,21 @@ export default function AgentWorkspace() {
         </> : <div className="grid flex-1 place-items-center text-center text-xs text-stone-400"><div><UserRound size={25} className="mx-auto text-stone-300" /><p className="mt-2">ملف العميل سيظهر هنا</p></div></div>}
       </aside>
     </section>
-    {showProducts && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowProducts(false)}><section className="panel max-h-[90vh] w-full max-w-3xl overflow-y-auto p-4 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-center justify-between"><div><h2 className="text-lg font-extrabold">كتالوج حلواني بندق</h2><p className="text-xs text-stone-400">اختر صنفًا لإرسال صورته وسعره للعميل</p></div><button onClick={() => setShowProducts(false)} className="rounded-lg px-3 py-1 text-xl text-stone-400">×</button></div><div className="mb-4 flex gap-2 overflow-x-auto">{[{ id: "ALL", label: "الكل" }, { id: "EASTERN", label: "شرقي" }, { id: "WESTERN", label: "غربي" }, { id: "CAKES", label: "تورتات" }].map((item) => <button key={item.id} onClick={() => setProductFilter(item.id)} className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-bold ${productFilter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500"}`}>{item.label}</button>)}</div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{visibleProducts.map((product) => <article key={product.id} className="overflow-hidden rounded-2xl border border-stone-100 bg-white">{product.imageUrl ? <img src={product.imageUrl} alt={product.name} className="h-36 w-full object-cover" /> : <div className="grid h-36 place-items-center bg-[#fff6e5] text-[#bd8e21]"><CakeSlice size={38} /></div>}<div className="p-3"><div className="flex items-start justify-between gap-2"><div><h3 className="text-sm font-extrabold">{product.name}</h3><p className="mt-1 text-[10px] text-stone-400">{categoryLabel(product.category)}</p></div><b className="shrink-0 text-xs text-[#a57a1c]">{Number(product.price).toFixed(2)} ج.م</b></div>{product.description && <p className="mt-2 line-clamp-2 text-[10px] leading-5 text-stone-500">{product.description}</p>}<button disabled={!product.imageUrl} onClick={() => sendProduct(product)} className="mt-3 w-full rounded-xl bg-[#d32f2f] px-3 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-300">{product.imageUrl ? "إرسال هذا المنتج" : "أضف صورة المنتج أولًا"}</button></div></article>)}</div>{!visibleProducts.length && <div className="py-12 text-center text-sm text-stone-400">لا توجد منتجات في هذا القسم.</div>}</section></div>}
+    {showProducts && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }}><section className="panel max-h-[90vh] w-full max-w-4xl overflow-y-auto p-4 sm:p-6" onClick={(event) => event.stopPropagation()}>
+      <div className="mb-4 flex items-center justify-between gap-3"><div><h2 className="text-lg font-extrabold">كتالوج حلواني بندق</h2><p className="text-xs text-stone-400">حدد منتجًا واحدًا أو أكثر لإرسال السعر والصورة معًا</p></div><button type="button" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }} className="rounded-lg px-3 py-1 text-xl text-stone-400">×</button></div>
+      <div className="soft-scroll mb-4 flex gap-2 overflow-x-auto pb-1">{[{ id: "ALL", label: "الكل" }, { id: "EASTERN", label: "شرقي" }, { id: "WESTERN", label: "غربي" }, { id: "CAKES", label: "تورتات" }, { id: "BAKERY", label: "مخبوزات" }, { id: "KAHK", label: "كحك وبسكويت" }, { id: "CHOCOLATE", label: "شوكولاتة" }, { id: "MOULID", label: "حلاوة المولد" }, { id: "OCCASIONS", label: "مناسبات" }, { id: "MIX_BONDOQ", label: "ميكس بندق" }].map((item) => <button type="button" key={item.id} onClick={() => setProductFilter(item.id)} className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-bold ${productFilter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500"}`}>{item.label}</button>)}</div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{visibleProducts.map((product) => {
+        const isSelected = selectedProductIds.includes(product.id);
+        return <article key={product.id} className={`overflow-hidden rounded-2xl border bg-white ${isSelected ? "border-[#d32f2f] ring-2 ring-red-100" : "border-stone-100"}`}>
+          {product.imageUrl ? <img src={product.imageUrl} alt={product.name} className="h-36 w-full object-cover" /> : <div className="grid h-36 place-items-center bg-[#fff6e5] text-[#bd8e21]"><CakeSlice size={38} /></div>}
+          <div className="p-3"><div className="flex items-start justify-between gap-2"><div><h3 className="text-sm font-extrabold">{product.name}</h3><p className="mt-1 text-[10px] text-stone-400">{categoryLabel(product.category)}</p></div><b className="shrink-0 text-xs text-[#a57a1c]">{Number(product.price).toFixed(2)} ج.م</b></div>{product.description && <p className="mt-2 line-clamp-2 text-[10px] leading-5 text-stone-500">{product.description}</p>}
+            <button type="button" disabled={!product.imageUrl} aria-pressed={isSelected} onClick={() => toggleProductSelection(product.id)} className={`mt-3 w-full rounded-xl px-3 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-300 ${isSelected ? "bg-stone-700" : "bg-[#d32f2f]"}`}>{!product.imageUrl ? "أضف صورة المنتج أولًا" : isSelected ? "إزالة من التحديد" : "تحديد للإرسال"}</button>
+          </div>
+        </article>;
+      })}</div>
+      {!visibleProducts.length && <div className="py-12 text-center text-sm text-stone-400">لا توجد منتجات في هذا القسم.</div>}
+      <footer className="sticky bottom-0 mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-stone-100 bg-white py-3"><span className="text-xs font-semibold text-stone-500">{selectedProductIds.length ? `تم تحديد ${selectedProductIds.length} من 12 منتجًا` : "حدد المنتجات المطلوبة أولًا"}</span><button type="button" disabled={!selectedProductIds.length || sendingProducts} onClick={() => void sendSelectedProducts()} className="rounded-xl bg-[#d32f2f] px-5 py-3 text-xs font-extrabold text-white disabled:cursor-not-allowed disabled:bg-stone-300">{sendingProducts ? "جارٍ الإرسال..." : `إرسال ${selectedProductIds.length || "المنتجات المحددة"} للعميل`}</button></footer>
+    </section></div>}
     {savedOrder && detail && <section className="print-ticket" dir="rtl"><h1>حلواني بندق · أمر تحضير</h1><div className="ticket-rule" /><p><b>رقم الطلب:</b> {savedOrder.id}</p><p><b>العميل:</b> {detail.customer?.name || "غير مسجل"}</p><p><b>الهاتف:</b> {detail.customer?.phone || "غير متوفر"}</p><div className="ticket-rule" /><p><b>الصنف:</b> {savedOrder.product || "تورتة"}</p><p><b>الحجم:</b> {savedOrder.size || "—"}　 <b>الحشوة:</b> {savedOrder.filling || "—"}</p><p><b>السعر:</b> {savedOrder.price ? `${Number(savedOrder.price).toFixed(2)} جنيه مصري` : "غير محدد"}</p><p><b>العبارة:</b> {savedOrder.cakeMessage || "—"}</p><p><b>التسليم:</b> {formatCairoDateTime(savedOrder.deliveryAt)}</p><p><b>العنوان:</b> {savedOrder.deliveryAddress || "—"}</p><p><b>ملاحظات:</b> {savedOrder.notes || "—"}</p>{referenceImage && <div className="ticket-image"><ProtectedMedia conversationId={detail.id} message={referenceImage} /></div>}<div className="ticket-rule" /><p className="ticket-footer">يُسلّم إلى قسم الإنتاج · {formatCairoDateTime(new Date())}</p></section>}
     {showAccount && user && <AccountSettingsModal user={user} onClose={() => setShowAccount(false)} onSaved={setUser} />}
   </main>;
@@ -368,7 +426,7 @@ function ProtectedMedia({ conversationId, message }: { conversationId: string; m
   if (message.kind === "AUDIO") return <audio controls src={url} className="mb-2 max-w-full" />;
   return <a href={url} download className="mb-2 block text-xs font-bold text-blue-700 underline">تنزيل الملف المرفق</a>;
 }
-function department(value?: string) { return ({ CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة" } as Record<string, string>)[value || ""] || "فريق بندق"; }
+function department(value?: string) { return ({ CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "موظف فرع", ADMINISTRATION: "الإدارة" } as Record<string, string>)[value || ""] || "فريق بندق"; }
 function channelName(value: string) { return ({ WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" } as Record<string, string>)[value] || value; }
 function ago(value?: string) { if (!value) return "الآن"; const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000)); return minutes < 1 ? "الآن" : minutes < 60 ? `منذ ${minutes} د` : `منذ ${Math.floor(minutes / 60)} س`; }
 function orderStatus(value: string) { return ({ DRAFT: "مسودة", CONFIRMED: "مؤكد", PREPARING: "قيد التجهيز", OUT_FOR_DELIVERY: "خرج للتوصيل", DELIVERED: "تم التسليم", CANCELLED: "ملغي", COMPLETED: "مكتمل" } as Record<string, string>)[value] || value; }

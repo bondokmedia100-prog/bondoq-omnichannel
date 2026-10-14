@@ -20,7 +20,7 @@ export default function LoginPage() {
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "تعذر تسجيل الدخول");
       localStorage.setItem("bondoq_token", body.token);
-      router.replace(body.user.role === "AGENT" ? "/agent/workspace" : "/admin/dashboard");
+      router.replace(body.user.role === "AGENT" || body.user.role === "BRANCH_USER" ? "/agent/workspace" : "/admin/dashboard");
     } catch (err) { setError(err instanceof Error ? err.message : "حدث خطأ غير متوقع"); }
     finally { setBusy(false); }
   }

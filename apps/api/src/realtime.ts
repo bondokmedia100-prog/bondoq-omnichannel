@@ -2,8 +2,10 @@ import type { Server as HttpServer } from "node:http";
 import jwt from "jsonwebtoken";
 import { Server } from "socket.io";
 import { Presence, Role } from "@prisma/client";
+import { canReadConversation, hasPermission, type SessionUser } from "./auth";
 import { config } from "./config";
 import { prisma } from "./prisma";
+import { releaseAgentConversations } from "./routing";
 
 export let io: Server;
 
@@ -14,30 +16,31 @@ export function initRealtime(server: HttpServer) {
       const token = socket.handshake.auth.token as string;
       if (!token) return next(new Error("unauthorized"));
       const claims = jwt.verify(token, config.jwtSecret, { issuer: "bondoq-support" }) as { id: string; authVersion: number };
-      const user = await prisma.user.findFirst({ where: { id: claims.id, isActive: true }, select: { id: true, role: true, name: true, authVersion: true } });
+       const user = await prisma.user.findFirst({ where: { id: claims.id, isActive: true }, select: { id: true, role: true, name: true, authVersion: true, department: true, branchId: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true } });
       if (!user || user.authVersion !== claims.authVersion) return next(new Error("unauthorized"));
       socket.data.user = user;
       next();
     } catch { next(new Error("unauthorized")); }
   });
   io.on("connection", (socket) => {
-    const user = socket.data.user as { id: string; role: Role };
+    const user = socket.data.user as SessionUser;
     socket.join(`user:${user.id}`);
-    socket.join(user.role === Role.ADMIN || user.role === Role.SUPERVISOR ? "admins" : `agent:${user.id}`);
+    socket.join(`agent:${user.id}`);
+    if (user.role === Role.ADMIN || hasPermission(user, "canViewAllConversations")) socket.join("admins");
     socket.on("conversation:join", async (conversationId: string) => {
-      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true } });
-      if (!conversation || (user.role === Role.AGENT && conversation.assignedAgentId !== user.id)) return;
+      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true } });
+      if (!conversation || !canReadConversation(user, conversation)) return;
       socket.join(`conversation:${conversationId}`);
-      if (user.role !== Role.AGENT) {
+      if (user.role === Role.ADMIN || hasPermission(user, "canViewAllConversations")) {
         io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: true, userId: user.id });
       }
     });
     socket.on("conversation:leave", (conversationId: string) => {
       socket.leave(`conversation:${conversationId}`);
-      if (user.role !== Role.AGENT) io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: false, userId: user.id });
+      if (user.role === Role.ADMIN || hasPermission(user, "canViewAllConversations")) io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: false, userId: user.id });
     });
     socket.on("disconnect", () => {
-      if (user.role !== Role.AGENT) return;
+      if (user.role !== Role.AGENT && user.role !== Role.BRANCH_USER) return;
       setTimeout(async () => {
         try {
           if ((await io.in(`agent:${user.id}`).fetchSockets()).length) return;
@@ -50,6 +53,7 @@ export function initRealtime(server: HttpServer) {
             prisma.auditLog.create({ data: { actorId: user.id, action: "AGENT_DISCONNECTED" } })
           ]);
           io.to("admins").emit("presence:updated", { userId: user.id, presence: Presence.OFFLINE });
+          await releaseAgentConversations(user.id);
         } catch (error) { console.error("Agent disconnect cleanup failed", error); }
       }, 30_000);
     });

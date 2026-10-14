@@ -11,6 +11,7 @@ enum Role {
   ADMIN
   SUPERVISOR
   AGENT
+  BRANCH_USER
 }
 
 enum Department {
@@ -18,6 +19,10 @@ enum Department {
   DELIVERY
   CUSTOMER_CARE
   QUALITY
+  HEADQUARTERS
+  WORK_FROM_HOME
+  BRANCH
+  ADMINISTRATION
 }
 
 enum Presence {
@@ -79,25 +84,46 @@ enum MessageKind {
 }
 
 model User {
-  id              String         @id @default(cuid())
-  email           String         @unique
-  username        String         @unique
-  name            String
-  passwordHash    String
-  authVersion     Int            @default(0)
-  role            Role           @default(AGENT)
-  department      Department?
-  presence        Presence       @default(OFFLINE)
-  isActive        Boolean        @default(true)
-  lastSeenAt      DateTime?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  assignedChats   Conversation[] @relation("AssignedAgent")
-  sessions        AgentSession[]
-  auditLogs       AuditLog[]
-  whisperNotes    WhisperNote[]
-  sentMessages    Message[]       @relation("MessageAuthor")
-  csatSurveys     CsatSurvey[]    @relation("CsatAgent")
+  id                       String             @id @default(cuid())
+  email                    String             @unique
+  username                 String             @unique
+  name                     String
+  passwordHash             String
+  authVersion              Int                @default(0)
+  role                     Role               @default(AGENT)
+  department               Department?
+  branchId                 String?
+  canViewAllConversations  Boolean?
+  canTransferConversations Boolean?
+  canManageCatalog         Boolean?
+  canViewReports           Boolean?
+  canManageTeam            Boolean?
+  presence                 Presence           @default(OFFLINE)
+  isActive                 Boolean            @default(true)
+  lastSeenAt               DateTime?
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+  assignedChats            Conversation[]     @relation("AssignedAgent")
+  sessions                 AgentSession[]
+  auditLogs                AuditLog[]
+  whisperNotes             WhisperNote[]
+  sentMessages             Message[]          @relation("MessageAuthor")
+  csatSurveys              CsatSurvey[]       @relation("CsatAgent")
+  mediaAssets              MediaAsset[]       @relation("MediaUploader")
+  pushSubscriptions        PushSubscription[]
+  branch                   Branch?            @relation("BranchUsers", fields: [branchId], references: [id], onDelete: SetNull)
+
+  @@index([branchId, role, presence, isActive])
+}
+
+model Branch {
+  id            String         @id
+  name          String
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  users         User[]         @relation("BranchUsers")
+  conversations Conversation[] @relation("BranchConversations")
 }
 
 model AgentSession {
@@ -128,58 +154,64 @@ model Customer {
 }
 
 model Conversation {
-  id                    String             @id @default(cuid())
-  customerId            String
-  channel               Channel
+  id                     String             @id @default(cuid())
+  customerId             String
+  channel                Channel
   externalConversationId String
-  externalCustomerId    String
-  status                ConversationStatus @default(OPEN)
-  assignedAgentId       String?
-  subject               String?
-  unreadCount           Int                @default(0)
-  lastMessageAt         DateTime           @default(now())
-  lastAgentResponseAt   DateTime?
-  firstResponseAt       DateTime?
-  slaBreachedAt         DateTime?
-  lastInboundAt         DateTime?
-  awaitingRouting       Boolean            @default(false)
-  routingDepartment     Department?
-  isComplaint           Boolean            @default(false)
-  closedAt              DateTime?
-  createdAt             DateTime           @default(now())
-  updatedAt             DateTime           @updatedAt
-  customer              Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  assignedAgent         User?              @relation("AssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
-  messages              Message[]
-  whisperNotes          WhisperNote[]
-  orderDetails          OrderDetails[]
-  auditLogs             AuditLog[]
-  csatSurvey            CsatSurvey?
+  externalCustomerId     String
+  status                 ConversationStatus @default(OPEN)
+  assignedAgentId        String?
+  subject                String?
+  unreadCount            Int                @default(0)
+  lastMessageAt          DateTime           @default(now())
+  lastAgentResponseAt    DateTime?
+  firstResponseAt        DateTime?
+  slaBreachedAt          DateTime?
+  lastInboundAt          DateTime?
+  awaitingRouting        Boolean            @default(false)
+  routingDepartment      Department?
+  branchId               String?
+  isComplaint            Boolean            @default(false)
+  closedAt               DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+  customer               Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  assignedAgent          User?              @relation("AssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  branch                 Branch?            @relation("BranchConversations", fields: [branchId], references: [id], onDelete: SetNull)
+  messages               Message[]
+  whisperNotes           WhisperNote[]
+  orderDetails           OrderDetails[]
+  auditLogs              AuditLog[]
+  csatSurvey             CsatSurvey?
 
   @@unique([channel, externalConversationId])
   @@index([assignedAgentId, status, lastMessageAt])
+  @@index([branchId, status, lastMessageAt])
   @@index([status, slaBreachedAt])
 }
 
 model Message {
-  id             String           @id @default(cuid())
-  conversationId String
-  authorId       String?
-  direction      MessageDirection
-  kind           MessageKind      @default(TEXT)
-  text           String?
-  mediaUrl       String?
-  latitude       Float?
-  longitude      Float?
-  externalId     String?          @unique
-  metadata       Json             @default("{}")
-  transcription  String?          @db.Text
-  productId      String?
-  createdAt      DateTime         @default(now())
-  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  author         User?            @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
-  product        Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
-  cakeReferenceOrders OrderDetails[] @relation("CakeReferenceImage")
+  id                  String           @id @default(cuid())
+  conversationId      String
+  authorId            String?
+  direction           MessageDirection
+  kind                MessageKind      @default(TEXT)
+  text                String?
+  mediaUrl            String?
+  mediaAssetId        String?
+  deliveryStatus      String?
+  latitude            Float?
+  longitude           Float?
+  externalId          String?          @unique
+  metadata            Json             @default("{}")
+  transcription       String?          @db.Text
+  productId           String?
+  createdAt           DateTime         @default(now())
+  conversation        Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author              User?            @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  product             Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+  mediaAsset          MediaAsset?      @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
+  cakeReferenceOrders OrderDetails[]   @relation("CakeReferenceImage")
 
   @@index([conversationId, createdAt])
 }
@@ -197,53 +229,70 @@ model WhisperNote {
 }
 
 model OrderDetails {
-  id             String       @id @default(cuid())
-  customerId     String
-  conversationId String?
-  product        String?
-  size           String?
-  filling        String?
-  cakeMessage    String?
-  deliveryAt     DateTime?
-  deliveryAddress String?
-  notes          String?
-  price          Decimal?     @db.Decimal(10, 2)
-  currency       String       @default("EGP")
+  id                      String        @id @default(cuid())
+  customerId              String
+  conversationId          String?
+  product                 String?
+  size                    String?
+  filling                 String?
+  cakeMessage             String?
+  deliveryAt              DateTime?
+  deliveryAddress         String?
+  notes                   String?
+  price                   Decimal?      @db.Decimal(10, 2)
+  currency                String        @default("EGP")
   referenceImageMessageId String?
-  status         OrderStatus  @default(DRAFT)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  customer       Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  referenceImage Message?     @relation("CakeReferenceImage", fields: [referenceImageMessageId], references: [id], onDelete: SetNull)
+  status                  OrderStatus   @default(DRAFT)
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+  customer                Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation            Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  referenceImage          Message?      @relation("CakeReferenceImage", fields: [referenceImageMessageId], references: [id], onDelete: SetNull)
 
   @@index([customerId, createdAt])
 }
 
 model IntegrationSetting {
-  id                       String   @id
-  endpoint                 String
-  instanceId               String?
-  apiKeyCiphertext         String?  @db.Text
-  qrCodePayloadCiphertext  String?  @db.Text
-  appSecretCiphertext      String?  @db.Text
-  verifyTokenCiphertext    String?  @db.Text
-  updatedAt                DateTime @updatedAt
+  id                      String   @id
+  endpoint                String
+  instanceId              String?
+  apiKeyCiphertext        String?  @db.Text
+  qrCodePayloadCiphertext String?  @db.Text
+  appSecretCiphertext     String?  @db.Text
+  verifyTokenCiphertext   String?  @db.Text
+  updatedAt               DateTime @updatedAt
 }
 
 model Product {
-  id          String          @id @default(cuid())
-  name        String
-  category    ProductCategory
-  price       Decimal         @db.Decimal(10, 2)
-  imageUrl    String?
-  description String?         @db.Text
-  isAvailable Boolean         @default(true)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  messages    Message[]
+  id           String          @id @default(cuid())
+  name         String
+  category     ProductCategory
+  price        Decimal         @db.Decimal(10, 2)
+  imageUrl     String?
+  imageAssetId String?
+  description  String?         @db.Text
+  isAvailable  Boolean         @default(true)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  messages     Message[]
+  imageAsset   MediaAsset?     @relation("ProductImage", fields: [imageAssetId], references: [id], onDelete: SetNull)
 
   @@index([category, isAvailable])
+}
+
+model MediaAsset {
+  id          String    @id @default(cuid())
+  fileName    String
+  contentType String
+  size        Int
+  data        Bytes
+  createdById String?
+  createdAt   DateTime  @default(now())
+  createdBy   User?     @relation("MediaUploader", fields: [createdById], references: [id], onDelete: SetNull)
+  messages    Message[]
+  products    Product[] @relation("ProductImage")
+
+  @@index([createdAt])
 }
 
 model CsatSurvey {
@@ -261,13 +310,13 @@ model CsatSurvey {
 }
 
 model AuditLog {
-  id             String       @id @default(cuid())
+  id             String        @id @default(cuid())
   actorId        String?
   conversationId String?
   action         String
-  details        Json         @default("{}")
-  createdAt      DateTime     @default(now())
-  actor          User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  details        Json          @default("{}")
+  createdAt      DateTime      @default(now())
+  actor          User?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
   conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
 
   @@index([createdAt])
@@ -282,4 +331,32 @@ model CannedResponse {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  endpoint  String   @unique @db.Text
+  p256dh    String   @db.Text
+  auth      String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model AutoReplyRule {
+  id                String      @id @default(cuid())
+  name              String
+  keywords          String[]    @default([])
+  responseText      String      @db.Text
+  routingDepartment Department?
+  isActive          Boolean     @default(true)
+  isWelcome         Boolean     @default(false)
+  priority          Int         @default(0)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@index([isActive, priority])
 }

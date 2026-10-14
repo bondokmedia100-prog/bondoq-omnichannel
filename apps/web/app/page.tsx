@@ -8,7 +8,7 @@ export default function HomePage() {
   const router = useRouter();
   useEffect(() => {
     if (!localStorage.getItem("bondoq_token")) return router.replace("/login");
-    api("/api/auth/me").then((user) => router.replace(user.role === "AGENT" ? "/agent/workspace" : "/admin/dashboard")).catch(() => {
+    api("/api/auth/me").then((user) => router.replace(user.role === "AGENT" || user.role === "BRANCH_USER" ? "/agent/workspace" : "/admin/dashboard")).catch(() => {
       localStorage.removeItem("bondoq_token"); router.replace("/login");
     });
   }, [router]);
