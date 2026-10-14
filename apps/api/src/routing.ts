@@ -4,7 +4,7 @@ import IORedis from "ioredis";
 import { config } from "./config";
 import { prisma } from "./prisma";
 import { io } from "./realtime";
-import { chooseLeastLoadedAgent } from "./routingSelection";
+import { chooseRoundRobinAgent } from "./routingSelection";
 
 const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
 export const slaQueue = new Queue("conversation-sla", { connection });
@@ -37,15 +37,9 @@ export async function assignConversation(conversationId: string, department?: De
     if (waiting.status === ConversationStatus.QUEUED && !waiting.assignedAgentId) io?.to("admins").emit("conversation:queued", waiting);
     return waiting;
   }
-  const activeCounts = await prisma.conversation.groupBy({
-    by: ["assignedAgentId"],
-    where: { assignedAgentId: { in: agents.map((agent) => agent.id) }, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
-    _count: { _all: true }
-  });
-  const load = new Map(activeCounts.map((entry) => [entry.assignedAgentId!, entry._count._all]));
   const turnKey = isBranchQueue ? `branch:${currentConversation.branchId || "unassigned"}` : hqAndRemote ? "hq-wfh" : targetDepartment || "all";
   const turn = await connection.incr(`assignment:round-robin:${turnKey}`) - 1;
-  const agent = chooseLeastLoadedAgent(agents, load, turn);
+  const agent = chooseRoundRobinAgent(agents, turn);
   if (!agent) return currentConversation;
   const claimed = await prisma.conversation.updateMany({ where: { id: conversationId, assignedAgentId: null, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] } }, data: { assignedAgentId: agent.id, status: ConversationStatus.OPEN } });
   if (!claimed.count) return prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
