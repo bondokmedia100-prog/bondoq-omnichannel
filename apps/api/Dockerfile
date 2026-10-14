@@ -18,5 +18,4 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/dist ./dist
 EXPOSE 4000
-VOLUME ["/data"]
 CMD ["sh", "-c", "npx prisma db push && npm run db:replace-catalog && node dist/src/server.js"]
