@@ -170,6 +170,7 @@ model Conversation {
   lastInboundAt          DateTime?
   awaitingRouting        Boolean            @default(false)
   routingDepartment      Department?
+  serviceTag             String?
   branchId               String?
   isComplaint            Boolean            @default(false)
   closedAt               DateTime?
