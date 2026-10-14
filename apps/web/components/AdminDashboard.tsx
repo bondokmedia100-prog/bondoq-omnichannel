@@ -11,6 +11,7 @@ import { MessengerSettingsModal, TelegramSettingsModal } from "./ChannelIntegrat
 import PushNotificationsButton from "./PushNotificationsButton";
 import InstallAppButton from "./InstallAppButton";
 import TeamManagementModal from "./TeamManagementModal";
+import IncomingWhatsAppCallModal from "./IncomingWhatsAppCallModal";
 import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
@@ -32,6 +33,8 @@ export default function AdminDashboard() {
   const [detail, setDetail] = useState<AnyRecord | null>(null);
   const [whisper, setWhisper] = useState("");
   const [adminReply, setAdminReply] = useState("");
+  const [internalNote, setInternalNote] = useState("");
+  const [showInternalNotes, setShowInternalNotes] = useState(false);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
@@ -45,6 +48,7 @@ export default function AdminDashboard() {
   const [showTelegram, setShowTelegram] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [incomingNotifications, setIncomingNotifications] = useState<AnyRecord[]>([]);
+  const [incomingCall, setIncomingCall] = useState<AnyRecord | null>(null);
   const [showNotifications, setShowNotifications] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -113,7 +117,10 @@ export default function AdminDashboard() {
       connection.on("csat:low", (event) => { setCsatAlert(`تقييم منخفض (${event.rating}/5) من ${event.customer?.name || "عميل"}.`); load(profile); });
       connection.on("csat:received", () => load(profile));
       connection.on("csat:delivery-failed", (event) => { setCsatAlert(`تعذر إرسال استبيان الرضا للمحادثة ${event.conversationId}.`); load(profile); });
-      connection.on("whisper:new", (note) => setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old));
+       connection.on("whisper:new", (note) => setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old));
+       connection.on("conversation-note:new", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, internalNotes: [...(old.internalNotes || []).filter((note: AnyRecord) => note.id !== event.note.id), event.note].sort((a: AnyRecord, b: AnyRecord) => a.createdAt.localeCompare(b.createdAt)) } : old));
+       connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
+       connection.on("whatsapp:call-ended", (event) => setIncomingCall((current: AnyRecord) => current?.callId === event.callId ? null : current));
       for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached", "team:updated"]) connection.on(event, () => load(profile));
       const requestedConversationId = new URLSearchParams(window.location.search).get("conversation");
       if (requestedConversationId) {
@@ -133,7 +140,7 @@ export default function AdminDashboard() {
     if (selected && selected.id !== item.id) socket?.emit("conversation:leave", selected.id);
     const request = ++detailRequest.current;
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== item.id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
-    detailLoadingIdRef.current = item.id; stickToBottom.current = true; setShowJumpToBottom(false); setSelected(item); setDetail(null); setError(""); socket?.emit("conversation:join", item.id);
+     detailLoadingIdRef.current = item.id; stickToBottom.current = true; setShowJumpToBottom(false); setShowInternalNotes(false); setInternalNote(""); setSelected(item); setDetail(null); setError(""); socket?.emit("conversation:join", item.id);
     try {
       const conversation = await api(`/api/conversations/${item.id}`);
       if (request === detailRequest.current) {
@@ -154,6 +161,32 @@ export default function AdminDashboard() {
     e.preventDefault(); if (!selected || !whisper.trim()) return;
     try { await api(`/api/conversations/${selected.id}/whisper`, { method: "POST", body: JSON.stringify({ text: whisper }) }); setWhisper(""); setDetail(await api(`/api/conversations/${selected.id}`)); }
     catch (e) { setError(e instanceof Error ? e.message : "تعذر إرسال الهمسة"); }
+  }
+  async function sendInternalNote(e: FormEvent) {
+    e.preventDefault(); if (!selected || !internalNote.trim()) return;
+    const conversationId = selected.id;
+    try {
+      const note = await api(`/api/conversations/${conversationId}/notes`, { method: "POST", body: JSON.stringify({ text: internalNote.trim() }) });
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, internalNotes: [...(old.internalNotes || []).filter((item: AnyRecord) => item.id !== note.id), note].sort((a: AnyRecord, b: AnyRecord) => a.createdAt.localeCompare(b.createdAt)) } : old);
+      setInternalNote(""); setError("");
+    } catch (e) { setError(e instanceof Error ? e.message : "تعذرت إضافة الملاحظة الداخلية"); }
+  }
+  async function rejectIncomingWhatsAppCall() {
+    if (!incomingCall) return;
+    const call = incomingCall;
+    await api("/api/integrations/whatsapp/calls/reject", { method: "POST", body: JSON.stringify({ callId: call.callId, callerJid: call.callerJid }) });
+    setIncomingCall(null);
+    if (call.conversationId) {
+      const item = conversations.find((chat) => chat.id === call.conversationId) || { id: call.conversationId, customer: { name: call.customerName, phone: call.phoneNumber }, channel: "WHATSAPP" };
+      void openConversation(item);
+    }
+    setSuccessMessage("رُفضت المكالمة وأُرسل الرد التلقائي عبر WhatsApp.");
+  }
+  function openIncomingCallConversation() {
+    if (!incomingCall?.conversationId) return;
+    const call = incomingCall; setIncomingCall(null);
+    const item = conversations.find((chat) => chat.id === call.conversationId) || { id: call.conversationId, customer: { name: call.customerName, phone: call.phoneNumber }, channel: "WHATSAPP" };
+    void openConversation(item);
   }
   async function sendAdminReply(e: FormEvent) {
     e.preventDefault(); if (!selected || !adminReply.trim()) return;
@@ -220,7 +253,8 @@ export default function AdminDashboard() {
       <div className="flex items-center gap-3"><BrandMark /><div><div className="text-lg font-extrabold text-stone-800">مركز القيادة</div><div className="text-[11px] text-stone-400">المراقبة الحية وإدارة الفريق</div></div></div>
       <div className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 sm:flex"><span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" /> النظام متصل</div>
         <div className="flex items-center gap-1 sm:gap-2"><button type="button" aria-label="فتح إشعارات الرسائل" onClick={() => setShowNotifications((open) => !open)} className="relative grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-stone-100"><Bell size={18} />{incomingNotifications.length > 0 ? <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{incomingNotifications.length}</span> : kpis.slaBreached > 0 && <i className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500" />}</button><PushNotificationsButton /><InstallAppButton /><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-10 w-10 place-items-center rounded-xl ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><span className="hidden text-sm font-bold text-stone-700 sm:inline">{user?.name || "المدير"}</span><button onClick={() => setShowAccount(true)} title="إعدادات الحساب" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-amber-50 hover:text-amber-700"><UserRound size={18} /></button><button onClick={logout} title="تسجيل الخروج" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-red-50 hover:text-red-600"><LogOut size={18} /></button></div>
-     </div></header>
+      </div></header>
+      <div className="mx-auto flex max-w-[1500px] justify-end px-4 pt-3 sm:px-7"><a href="/contacts" className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2 text-xs font-bold text-stone-700 shadow-sm hover:border-amber-300 hover:text-amber-800"><Users size={15} /> جهات الاتصال ودليل الشركة</a></div>
 
      {showNotifications && <><div className="fixed inset-0 z-40 bg-stone-900/20" onClick={() => setShowNotifications(false)} aria-hidden="true" /><aside dir="rtl" role="dialog" aria-label="إشعارات الرسائل الجديدة" className="fixed inset-y-0 right-0 z-50 flex w-[min(380px,100vw)] flex-col border-l border-stone-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div><h2 className="text-sm font-extrabold">رسائل جديدة</h2><p className="mt-1 text-[10px] text-stone-400">تظهر هنا آخر الرسائل الواردة مباشرة</p></div><div className="flex items-center gap-2">{incomingNotifications.length > 0 && <button type="button" onClick={() => setIncomingNotifications([])} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-stone-500 hover:bg-stone-100">مسح الكل</button>}<button type="button" onClick={() => setShowNotifications(false)} aria-label="إغلاق الإشعارات" className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={18} /></button></div></div><div className="soft-scroll flex-1 overflow-y-auto p-3">{incomingNotifications.length ? incomingNotifications.map((notification) => <button key={notification.id} type="button" onClick={() => { const item = conversations.find((chat) => chat.id === notification.conversationId) || { id: notification.conversationId, customer: { name: notification.customerName }, channel: notification.channel }; setIncomingNotifications((old) => old.filter((entry) => entry.id !== notification.id)); setShowNotifications(false); void openConversation(item); }} className="mb-2 flex w-full flex-col rounded-xl border border-stone-100 bg-[#fffdf7] p-3 text-right transition hover:border-amber-200 hover:bg-[#fff8e9]"><span className="flex w-full items-center justify-between gap-2"><b className="truncate text-xs text-stone-800">{notification.customerName}</b><span className="shrink-0 text-[9px] text-stone-400">{timeAgo(notification.createdAt)}</span></span><span className="mt-1 text-[9px] font-bold text-emerald-700">{channelLabel[notification.channel] || "قناة جديدة"}</span><span className="mt-1 line-clamp-3 w-full text-xs leading-5 text-stone-600">{notification.preview}</span></button>) : <div className="grid h-full place-items-center px-8 text-center text-xs text-stone-400"><div><Bell size={26} className="mx-auto mb-3 text-stone-300" />لا توجد رسائل جديدة الآن.</div></div>}</div></aside></>}
 
@@ -256,29 +290,42 @@ export default function AdminDashboard() {
     </div>
 
     {selected && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={closeConversationPreview}><div className="panel flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
-      {detail ? <>
-       <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div className="flex items-center gap-3"><Avatar name={detail.customer?.name || "عميل"} /><div><h3 className="font-extrabold">{detail.customer?.name || "عميل جديد"}</h3><p className="text-xs text-stone-400">{channelLabel[detail.channel]} · {detail.assignedAgent?.name || "غير مسندة"}</p></div></div><button onClick={closeConversationPreview} className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
+       {detail ? <>
+        <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div className="flex items-center gap-3"><Avatar name={detail.customer?.name || "عميل"} /><div><h3 className="font-extrabold">{detail.customer?.name || "عميل جديد"}</h3><p className="text-xs text-stone-400">{channelLabel[detail.channel]} · {detail.assignedAgent?.name || "غير مسندة"}</p></div></div><button onClick={closeConversationPreview} className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
+        <div className="border-b border-stone-100 bg-white px-5 py-2">
+          <button type="button" onClick={() => setShowInternalNotes((open) => !open)} className="flex items-center gap-2 text-xs font-bold text-stone-600 hover:text-[#b88718]"><FileText size={15} /> ملاحظات الفريق <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px]">{detail.internalNotes?.length || 0}</span><span className="mr-auto text-[10px] text-stone-400">{showInternalNotes ? "إخفاء" : "عرض"}</span></button>
+          {showInternalNotes && <div className="space-y-2 pb-2 pt-3">
+            <div className="soft-scroll max-h-32 space-y-2 overflow-y-auto">{(detail.internalNotes || []).map((note: AnyRecord) => <article key={note.id} className="rounded-lg bg-[#fff8e9] px-3 py-2"><p className="whitespace-pre-wrap text-xs leading-5 text-stone-700">{note.text}</p><p className="mt-1 text-[9px] text-stone-400">{note.author?.name || "الفريق"} · {timeAgo(note.createdAt)}</p></article>)}{!detail.internalNotes?.length && <p className="text-xs text-stone-400">لا توجد ملاحظات داخلية بعد.</p>}</div>
+            <form onSubmit={sendInternalNote} className="flex gap-2"><textarea value={internalNote} onChange={(event) => setInternalNote(event.target.value)} maxLength={4000} rows={2} placeholder="أضف ملاحظة للفريق فقط..." className="min-w-0 flex-1 resize-y rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-amber-300" /><button disabled={!internalNote.trim()} className="grid h-10 w-10 shrink-0 place-items-center self-end rounded-lg bg-stone-800 text-white disabled:opacity-40" title="إضافة ملاحظة داخلية"><Send size={15} /></button></form>
+          </div>}
+        </div>
         <div className="flex flex-wrap gap-2 border-b border-stone-100 bg-white px-5 py-2"><button type="button" onClick={() => void setAdminConversationStatus("RESOLVED")} className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-700"><CheckCircle2 size={14} /> حل المحادثة</button><button type="button" onClick={() => void setAdminConversationStatus(detail.status === "CLOSED" || detail.status === "RESOLVED" ? "OPEN" : "CLOSED")} className="flex items-center gap-1.5 rounded-lg bg-stone-100 px-3 py-2 text-[10px] font-bold text-stone-600">{detail.status === "CLOSED" || detail.status === "RESOLVED" ? <MessageCircle size={14} /> : <Archive size={14} />}{detail.status === "CLOSED" || detail.status === "RESOLVED" ? "إعادة فتح" : "إغلاق"}</button><span className="mr-auto self-center text-[10px] text-stone-400">الحالة: {detail.status}</span></div>
         {detail.serviceTag && <div className="border-b border-amber-100 bg-amber-50/60 px-5 py-2 text-xs font-bold text-amber-900">الخدمة المطلوبة: {detail.serviceTag}</div>}
        <div className="flex flex-wrap items-center gap-3 border-b border-stone-100 bg-[#fffdf7] px-5 py-3"><span className="text-xs font-bold text-stone-600">تحويل / استلام</span>{allowed(user, "canTransferConversations") && <><select value={detail.assignedAgentId || ""} onChange={(e) => reassign(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إبقاء في الطابور</option>{agents.filter((a) => a.isActive).map((a) => <option key={a.id} value={a.id}>{a.name}{a.branch?.name ? ` · ${a.branch.name}` : ""} · {presenceLabel[a.presence]}</option>)}</select><select value={detail.branchId || ""} onChange={(e) => void routeToBranch(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">توجيه إلى طابور فرع</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></>}<span className="mr-auto text-xs text-stone-400">{detail.slaBreachedAt ? "تجاوزت مهلة الرد" : "مراقبة مباشرة"}</span></div>
        <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex-1 space-y-3 overflow-y-auto bg-[#fffdf7] px-5 py-4">{(detail.messages || []).map((message: AnyRecord) => <div key={message.id} className={`flex ${message.direction === "OUTBOUND" ? "justify-start" : "justify-end"}`}><div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-7 ${message.direction === "OUTBOUND" ? "rounded-tr-sm bg-white shadow-sm" : "rounded-tl-sm bg-[#fce8c5]"}`}>{["IMAGE", "AUDIO", "FILE"].includes(message.kind) && (message.mediaAssetId || message.direction === "INBOUND" ? <AdminProtectedMedia conversationId={detail.id} message={message} /> : message.kind === "IMAGE" && message.mediaUrl ? <img src={message.mediaUrl} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" /> : message.mediaUrl ? <a href={message.mediaUrl} target="_blank" rel="noreferrer" className="mb-2 block text-xs font-bold text-blue-700 underline">فتح المرفق</a> : null)}{message.text || (message.kind === "LOCATION" ? `موقع: ${message.latitude}, ${message.longitude}` : message.kind === "AUDIO" ? "رسالة صوتية" : "مرفق")}{message.transcription && <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs leading-6 text-stone-600">تفريغ صوتي: {message.transcription}</p>}{message.direction === "OUTBOUND" && <p className="mt-1 text-[10px] text-stone-400">{message.author?.name || "فريق بندق"} · {timeAgo(message.createdAt)}</p>}</div></div>)}<div ref={messageEndRef} />{showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}</div>
-      <div className="space-y-2 border-t border-stone-100 bg-white p-4"><form onSubmit={sendAdminReply} className="flex gap-2"><input value={adminReply} onChange={(e) => setAdminReply(e.target.value)} placeholder="رد مباشر للعميل بصفتك مديرًا..." className="min-w-0 flex-1 rounded-xl border border-stone-200 px-3 text-sm outline-none focus:border-red-200" /><button disabled={!adminReply.trim()} className="grid h-10 w-11 place-items-center rounded-xl bg-[#d32f2f] text-white hover:bg-[#b71c1c] disabled:opacity-40" title="إرسال رد مباشر"><Send size={16} /></button></form><form onSubmit={sendWhisper} className="flex gap-2"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#fff5d8] text-[#ae811e]"><Headset size={17} /></div><input value={whisper} onChange={(e) => setWhisper(e.target.value)} placeholder="توجيه سري للموظف... لا يظهر للعميل" className="min-w-0 flex-1 rounded-xl border border-[#efdda9] bg-[#fffaf0] px-3 text-sm outline-none focus:border-[#d6aa43]" /><button className="grid h-10 w-11 place-items-center rounded-xl bg-[#d5a52e] text-white hover:bg-[#be8d18]" title="إرسال همسة"><Send size={16} /></button></form><p className="pr-12 text-[10px] text-stone-400">الرد المباشر يظهر للعميل، والهمسة للموظف فقط.</p></div>
+       {!!detail.messages?.some((message: AnyRecord) => message.kind === "VIDEO") && <details className="border-t border-stone-100 bg-white px-4 py-2"><summary className="cursor-pointer text-[10px] font-bold text-stone-600">مقاطع الفيديو ({detail.messages.filter((message: AnyRecord) => message.kind === "VIDEO").length})</summary><div className="mt-2 grid gap-3 sm:grid-cols-2">{detail.messages.filter((message: AnyRecord) => message.kind === "VIDEO").map((message: AnyRecord) => <div key={message.id} className="rounded-xl bg-stone-50 p-2"><AdminProtectedMedia conversationId={detail.id} message={message} /><p className="text-[9px] text-stone-400">{message.direction === "OUTBOUND" ? "مرسل" : "وارد"} · {timeAgo(message.createdAt)}</p></div>)}</div></details>}
+       <div className="space-y-2 border-t border-stone-100 bg-white p-4"><form onSubmit={sendAdminReply} className="flex gap-2"><input value={adminReply} onChange={(e) => setAdminReply(e.target.value)} placeholder="رد مباشر للعميل بصفتك مديرًا..." className="min-w-0 flex-1 rounded-xl border border-stone-200 px-3 text-sm outline-none focus:border-red-200" /><button disabled={!adminReply.trim()} className="grid h-10 w-11 place-items-center rounded-xl bg-[#d32f2f] text-white hover:bg-[#b71c1c] disabled:opacity-40" title="إرسال رد مباشر"><Send size={16} /></button></form><form onSubmit={sendWhisper} className="flex gap-2"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#fff5d8] text-[#ae811e]"><Headset size={17} /></div><input value={whisper} onChange={(e) => setWhisper(e.target.value)} placeholder="توجيه سري للموظف... لا يظهر للعميل" className="min-w-0 flex-1 rounded-xl border border-[#efdda9] bg-[#fffaf0] px-3 text-sm outline-none focus:border-[#d6aa43]" /><button className="grid h-10 w-11 place-items-center rounded-xl bg-[#d5a52e] text-white hover:bg-[#be8d18]" title="إرسال همسة"><Send size={16} /></button></form><p className="pr-12 text-[10px] text-stone-400">الرد المباشر يظهر للعميل، والهمسة للموظف فقط.</p></div>
       </> : <div className="grid min-h-72 flex-1 place-items-center text-sm text-stone-400">جارٍ تحميل المحادثة...</div>}
     </div></div>}
 
+        {incomingCall && <IncomingWhatsAppCallModal call={incomingCall} onReject={rejectIncomingWhatsAppCall} onOpenConversation={openIncomingCallConversation} onDismiss={() => setIncomingCall(null)} />}
         {showStaff && <TeamManagementModal onClose={() => setShowStaff(false)} onDone={() => { void load(); }} />}
        {showProducts && <ProductManagementModal onClose={() => setShowProducts(false)} />}
        {showAutoReplies && <AutoReplyRulesModal onClose={() => setShowAutoReplies(false)} />}
        {showCannedResponses && <CannedResponsesModal onClose={() => setShowCannedResponses(false)} />}
-      {showKalemly && <KalemlySettingsModal onClose={() => setShowKalemly(false)} />}
+      {showKalemly && <KalemlySettingsModal socket={socket} onClose={() => setShowKalemly(false)} />}
       {showMessenger && <MessengerSettingsModal onClose={() => setShowMessenger(false)} />}
       {showTelegram && <TelegramSettingsModal onClose={() => setShowTelegram(false)} />}
       {showAccount && user && <AccountSettingsModal user={user} onClose={() => setShowAccount(false)} onSaved={setUser} />}
   </main>;
 }
 
-function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
+function KalemlySettingsModal({ onClose, socket }: { onClose: () => void; socket: Socket | null }) {
   const [settings, setSettings] = useState<AnyRecord | null>(null);
+  const [mode, setMode] = useState<"BAILEYS" | "API">("BAILEYS");
+  const [connection, setConnection] = useState<AnyRecord>({ status: "DISCONNECTED", qrDataUrl: "", phoneNumber: "", accountName: "", lastError: "" });
+  const [callReplyText, setCallReplyText] = useState("أهلاً بك، نحن متاحون للرد على رسائلك الكتابية والصوتية هنا فوراً، أو يمكنك الاتصال بنا هاتفياً على رقم خدمة العملاء.");
+  const [showLegacySettings, setShowLegacySettings] = useState(false);
   const [authKey, setAuthKey] = useState("");
   const [appKey, setAppKey] = useState("");
   const [qrCodePayload, setQrCodePayload] = useState("");
@@ -296,9 +343,19 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     api("/api/admin/integrations/kalemlywa").then((result) => {
       setSettings(result);
+      setMode(result.whatsappMode === "API" ? "API" : "BAILEYS");
+      setConnection(result.whatsappConnection || { status: "DISCONNECTED", qrDataUrl: "", phoneNumber: "", accountName: "", lastError: "" });
+      setCallReplyText(result.callReplyText || "أهلاً بك، نحن متاحون للرد على رسائلك الكتابية والصوتية هنا فوراً، أو يمكنك الاتصال بنا هاتفياً على رقم خدمة العملاء.");
       setQrCodePayload(result.qrCodePayload || "");
     }).catch((error) => setNotice(error instanceof Error ? error.message : "تعذر تحميل إعدادات واتساب"));
   }, []);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onStatus = (next: AnyRecord) => { setConnection(next); setMode(next.mode === "API" ? "API" : "BAILEYS"); };
+    socket.on("whatsapp:status", onStatus);
+    return () => { socket.off("whatsapp:status", onStatus); };
+  }, [socket]);
 
   useEffect(() => {
     let current = true;
@@ -338,10 +395,39 @@ function KalemlySettingsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  async function changeMode(nextMode: "BAILEYS" | "API") {
+    setNotice("");
+    try {
+      const result = await api("/api/admin/integrations/whatsapp/mode", { method: "PUT", body: JSON.stringify({ mode: nextMode }) });
+      setMode(result.mode); setConnection(result.state); setNotice(nextMode === "BAILEYS" ? "تم تفعيل محرك QR الداخلي مع الاحتفاظ بإعداد API القديم." : "تم تفعيل الربط الاحتياطي عبر API القديم.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تبديل وضع WhatsApp"); }
+  }
+
+  async function controlSession(action: "start" | "restart" | "logout") {
+    setNotice("");
+    try {
+      const next = await api(`/api/admin/integrations/whatsapp/baileys/${action}`, { method: "POST" });
+      setConnection(next);
+      setNotice(action === "logout" ? "تم تسجيل الخروج وحذف جلسة QR. امسح الرمز الجديد للربط مرة أخرى." : action === "restart" ? "أُعيد تشغيل اتصال WhatsApp." : "بدأ محرك WhatsApp الداخلي.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تنفيذ أمر الاتصال"); }
+  }
+
+  async function saveCallReply(event: FormEvent) {
+    event.preventDefault();
+    try {
+      const result = await api("/api/admin/integrations/whatsapp/call-reply", { method: "PUT", body: JSON.stringify({ text: callReplyText }) });
+      setCallReplyText(result.text); setNotice("تم حفظ الرد التلقائي للمكالمات المرفوضة.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ الرد التلقائي"); }
+  }
+
   return <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/50 p-3 backdrop-blur-sm" onClick={onClose}>
-    <section className="panel max-h-[94vh] w-full max-w-3xl overflow-y-auto p-5 sm:p-6" onClick={(event) => event.stopPropagation()}>
-      <div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-bold text-emerald-700">WhatsApp Business · KalemlyWA</p><h2 className="mt-1 text-xl font-extrabold">إعداد اتصال واتساب</h2><p className="mt-1 text-xs leading-5 text-stone-500">أدخل مفتاح الحساب ومفتاح التطبيق كلًّا في خانته؛ يُخزّنان مشفّرين. حمولة QR اختيارية.</p></div><button onClick={onClose} aria-label="إغلاق" className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
-      <div className="grid gap-5 md:grid-cols-[1fr_.9fr]">
+    <section className="panel max-h-[94vh] w-full max-w-5xl overflow-y-auto p-5 sm:p-6" onClick={(event) => event.stopPropagation()}>
+      <div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-bold text-emerald-700">WhatsApp Business · محرك داخلي وAPI احتياطي</p><h2 className="mt-1 text-xl font-extrabold">إعداد اتصال واتساب</h2><p className="mt-1 text-xs leading-5 text-stone-500">اختر محرك QR الداخلي أو أبقِ KalemlyWA كخيار احتياطي دون حذف إعداداته.</p></div><button onClick={onClose} aria-label="إغلاق" className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
+      <section className="mb-5 grid gap-4 rounded-2xl border border-stone-100 bg-[#faf9f7] p-4 lg:grid-cols-[1fr_1.1fr]"><div className="space-y-3"><label className="block text-xs font-bold text-stone-600">وضع اتصال WhatsApp<select value={mode} onChange={(event) => void changeMode(event.target.value as "BAILEYS" | "API")} className="mt-1 h-11 w-full rounded-xl border border-stone-200 bg-white px-3 text-sm"><option value="BAILEYS">المحرك الداخلي عبر QR (Baileys)</option><option value="API">الربط الاحتياطي عبر KalemlyWA API</option></select></label><div className={`rounded-xl px-3 py-2 text-xs font-bold ${connection.status === "CONNECTED" ? "bg-emerald-50 text-emerald-800" : connection.status === "DISCONNECTED" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-800"}`}>{connection.status === "CONNECTED" ? `متصل بنجاح · ${connection.accountName || "WhatsApp"} · ${connection.phoneNumber || ""}` : connection.status === "AWAITING_QR" ? "في انتظار مسح رمز QR" : connection.status === "CONNECTING" ? "جارٍ الاتصال بخوادم WhatsApp..." : mode === "BAILEYS" ? "غير متصل · ابدأ الاتصال لإنشاء رمز QR" : "وضع API الاحتياطي نشط"}{connection.lastError && <p className="mt-1 font-normal">{connection.lastError}</p>}</div><div className="flex flex-wrap gap-2">{mode === "BAILEYS" && <><button type="button" onClick={() => void controlSession("start")} className="rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">بدء الاتصال / تحديث QR</button><button type="button" onClick={() => void controlSession("restart")} className="rounded-lg bg-stone-800 px-3 py-2 text-[10px] font-bold text-white">إعادة تشغيل</button><button type="button" onClick={() => void controlSession("logout")} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-[10px] font-bold text-red-700">تسجيل خروج وحذف الجلسة</button></>}</div><p className="text-[10px] leading-5 text-stone-500">تُحفظ الجلسة في مجلد بيانات دائم على الخادم. عند الاستضافة يجب ربط Volume بمسار <code dir="ltr">/data</code> حتى تبقى الجلسة بعد إعادة النشر.</p></div><div className="grid min-h-48 place-items-center rounded-xl border border-dashed border-stone-300 bg-white p-3 text-center">{mode === "BAILEYS" && connection.status === "AWAITING_QR" && connection.qrDataUrl ? <div><img src={connection.qrDataUrl} alt="QR مباشر لربط WhatsApp" className="mx-auto h-52 w-52"/><p className="mt-2 text-[10px] text-amber-800">امسح الرمز من WhatsApp ← الأجهزة المرتبطة. يتحدث الرمز تلقائيًا عند انتهائه.</p></div> : mode === "BAILEYS" && connection.status === "CONNECTED" ? <div className="text-center"><span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-emerald-100 text-emerald-700"><CheckCircle2 size={24}/></span><p className="mt-2 text-sm font-extrabold text-emerald-800">WhatsApp متصل</p><p dir="ltr" className="mt-1 text-xs text-stone-500">{connection.phoneNumber}</p><p className="text-xs text-stone-500">{connection.accountName}</p></div> : mode === "BAILEYS" ? <div className="max-w-sm text-xs leading-6 text-stone-400"><QrCode size={28} className="mx-auto mb-2"/>سيظهر QR هنا مباشرة من المحرك الداخلي بعد بدء الاتصال.</div> : <div className="max-w-sm text-xs leading-6 text-stone-400">المحرك الداخلي متوقف أثناء استخدام KalemlyWA. إعداداته محفوظة ويمكن الرجوع إليه في أي وقت.</div>}</div></section>
+      <form onSubmit={saveCallReply} className="mb-5 flex flex-col gap-2 rounded-2xl border border-amber-100 bg-amber-50/60 p-4"><label className="text-xs font-bold text-amber-950">الرد النصي التلقائي بعد رفض مكالمة واردة<textarea value={callReplyText} onChange={(event) => setCallReplyText(event.target.value)} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs leading-5 outline-none focus:border-amber-300" /></label><button className="self-start rounded-lg bg-amber-800 px-3 py-2 text-[10px] font-bold text-white">حفظ الرد التلقائي</button><p className="text-[9px] leading-4 text-amber-900">Baileys يستطيع اكتشاف المكالمة ورفضها فقط؛ لا يدعم الرد الصوتي أو تمرير صوت المكالمة للمتصفح.</p></form>
+       {mode === "BAILEYS" && <div className="mb-5 grid min-h-44 place-items-center rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-center">{connection.qrDataUrl ? <div><img src={connection.qrDataUrl} alt="رمز QR لربط واتساب" className="mx-auto h-52 w-52"/><p className="mt-2 text-[10px] text-stone-500">افتح WhatsApp على الهاتف ← الأجهزة المرتبطة ← ربط جهاز، ثم امسح الرمز.</p></div> : <div className="text-xs leading-6 text-stone-400"><QrCode size={28} className="mx-auto mb-2"/>{connection.status === "CONNECTED" ? "الجهاز مرتبط. استخدم إعادة التشغيل إذا أردت إنشاء رمز جديد." : "سيظهر رمز الربط هنا بعد بدء الاتصال."}</div>}</div>}
+       {mode === "BAILEYS" && <button type="button" onClick={() => setShowLegacySettings((value) => !value)} className="mb-3 rounded-lg border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600">{showLegacySettings ? "إخفاء إعدادات الربط القديم" : "إعدادات الربط القديم الاحتياطي (KalemlyWA)"}</button>}
+      <div className={mode === "API" || showLegacySettings ? "grid gap-5 md:grid-cols-[1fr_.9fr]" : "hidden"}>
         <div className="space-y-4">
           <form onSubmit={save} className="space-y-3 rounded-2xl bg-[#faf9f7] p-4">
             <label className="block text-xs font-bold text-stone-600">عنوان الإرسال<input readOnly value={settings?.endpoint || "جارٍ التحميل..."} className="mt-1 h-10 w-full rounded-xl border border-stone-200 bg-stone-100 px-3 text-[11px] font-normal text-stone-500" dir="ltr" /></label>
@@ -388,6 +474,7 @@ function AdminProtectedMedia({ conversationId, message }: { conversationId: stri
   if (!url) return <span className="mb-2 block text-[10px] text-stone-400">جارٍ تحميل المرفق...</span>;
   if (message.kind === "IMAGE") return <img src={url} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" />;
   if (message.kind === "AUDIO") return <audio controls src={url} className="mb-2 max-w-full" />;
+  if (message.kind === "VIDEO") return <video controls src={url} className="mb-2 max-h-56 max-w-full rounded-xl" />;
   return <a href={url} download className="mb-2 block text-xs font-bold text-blue-700 underline">تنزيل المرفق</a>;
 }
 
