@@ -241,7 +241,7 @@ export default function AgentWorkspace() {
       connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
       connection.on("whisper:new", (note) => { setDetail((old: AnyRecord) => old ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old); setNotice("أرسل المدير توجيهًا سريًا جديدًا"); });
       connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
-      connection.on("whatsapp:call-ended", (event) => setIncomingCall((current: AnyRecord) => current?.callId === event.callId ? null : current));
+      connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
       connection.on("admin:viewing", (event) => setWatching(Boolean(event.viewing)));
       connection.on("sla:breached", () => setNotice("تنبيه: تجاوزت هذه المحادثة مهلة الرد المحددة."));
        const [chats, replies, catalog, favorites] = await Promise.all([api("/api/conversations"), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites")]);
