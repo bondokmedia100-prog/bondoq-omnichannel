@@ -62,15 +62,13 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
   return response.json();
 }
 
-export async function sendRoutingMenu(channel: Channel, recipient: string) {
-  const prompt = AUTO_REPLY_MENU_TEXT;
+export async function sendRoutingMenu(channel: Channel, recipient: string, prompt = AUTO_REPLY_MENU_TEXT) {
   const choices = [
     { id: "route_branches", title: "1- الفروع" },
-    { id: "route_delivery", title: "2- طلب أوردر جديد" },
-    { id: "route_customer_care", title: "3- خدمة العملاء" },
-    { id: "route_quality", title: "4- الشكاوى" },
-    { id: "route_admin", title: "5- التواصل مع الإدارة" },
-    { id: "route_wholesale", title: "6- طلبات الجملة" }
+    { id: "route_customer_care", title: "2- خدمة العملاء" },
+    { id: "route_wholesale", title: "3- طلبات الجملة" },
+    { id: "route_quality", title: "4- الشكاوى والاقتراحات" },
+    { id: "route_other", title: "5- غير ذلك" }
   ];
   if (channel === Channel.WHATSAPP) {
     return sendToChannel({ channel, recipient, text: prompt });

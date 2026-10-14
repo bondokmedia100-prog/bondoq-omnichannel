@@ -4,7 +4,14 @@ export type AutoReplyRuleMatch = {
   routingDepartment?: string | null;
 };
 
-export const AUTO_REPLY_MENU_TEXT = "أهلاً بك في حلواني بندق، برجاء اختيار الخدمة المطلوبة بإرسال رقم الخدمة:\n1. الفروع\n2. طلب أوردر جديد\n3. خدمة العملاء\n4. الشكاوى\n5. التواصل مع الإدارة\n6. طلبات الجملة";
+const DEFAULT_MENU_GREETING = "أهلاً بك في حلواني بندق، برجاء اختيار الخدمة المطلوبة بإرسال رقم الخدمة:";
+const SERVICE_MENU_OPTIONS = "1. الفروع\n2. خدمة العملاء\n3. طلبات الجملة\n4. الشكاوى والاقتراحات\n5. غير ذلك";
+
+export function buildRoutingMenuText(greeting?: string | null) {
+  return `${greeting?.trim() || DEFAULT_MENU_GREETING}\n${SERVICE_MENU_OPTIONS}`;
+}
+
+export const AUTO_REPLY_MENU_TEXT = buildRoutingMenuText();
 export const AUTO_REPLY_HANDOFF_TEXT = "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء.";
 export const AUTO_REPLY_RESTART_MS = 12 * 60 * 60 * 1000;
 
@@ -12,22 +19,25 @@ export type ServiceChoice = { number: number; label: string; routingDepartment: 
 
 const serviceChoices: Record<number, ServiceChoice> = {
   1: { number: 1, label: "الفروع", routingDepartment: "CUSTOMER_CARE", isComplaint: false },
-  2: { number: 2, label: "طلب أوردر جديد", routingDepartment: "DELIVERY", isComplaint: false },
-  3: { number: 3, label: "خدمة العملاء", routingDepartment: "CUSTOMER_CARE", isComplaint: false },
-  4: { number: 4, label: "الشكاوى", routingDepartment: "QUALITY", isComplaint: true },
-  5: { number: 5, label: "التواصل مع الإدارة", routingDepartment: "HEADQUARTERS", isComplaint: false },
-  6: { number: 6, label: "طلبات الجملة", routingDepartment: "HEADQUARTERS", isComplaint: false }
+  2: { number: 2, label: "خدمة العملاء", routingDepartment: "CUSTOMER_CARE", isComplaint: false },
+  3: { number: 3, label: "طلبات الجملة", routingDepartment: "HEADQUARTERS", isComplaint: false },
+  4: { number: 4, label: "الشكاوى والاقتراحات", routingDepartment: "QUALITY", isComplaint: true },
+  5: { number: 5, label: "غير ذلك", routingDepartment: "CUSTOMER_CARE", isComplaint: false }
+};
+
+const legacyPayloadChoices: Record<string, ServiceChoice> = {
+  route_delivery: { number: 2, label: "طلب أوردر جديد", routingDepartment: "DELIVERY", isComplaint: false },
+  route_cakes: { number: 2, label: "طلب أوردر جديد", routingDepartment: "DELIVERY", isComplaint: false },
+  route_admin: { number: 5, label: "التواصل مع الإدارة", routingDepartment: "HEADQUARTERS", isComplaint: false }
 };
 
 const servicePayloads: Record<string, number> = {
   route_branches: 1,
   route_menu: 1,
-  route_delivery: 2,
-  route_cakes: 2,
-  route_customer_care: 3,
+  route_customer_care: 2,
+  route_wholesale: 3,
   route_quality: 4,
-  route_admin: 5,
-  route_wholesale: 6
+  route_other: 5
 };
 
 function normalizeArabic(value: string) {
@@ -41,11 +51,12 @@ function normalizeArabic(value: string) {
 export function getServiceChoice(value?: string | null): ServiceChoice | undefined {
   if (!value?.trim()) return undefined;
   const normalized = normalizeArabic(value);
+  if (legacyPayloadChoices[normalized]) return legacyPayloadChoices[normalized];
   const payloadNumber = servicePayloads[normalized];
   if (payloadNumber) return serviceChoices[payloadNumber];
-  const departmentChoice: Record<string, number> = { delivery: 2, quality: 4, headquarters: 5, customer_care: 3 };
+  const departmentChoice: Record<string, number> = { quality: 4, headquarters: 3, customer_care: 2 };
   if (departmentChoice[normalized]) return serviceChoices[departmentChoice[normalized]];
-  const match = normalized.match(/^(?:رقم\s*)?([1-6])(?:\s*[.)\-:]\s*.*)?$/u);
+  const match = normalized.match(/^(?:رقم\s*)?([1-5])(?:\s*[.)\-:]\s*.*)?$/u);
   return match ? serviceChoices[Number(match[1])] : undefined;
 }
 

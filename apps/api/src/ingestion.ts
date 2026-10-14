@@ -6,7 +6,7 @@ import { io } from "./realtime";
 import { sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
-import { AUTO_REPLY_HANDOFF_TEXT, AUTO_REPLY_MENU_TEXT, AUTO_REPLY_RESTART_MS, getServiceChoice, findMatchingAutoReply } from "./autoReplies";
+import { AUTO_REPLY_HANDOFF_TEXT, AUTO_REPLY_RESTART_MS, buildRoutingMenuText, getServiceChoice, findMatchingAutoReply } from "./autoReplies";
 import { sendPushNotification } from "./pushNotifications";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
@@ -31,12 +31,18 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     }
   });
   let conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: inbound.channel, externalConversationId: inbound.externalConversationId } } });
-  const isNewConversation = !conversation;
-  if (isNewConversation) {
-    conversation = await prisma.conversation.create({ data: {
-      customerId: customer.id, channel: inbound.channel, externalConversationId: inbound.externalConversationId,
-      externalCustomerId: inbound.externalCustomerId, status: ConversationStatus.QUEUED, awaitingRouting: true
-    } });
+  let isNewConversation = !conversation;
+  if (!conversation) {
+    try {
+      conversation = await prisma.conversation.create({ data: {
+        customerId: customer.id, channel: inbound.channel, externalConversationId: inbound.externalConversationId,
+        externalCustomerId: inbound.externalCustomerId, status: ConversationStatus.QUEUED, awaitingRouting: true
+      } });
+    } catch (error) {
+      if ((error as { code?: string }).code !== "P2002") throw error;
+      conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: inbound.channel, externalConversationId: inbound.externalConversationId } } });
+      isNewConversation = false;
+    }
   }
   if (!conversation) throw new Error("Conversation could not be created");
   let message;
@@ -60,7 +66,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   const isTerminal = conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED;
   const isIdle = Date.now() - conversation.lastMessageAt.getTime() >= AUTO_REPLY_RESTART_MS;
   const restartAutomation = !isRatingReply && (isNewConversation || isTerminal || isIdle);
-  const awaitingChoice = !restartAutomation && conversation.awaitingRouting && !conversation.assignedAgentId;
+  const awaitingChoice = !restartAutomation && conversation.awaitingRouting;
   const serviceChoice = awaitingChoice
     ? getServiceChoice(inbound.text) || getServiceChoice(inbound.routingDepartment)
     : undefined;
@@ -73,6 +79,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     || (autoReply?.routingDepartment as Department | null | undefined)
     || inbound.routingDepartment;
   const shouldPreserveResolved = isRatingReply && (conversation.status === ConversationStatus.RESOLVED || conversation.status === ConversationStatus.CLOSED);
+  const previousAssignedAgentId = conversation.assignedAgentId;
   const initiallyAssignedAgentId = restartAutomation ? null : conversation.assignedAgentId;
   conversation = await prisma.conversation.update({
     where: { id: conversation.id },
@@ -88,6 +95,9 @@ export async function ingestMessage(inbound: NormalizedInbound) {
       ...(restartAutomation ? { firstResponseAt: null, lastAgentResponseAt: null, slaBreachedAt: null } : {})
     }
   });
+  if (restartAutomation && previousAssignedAgentId) {
+    io?.to(`agent:${previousAssignedAgentId}`).emit("conversation:unassigned", conversation);
+  }
 
   if (isRatingReply && pendingSurvey && customerRating) {
     const survey = await prisma.csatSurvey.update({ where: { id: pendingSurvey.id }, data: { rating: customerRating, ratedAt: message.createdAt } });
@@ -107,11 +117,18 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   }
 
   if (restartAutomation) {
+    conversation = await assignConversation(conversation.id, undefined, { allowAwaitingRouting: true });
     try {
-      const result: any = await sendRoutingMenu(inbound.channel, inbound.externalCustomerId);
+      const welcomeRule = await prisma.autoReplyRule.findFirst({
+        where: { isActive: true, isWelcome: true },
+        orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
+        select: { responseText: true }
+      });
+      const menuText = buildRoutingMenuText(welcomeRule?.responseText);
+      const result: any = await sendRoutingMenu(inbound.channel, inbound.externalCustomerId, menuText);
       const providerId = kalemlyExternalMessageId(result);
       const menuMessage = await prisma.message.create({ data: {
-        conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: AUTO_REPLY_MENU_TEXT,
+        conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: menuText,
         externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
         metadata: { automation: "service-menu" }
       } });
@@ -123,7 +140,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
       conversation = await assignConversation(conversation.id);
     }
   } else if (serviceChoice || directHandoff) {
-    conversation = await assignConversation(conversation.id, routeDepartment);
+    conversation = await assignConversation(conversation.id, routeDepartment, { reassignIfIneligible: Boolean(serviceChoice) });
     try {
       const result: any = await sendToChannel({ channel: inbound.channel, recipient: inbound.externalCustomerId, text: AUTO_REPLY_HANDOFF_TEXT });
       const providerId = kalemlyExternalMessageId(result);

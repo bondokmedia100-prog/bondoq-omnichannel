@@ -1,6 +1,6 @@
 # Bondoq Backend
 
-Backend-only package: Prisma schema and seed data, JWT authentication and role guards, KalemlyWA WhatsApp plus Messenger and Telegram webhooks, least-active-agent routing, queued WhatsApp delivery, BullMQ SLA checks, and authenticated Socket.IO events.
+Backend-only package: Prisma schema and seed data, JWT authentication and role guards, KalemlyWA WhatsApp plus Messenger and Telegram webhooks, Redis-backed round-robin routing, queued WhatsApp delivery, BullMQ SLA checks, and authenticated Socket.IO events.
 
 ## Local setup
 
@@ -14,6 +14,7 @@ Backend-only package: Prisma schema and seed data, JWT authentication and role g
 - `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`
 - `GET /api/products`, `GET/POST/PATCH /api/admin/products`
 - `POST /api/conversations/:id/products`
+- `PATCH /api/conversations/:id/customer` saves the staff display name and notes for the customer attached to an assigned conversation.
 - `GET/PUT /api/admin/integrations/kalemlywa`, `POST /api/admin/integrations/kalemlywa/test`
 - `POST /api/conversations/:id/orders` accepts `referenceImageMessageId`; `PATCH /api/conversations/:id/status` with `RESOLVED` sends CSAT.
 - `POST /webhooks/kalemlywa` for KalemlyWA WhatsApp events; it accepts an HMAC-derived `token` query parameter tied to the configured webhook secret or saved app key, or a matching credential in supported headers/request fields. The admin dashboard generates the complete URL. Requests without a matching credential are rejected.
@@ -23,6 +24,12 @@ Backend-only package: Prisma schema and seed data, JWT authentication and role g
 
 Local demo account passwords are in `prisma/seed.ts`. In production, set `BONDOQ_ADMIN_PASSWORD` and `BONDOQ_AGENT_PASSWORD` before seeding; quality can use `BONDOQ_QUALITY_PASSWORD` or the agent password. Seeding no longer resets existing passwords. Real channel traffic requires provider credentials, public HTTPS webhook URLs, and provider-side app configuration.
 
+For desktop and Android notifications while the app is minimized or closed, configure `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` on the API, then each user must enable notifications from the bell button on each browser/device. On iPhone/iPad, install the site from Safari using Add to Home Screen (iOS/iPadOS 16.4 or later), open the installed app, and allow notifications. The service worker delivers OS notifications while the page is hidden; notification sound follows browser and operating-system notification settings and cannot be forced to a custom sound by the web app.
+
+Login tokens do not expire automatically. Closing a tab or losing its connection does not log out an employee, change their availability, or release their conversations. The Logout button explicitly revokes the session; disabling an account or changing its authorization version also revokes existing sessions.
+
 Set `KALEMLYWA_API_URL` (defaults to `https://whatsapp.kalemly.com/api/send-message`) and a strong, unique `KALEMLYWA_WEBHOOK_SECRET`. Configure separate `KALEMLYWA_AUTH_KEY` and `KALEMLYWA_APP_KEY` values, or enter both in the dashboard; both are encrypted at rest. The dashboard copies the full inbound URL with an HMAC-derived authentication token; paste the complete URL into KalemlyWA and do not share it publicly. KalemlyWA's documented webhook setup sends JSON to a URL and does not expose a custom header field. If callbacks still return 401 after updating the URL, inspect the provider delivery record; do not disable authentication. `KALEMLYWA_API_KEY` remains a legacy fallback for accounts that use one shared key. The KalemlyWA send-message API does not require an instance ID. The QR screen accepts an optional payload copied from KalemlyWA because no QR-fetch endpoint is assumed. Set `META_PAGE_ACCESS_TOKEN`, `META_APP_SECRET`, and `META_VERIFY_TOKEN` for Messenger. Messenger replies stop outside its 24-hour window; WhatsApp delivery is queued and is not restricted by the Meta window. Set `OPENAI_API_KEY` to enable audio transcription; without it audio is still saved and playable but is not transcribed. Seed products and demo accounts are examples: replace product names, prices, and image links before customer use.
 
 For Railway, use `/apps/api` as the service root. Set `TELEGRAM_BOT_TOKEN` to enable Telegram; `KALEMLYWA_CONFIG_ENCRYPTION_KEY` can override the encryption key derived from `JWT_SECRET`.
+
+The current Kalemly integration sends messages and media through its send-message endpoint and parses inbound message webhooks only. It contains no call events, WebRTC signalling, or microphone/call session handling; an audio attachment is a voice note, not a live call. Live WhatsApp calls require a supported calling API from the connected provider (or a separate WhatsApp Business Calling integration) and its event/signalling documentation before implementation.

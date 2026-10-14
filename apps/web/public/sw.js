@@ -1,4 +1,4 @@
-const CACHE = "bondoq-shell-v2";
+const CACHE = "bondoq-shell-v3";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -36,7 +36,8 @@ self.addEventListener("push", (event) => {
     badge: "/icon.svg",
     tag: payload.tag || "bondoq-incoming",
     data: { url: payload.url || "/login" },
-    renotify: true
+    renotify: true,
+    silent: false
   }));
 });
 

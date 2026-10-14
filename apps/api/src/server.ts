@@ -10,7 +10,7 @@ import { Channel, ConversationStatus, Department, MessageDirection, MessageKind,
 import { config } from "./config";
 import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
-import { initRealtime, io } from "./realtime";
+import { broadcastPresence, initRealtime, io } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations } from "./routing";
 import { answerTelegramCallback, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, sendCsatPrompt, sendToChannel } from "./providers";
 import { ingestMessage } from "./ingestion";
@@ -19,6 +19,7 @@ import { startOfCairoDay } from "./cairoTime";
 import { getMessengerSettings, getTelegramSettings, saveMessengerSettings, saveTelegramSettings } from "./ChannelIntegrationService";
 import { allowedMediaTypes, imageSignatureMatches, publicMediaUrl, safeFileName, uploadLimitBytes, verifyPublicMediaUrl } from "./mediaStorage";
 import { getPushConfig, sendPushNotification } from "./pushNotifications";
+import { customerProfileSchema } from "./customerProfile";
 
 const app = express();
 const server = http.createServer(app);
@@ -110,6 +111,7 @@ app.post("/api/auth/login", async (req, res) => {
       prisma.agentSession.create({ data: { userId: user.id, startState: Presence.ONLINE } }),
       prisma.auditLog.create({ data: { actorId: user.id, action: "AGENT_LOGIN" } })
     ]);
+    broadcastPresence(user.id, Presence.ONLINE, user.department);
   }
   if (isWorkUser) await dispatchQueued();
   const token = signToken({ id: user.id, role: user.role, name: user.name, authVersion: user.authVersion });
@@ -122,7 +124,7 @@ app.post("/api/auth/logout", authenticate, async (req: AuthedRequest, res) => {
   await prisma.auditLog.create({ data: { actorId: req.user!.id, action: isAgent ? "AGENT_LOGOUT" : "USER_LOGOUT" } });
   if (isAgent) {
     await prisma.agentSession.updateMany({ where: { userId: req.user!.id, endedAt: null }, data: { endedAt: new Date(), endState: Presence.OFFLINE } });
-    io.to("admins").emit("presence:updated", { userId: req.user!.id, presence: Presence.OFFLINE });
+    broadcastPresence(req.user!.id, Presence.OFFLINE, req.user!.department);
     await releaseAgentConversations(req.user!.id);
   }
   io.in(`user:${req.user!.id}`).disconnectSockets(true);
@@ -150,7 +152,8 @@ app.patch("/api/auth/me", authenticate, async (req: AuthedRequest, res: express.
 
 app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const actor = req.user!;
-  const scope = hasPermission(actor, "canViewAllConversations") ? {} : { assignedAgentId: actor.id };
+  const canSeeAll = actor.role === Role.ADMIN || actor.role === Role.SUPERVISOR && hasPermission(actor, "canViewAllConversations");
+  const scope = canSeeAll ? {} : { assignedAgentId: actor.id };
   const channel = typeof req.query.channel === "string" ? req.query.channel : undefined;
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const conversations = await prisma.conversation.findMany({
@@ -175,6 +178,20 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   await audit(req.user!.id, "CONVERSATION_OPENED", conversation.id);
   conversation.messages.reverse();
   res.json(conversation);
+});
+
+app.patch("/api/conversations/:id/customer", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = customerProfileSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "بيانات ملف العميل غير صالحة" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, customerId: true, assignedAgentId: true, branchId: true } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل بيانات هذا العميل" });
+  const customer = await prisma.customer.update({ where: { id: conversation.customerId }, data: parsed.data });
+  await audit(req.user!.id, "CUSTOMER_PROFILE_UPDATED", conversation.id, { customerId: customer.id });
+  const payload = { conversationId: conversation.id, customer };
+  io.to(`conversation:${conversation.id}`).emit("customer:updated", payload);
+  io.to("admins").emit("customer:updated", payload);
+  res.json(customer);
 });
 
 app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -514,7 +531,7 @@ app.patch("/api/agents/me/presence", agentGuard, async (req: AuthedRequest, res:
     if (presence === Presence.OFFLINE && previous.presence !== Presence.OFFLINE) await tx.agentSession.updateMany({ where: { userId, endedAt: null }, data: { endedAt: new Date(), endState: presence } });
     await tx.auditLog.create({ data: { actorId: userId, action: "PRESENCE_CHANGED", details: { from: previous.presence, to: presence } } });
   });
-  io.to("admins").emit("presence:updated", { userId, presence });
+  broadcastPresence(userId, presence, req.user!.department);
   if (presence === Presence.ONLINE) await dispatchQueued();
   if (presence === Presence.OFFLINE) await releaseAgentConversations(userId);
   res.json({ presence });

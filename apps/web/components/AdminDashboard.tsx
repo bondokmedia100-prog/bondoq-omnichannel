@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
 import { Activity, Archive, ArrowDown, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, CakeSlice, Check, CheckCircle2, Clock3, Copy, FileText, Headset, LogOut, MessageCircle, MoreHorizontal, QrCode, Search, Send, ShieldAlert, UserRound, Users, Volume2, VolumeX, X } from "lucide-react";
-import { API_URL, api, getToken } from "@/lib/api";
+import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import QRCode from "qrcode";
 import AccountSettingsModal from "./AccountSettingsModal";
 import { MessengerSettingsModal, TelegramSettingsModal } from "./ChannelIntegrationModals";
@@ -18,6 +18,8 @@ const channelLabel: Record<string, string> = { WHATSAPP: "واتساب", MESSENG
 const deptLabel: Record<string, string> = { CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "مستخدم فرع", ADMINISTRATION: "الإدارة" };
 const presenceLabel: Record<string, string> = { ONLINE: "متاح", BUSY: "مشغول", BREAK: "استراحة", OFFLINE: "غير متصل" };
 const categoryLabel: Record<string, string> = { EASTERN: "حلويات شرقية", WESTERN: "حلويات غربية", CAKES: "تورتات", BAKERY: "مخبوزات", KAHK: "كحك وبسكويت", CHOCOLATE: "شوكولاتة", MOULID: "حلاوة المولد", OCCASIONS: "مناسبات", MIX_BONDOQ: "ميكس بندق" };
+const customerDisplayName = (customer?: AnyRecord | null) => customer?.displayName?.trim() || customer?.name || "عميل جديد";
+const withDisplayName = (customer?: AnyRecord | null) => customer ? { ...customer, name: customerDisplayName(customer) } : customer;
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -71,7 +73,7 @@ export default function AdminDashboard() {
     const request = ++loadRequest.current;
     try {
       const [stats, chats, staff, branchList] = await Promise.all([allowed(profile, "canViewReports") ? api("/api/admin/dashboard") : Promise.resolve(null), api("/api/conversations"), api("/api/admin/agents"), api("/api/branches")]);
-      if (request === loadRequest.current) { setData(stats); setConversations(chats); setAgents(staff); setBranches(branchList); }
+      if (request === loadRequest.current) { setData(stats); setConversations(chats.map((chat: AnyRecord) => ({ ...chat, customer: withDisplayName(chat.customer) }))); setAgents(staff); setBranches(branchList); }
     } catch (e) { setError(e instanceof Error ? e.message : "تعذر تحميل لوحة التحكم"); }
   }
   useEffect(() => {
@@ -94,14 +96,20 @@ export default function AdminDashboard() {
               if (notifiedMessagesRef.current.size > 100) notifiedMessagesRef.current.delete(notifiedMessagesRef.current.values().next().value!);
             }
             playIncomingMessageTone();
-            setIncomingNotifications((old) => [{ id: messageId || `${conversationId}-${Date.now()}`, conversationId, customerName: event.customer?.name || event.conversation?.customer?.name || "عميل جديد", channel: event.conversation?.channel, preview: messageNotificationPreview(event.message), createdAt: event.message.createdAt || new Date().toISOString() }, ...old].slice(0, 8));
+             setIncomingNotifications((old) => [{ id: messageId || `${conversationId}-${Date.now()}`, conversationId, customerName: customerDisplayName(event.customer || event.conversation?.customer), channel: event.conversation?.channel, preview: messageNotificationPreview(event.message), createdAt: event.message.createdAt || new Date().toISOString() }, ...old].slice(0, 8));
             setShowNotifications(true);
           }
         }
         if (event.message && conversationId === detailLoadingIdRef.current) loadingMessagesRef.current.set(conversationId, mergeMessages(loadingMessagesRef.current.get(conversationId) || [], event.message));
-        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old);
+        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: withDisplayName(event.customer || old.customer) } : old);
       });
-      connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
+       connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
+       connection.on("customer:updated", (event) => {
+         if (event.conversationId) {
+           setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, customer: withDisplayName({ ...old.customer, ...event.customer }) } : old);
+           void load(profile);
+         }
+       });
       connection.on("csat:low", (event) => { setCsatAlert(`تقييم منخفض (${event.rating}/5) من ${event.customer?.name || "عميل"}.`); load(profile); });
       connection.on("csat:received", () => load(profile));
       connection.on("csat:delivery-failed", (event) => { setCsatAlert(`تعذر إرسال استبيان الرضا للمحادثة ${event.conversationId}.`); load(profile); });
@@ -112,7 +120,12 @@ export default function AdminDashboard() {
         window.history.replaceState(null, "", window.location.pathname);
         void openConversation({ id: requestedConversationId });
       }
-    }).catch(() => { localStorage.removeItem("bondoq_token"); router.replace("/login"); });
+    }).catch((reason) => {
+      if (reason instanceof ApiError && reason.status === 401) {
+        localStorage.removeItem("bondoq_token");
+        router.replace("/login");
+      } else setError("تعذر الاتصال بالخادم. بقي تسجيل الدخول محفوظًا؛ أعد تحميل الصفحة عند عودة الاتصال.");
+    });
     return () => { connection?.disconnect(); };
   }, [router]);
 
@@ -126,7 +139,7 @@ export default function AdminDashboard() {
       if (request === detailRequest.current) {
         const queuedMessages = loadingMessagesRef.current.get(item.id) || [];
         loadingMessagesRef.current.delete(item.id); detailLoadingIdRef.current = "";
-        setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) });
+         setDetail({ ...conversation, customer: withDisplayName(conversation.customer), messages: mergeMessages(conversation.messages || [], queuedMessages) });
       }
     } catch (e) { if (request === detailRequest.current) setError(e instanceof Error ? e.message : "تعذر فتح المحادثة"); }
   }
@@ -199,7 +212,7 @@ export default function AdminDashboard() {
   }
   async function logout() { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* clear the local session even if the API is unreachable */ } socket?.disconnect(); localStorage.removeItem("bondoq_token"); router.replace("/login"); }
 
-  const visibleConversations = conversations.filter((chat) => `${chat.customer?.name || "عميل"} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
+  const visibleConversations = conversations.filter((chat) => `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
   const kpis = data?.kpis || {};
 
   return <main className="min-h-screen bg-[#f7f5f1] pb-10">
@@ -550,7 +563,7 @@ function AutoReplyRulesModal({ onClose }: { onClose: () => void }) {
 
   return <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/45 p-3" onClick={onClose}><section className="panel max-h-[94vh] w-full max-w-4xl overflow-y-auto p-5 sm:p-6" onClick={(event) => event.stopPropagation()}>
     <div className="mb-5 flex items-center justify-between"><div><h2 className="text-lg font-extrabold">الردود التلقائية وقواعد التوجيه</h2><p className="text-xs text-stone-400">تُرسل القاعدة عند مطابقة إحدى الكلمات في رسالة العميل.</p></div><button onClick={onClose} className="rounded-lg p-2 text-stone-400"><X size={18} /></button></div>
-    <div className="mb-5 grid gap-3 rounded-2xl border border-amber-100 bg-amber-50/60 p-4 sm:grid-cols-[1fr_auto]"><label className="block text-xs font-bold text-amber-950">رسالة الترحيب وقائمة الاختيار<textarea value={welcomeText} onChange={(event) => setWelcomeText(event.target.value)} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label><div className="flex items-end gap-2"><label className="flex h-10 items-center gap-2 rounded-lg bg-white px-3 text-[10px] font-bold"><input type="checkbox" checked={welcomeActive} onChange={(event) => setWelcomeActive(event.target.checked)} /> مفعّلة</label><button type="button" onClick={() => void saveWelcome()} disabled={saving} className="h-10 rounded-lg bg-amber-700 px-4 text-xs font-bold text-white disabled:opacity-50">حفظ الترحيب</button></div><p className="text-[10px] leading-5 text-amber-900 sm:col-span-2">النظام يضيف خيارات الخدمة (الدليفري، التورتات، المنيو، الشكاوى) بعد هذا النص.</p></div>
+    <div className="mb-5 grid gap-3 rounded-2xl border border-amber-100 bg-amber-50/60 p-4 sm:grid-cols-[1fr_auto]"><label className="block text-xs font-bold text-amber-950">رسالة الترحيب وقائمة الاختيار<textarea value={welcomeText} onChange={(event) => setWelcomeText(event.target.value)} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label><div className="flex items-end gap-2"><label className="flex h-10 items-center gap-2 rounded-lg bg-white px-3 text-[10px] font-bold"><input type="checkbox" checked={welcomeActive} onChange={(event) => setWelcomeActive(event.target.checked)} /> مفعّلة</label><button type="button" onClick={() => void saveWelcome()} disabled={saving} className="h-10 rounded-lg bg-amber-700 px-4 text-xs font-bold text-white disabled:opacity-50">حفظ الترحيب</button></div><p className="text-[10px] leading-5 text-amber-900 sm:col-span-2">سيُضاف نص الترحيب قبل خيارات الخدمة الخمسة.</p></div>
     <div className="grid gap-5 lg:grid-cols-[.85fr_1.15fr]">
       <form onSubmit={saveRule} className="space-y-3 rounded-2xl bg-stone-50 p-4"><h3 className="text-sm font-extrabold">{editingId ? "تعديل القاعدة" : "قاعدة جديدة"}</h3><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="اسم القاعدة" className="h-10 w-full rounded-lg border border-stone-200 px-3 text-xs" /><input required value={form.keywords} onChange={(event) => setForm({ ...form, keywords: event.target.value })} placeholder="كلمات مفتاحية مفصولة بفاصلة" className="h-10 w-full rounded-lg border border-stone-200 px-3 text-xs" /><textarea required value={form.responseText} onChange={(event) => setForm({ ...form, responseText: event.target.value })} placeholder="الرد الذي سيرسله النظام" rows={4} className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs" /><select value={form.routingDepartment} onChange={(event) => setForm({ ...form, routingDepartment: event.target.value })} className="h-10 w-full rounded-lg border border-stone-200 bg-white px-3 text-xs"><option value="">من دون تحويل تلقائي</option><option value="DELIVERY">طلبات التوصيل</option><option value="CAKES">مبيعات التورتات</option><option value="CUSTOMER_CARE">خدمة العملاء</option><option value="QUALITY">الجودة والشكاوى</option></select><label className="block text-[10px] font-bold text-stone-500">الأولوية<input type="number" min="0" max="100" value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal" /></label><button disabled={saving} className="h-10 w-full rounded-lg bg-[#d32f2f] text-xs font-bold text-white disabled:opacity-50">{saving ? "جارٍ الحفظ..." : editingId ? "حفظ التعديل" : "إضافة القاعدة"}</button>{editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ name: "", keywords: "", responseText: "", routingDepartment: "", priority: "0" }); }} className="h-9 w-full rounded-lg bg-white text-xs font-bold text-stone-500">إلغاء التعديل</button>}</form>
       <div className="space-y-2"><h3 className="text-sm font-extrabold">القواعد ({rules.filter((rule) => !rule.isWelcome).length})</h3><div className="max-h-[530px] space-y-2 overflow-y-auto">{rules.filter((rule) => !rule.isWelcome).map((rule) => <article key={rule.id} className="rounded-xl border border-stone-100 p-3"><div className="flex items-center gap-2"><b className="min-w-0 flex-1 truncate text-xs">{rule.name}</b><button type="button" onClick={() => editRule(rule)} className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-[10px] font-bold text-amber-800">تعديل</button><button type="button" onClick={() => void toggleRule(rule)} className="rounded-lg bg-stone-100 px-2.5 py-1.5 text-[10px] font-bold text-stone-600">{rule.isActive ? "إيقاف" : "تفعيل"}</button><button type="button" onClick={() => void deleteRule(rule)} className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[10px] font-bold text-red-600">حذف</button></div><p className="mt-1 text-[10px] text-stone-400">عند ورود: {(rule.keywords || []).join("، ") || "—"} · {rule.routingDepartment || "دون تحويل"} · {rule.isActive ? "مفعّلة" : "متوقفة"}</p><p className="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-stone-700">{rule.responseText}</p></article>)}{!rules.some((rule) => !rule.isWelcome) && <p className="rounded-xl bg-stone-50 p-6 text-center text-xs text-stone-400">لا توجد قواعد إضافية بعد.</p>}</div></div>

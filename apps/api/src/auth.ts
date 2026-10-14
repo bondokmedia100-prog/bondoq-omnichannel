@@ -21,7 +21,7 @@ export type SessionUser = {
 export type AuthedRequest = Request & { user?: SessionUser };
 
 export function signToken(user: Pick<SessionUser, "id" | "role" | "name" | "authVersion">) {
-  return jwt.sign(user, config.jwtSecret, { expiresIn: "12h", issuer: "bondoq-support" });
+  return jwt.sign(user, config.jwtSecret, { issuer: "bondoq-support" });
 }
 
 export async function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
@@ -65,7 +65,9 @@ export function permissionGuard(permission: PermissionName): RequestHandler[] {
 }
 
 export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
-  return user.role === Role.ADMIN || hasPermission(user, "canViewAllConversations") || conversation.assignedAgentId === user.id;
+  if (user.role === Role.ADMIN) return true;
+  if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
+  return conversation.assignedAgentId === user.id;
 }
 
 export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {

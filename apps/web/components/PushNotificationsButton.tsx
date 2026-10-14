@@ -40,7 +40,13 @@ export default function PushNotificationsButton() {
     setBusy(true);
     setNotice("");
     try {
-      if (!supported) throw new Error("الإشعارات غير مدعومة في هذا المتصفح.");
+      if (!supported) {
+        const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+        const installed = window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+        throw new Error(isIos && !installed
+          ? "على iPhone/iPad: أضف التطبيق إلى الشاشة الرئيسية من Safari، ثم افتحه وفعّل الإشعارات."
+          : "الإشعارات غير مدعومة في هذا المتصفح أو الجهاز.");
+      }
       const registration = await navigator.serviceWorker.ready;
       const existing = await registration.pushManager.getSubscription();
       if (enabled && existing) {
@@ -50,12 +56,12 @@ export default function PushNotificationsButton() {
         setNotice("أُوقفت إشعارات هذا الجهاز.");
         return;
       }
-      if (Notification.permission === "denied") throw new Error("إذن الإشعارات مرفوض من إعدادات المتصفح.");
-      const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
-      if (permission !== "granted") throw new Error("لم يُمنح إذن الإشعارات.");
       const settings = await api<{ configured: boolean; publicKey: string }>("/api/push/config");
       setConfigured(settings.configured);
       if (!settings.configured) throw new Error("يلزم تفعيل مفاتيح الإشعارات على الخادم أولًا.");
+      if (Notification.permission === "denied") throw new Error("إذن الإشعارات مرفوض من إعدادات المتصفح.");
+      const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+      if (permission !== "granted") throw new Error("لم يُمنح إذن الإشعارات.");
       const subscription = existing || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeVapidKey(settings.publicKey) });
       await api("/api/push/subscriptions", { method: "POST", body: JSON.stringify(subscription) });
       setEnabled(true);
@@ -67,7 +73,7 @@ export default function PushNotificationsButton() {
 
   const label = !supported ? "إشعارات غير مدعومة" : enabled ? "إيقاف إشعارات الرسائل" : configured ? "تفعيل إشعارات الرسائل" : "مفاتيح إشعارات الخادم غير مهيأة";
   return <div className="relative">
-    <button type="button" onClick={() => void toggle()} disabled={!supported || busy} aria-label={label} title={label} className={`grid h-9 w-9 place-items-center rounded-lg disabled:cursor-not-allowed disabled:opacity-50 ${enabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>
+    <button type="button" onClick={() => void toggle()} disabled={busy} aria-label={label} title={label} className={`grid h-9 w-9 place-items-center rounded-lg disabled:cursor-wait disabled:opacity-50 ${enabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>
       {enabled ? <BellRing size={17} /> : <Bell size={17} />}
     </button>
     {notice && <div role="status" className="absolute left-0 top-11 z-50 w-64 rounded-xl border border-stone-200 bg-white p-3 text-[11px] leading-5 text-stone-700 shadow-xl">{notice}</div>}

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import jwt from "jsonwebtoken";
 import { Department, Role } from "@prisma/client";
-import { canReadConversation, canWorkOnConversation, hasPermission, type SessionUser } from "./auth";
+import { canReadConversation, canWorkOnConversation, hasPermission, signToken, type SessionUser } from "./auth";
 
 function user(overrides: Partial<SessionUser> = {}): SessionUser {
   return {
@@ -22,12 +23,22 @@ test("administrator and team leader permissions use safe defaults and explicit o
   assert.equal(hasPermission(restrictedLeader, "canManageTeam"), false);
 });
 
-test("employees can access only assigned conversations unless explicitly allowed to view all", () => {
+test("agents can read and work only assigned conversations even with the view-all flag", () => {
   const agent = user();
   const conversation = { assignedAgentId: "another-agent", branchId: null };
   assert.equal(canReadConversation(agent, conversation), false);
   assert.equal(canWorkOnConversation(agent, conversation), false);
-  assert.equal(canReadConversation(user({ canViewAllConversations: true }), conversation), true);
+  assert.equal(canReadConversation(user({ canViewAllConversations: true }), conversation), false);
   assert.equal(canWorkOnConversation(user({ canViewAllConversations: true }), conversation), false);
+  assert.equal(canReadConversation(user({ role: Role.SUPERVISOR }), conversation), true);
   assert.equal(canWorkOnConversation(user({ role: Role.SUPERVISOR }), conversation), true);
+  assert.equal(canReadConversation(user({ id: "assigned-agent" }), { assignedAgentId: "assigned-agent" }), true);
+  assert.equal(canWorkOnConversation(user({ id: "assigned-agent" }), { assignedAgentId: "assigned-agent" }), true);
+});
+
+test("login tokens do not expire automatically", () => {
+  const { id, role, name, authVersion } = user();
+  const payload = jwt.decode(signToken({ id, role, name, authVersion })) as jwt.JwtPayload;
+  assert.equal(payload.exp, undefined);
+  assert.equal(payload.iss, "bondoq-support");
 });

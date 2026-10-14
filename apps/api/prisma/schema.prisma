@@ -141,6 +141,8 @@ model AgentSession {
 model Customer {
   id                 String         @id @default(cuid())
   name               String?
+  displayName        String?
+  notes              String?        @db.Text
   phone              String?
   email              String?
   avatarUrl          String?
