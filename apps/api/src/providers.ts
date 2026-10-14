@@ -1,5 +1,6 @@
 import { Channel, MessageKind } from "@prisma/client";
 import { enqueueKalemlyMessage } from "./KalemlyWaService";
+import { AUTO_REPLY_MENU_TEXT } from "./autoReplies";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { routeChoice } from "./kalemlyWebhookParser";
@@ -13,7 +14,7 @@ async function postJson(url: string, payload: unknown, token: string) {
   return response.json();
 }
 
-export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaContentType?: string; latitude?: number; longitude?: number }) {
+export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaContentType?: string; latitude?: number; longitude?: number; outboundMessageId?: string }) {
   const kind = input.kind || MessageKind.TEXT;
   if (input.channel === Channel.WHATSAPP) {
     const message = kind === MessageKind.LOCATION
@@ -22,7 +23,7 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
     return enqueueKalemlyMessage({
       to: normalizePhoneNumber(input.recipient), message,
       ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : "document" } : {})
-    });
+    }, input.outboundMessageId);
   }
   if (input.channel === Channel.MESSENGER) {
     const settings = await getMessengerSettings();
@@ -61,13 +62,15 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
   return response.json();
 }
 
-export async function sendRoutingMenu(channel: Channel, recipient: string, welcomeText?: string) {
-  const prompt = `${welcomeText || "أهلًا بك في حلواني بندق."}\nاكتب رقم الخدمة التي تحتاجها:\n1- طلب دليفري سريع\n2- حجز تورتة مناسبات\n3- المنيو والفروع\n4- شكوى أو مقترح`;
+export async function sendRoutingMenu(channel: Channel, recipient: string) {
+  const prompt = AUTO_REPLY_MENU_TEXT;
   const choices = [
-    { id: "route_delivery", title: "1- دليفري" },
-    { id: "route_cakes", title: "2- تورتة" },
-    { id: "route_menu", title: "3- المنيو والفروع" },
-    { id: "route_quality", title: "4- شكوى" }
+    { id: "route_branches", title: "1- الفروع" },
+    { id: "route_delivery", title: "2- طلب أوردر جديد" },
+    { id: "route_customer_care", title: "3- خدمة العملاء" },
+    { id: "route_quality", title: "4- الشكاوى" },
+    { id: "route_admin", title: "5- التواصل مع الإدارة" },
+    { id: "route_wholesale", title: "6- طلبات الجملة" }
   ];
   if (channel === Channel.WHATSAPP) {
     return sendToChannel({ channel, recipient, text: prompt });

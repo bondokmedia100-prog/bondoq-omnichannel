@@ -1,9 +1,10 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { Job, Queue, QueueEvents, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { prisma } from "./prisma";
 import { config } from "./config";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
+import { io } from "./realtime";
 
 const queueName = "kalemlywa-outbound";
 const redis = () => new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -17,6 +18,8 @@ export type KalemlyWaMessage = {
   file?: string;
   mediaType?: "image" | "audio" | "document";
 };
+
+type QueuedKalemlyWaMessage = KalemlyWaMessage & { outboundMessageId?: string };
 
 export function encryptKalemlySecret(value: string): string {
   const key = createHash("sha256").update(config.kalemlyEncryptionKey).digest();
@@ -99,14 +102,18 @@ async function postMessage(input: KalemlyWaMessage) {
   return result;
 }
 
-export async function enqueueKalemlyMessage(input: KalemlyWaMessage) {
-  const job = await sendQueue.add("send-message", input, {
-    delay: randomInt(1500, 3501),
+export async function enqueueKalemlyMessage(input: KalemlyWaMessage, outboundMessageId?: string) {
+  const job = await sendQueue.add("send-message", {
+    ...input,
+    ...(outboundMessageId ? { outboundMessageId } : {})
+  }, {
+    delay: 0,
     attempts: 3,
     backoff: { type: "exponential", delay: 2500 },
     removeOnComplete: true,
     removeOnFail: 200
   });
+  if (outboundMessageId) return { queued: true, jobId: String(job.id) };
   return job.waitUntilFinished(queueEvents, 300_000);
 }
 
@@ -115,11 +122,57 @@ export async function sendKalemlyTest(to: string, message: string) {
 }
 
 export function startKalemlyWaWorker() {
-  return new Worker<KalemlyWaMessage, any>(queueName, (job: Job<KalemlyWaMessage>) => postMessage(job.data), {
+  const worker = new Worker<QueuedKalemlyWaMessage, any>(queueName, async (job: Job<QueuedKalemlyWaMessage>) => {
+    const { outboundMessageId, ...payload } = job.data;
+    const result = await postMessage(payload);
+    if (outboundMessageId) await persistQueuedDelivery(outboundMessageId, "SENT", result);
+    return result;
+  }, {
     connection: redis(),
     concurrency: 1,
     limiter: { max: 1, duration: 1500 }
   });
+  worker.on("failed", (job, error) => {
+    if (!job?.data.outboundMessageId || job.attemptsMade < Number(job.opts.attempts || 1)) return;
+    void persistQueuedDelivery(job.data.outboundMessageId, "FAILED").catch(() => {});
+    console.error("Queued WhatsApp delivery failed", job.id, error);
+  });
+  return worker;
+}
+
+async function persistQueuedDelivery(messageId: string, deliveryStatus: "SENT" | "FAILED", result?: any) {
+  const providerId = deliveryStatus === "SENT" ? kalemlyExternalMessageId(result) : undefined;
+  try {
+    await prisma.message.update({ where: { id: messageId }, data: {
+      deliveryStatus,
+      ...(providerId ? { externalId: `WHATSAPP:${providerId}` } : {})
+    } });
+  } catch (error) {
+    if (providerId && (error as { code?: string }).code === "P2002") {
+      try { await prisma.message.update({ where: { id: messageId }, data: { deliveryStatus } }); }
+      catch (updateError) { console.warn("Could not persist queued WhatsApp delivery state", updateError); return; }
+    } else {
+      console.warn("Could not persist queued WhatsApp delivery state", error);
+      return;
+    }
+  }
+  const message = await prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } } } });
+  if (!message) return;
+  if (deliveryStatus === "SENT") {
+    const conversation = await prisma.conversation.findUnique({ where: { id: message.conversationId }, select: { status: true, lastMessageAt: true, firstResponseAt: true } });
+    if (conversation && conversation.status !== "CLOSED" && conversation.status !== "RESOLVED") {
+      const deliveredAt = new Date();
+      await prisma.conversation.update({ where: { id: message.conversationId }, data: {
+        ...(message.createdAt > conversation.lastMessageAt ? { lastMessageAt: message.createdAt } : {}),
+        lastAgentResponseAt: deliveredAt,
+        firstResponseAt: conversation.firstResponseAt || deliveredAt,
+        slaBreachedAt: null,
+        ...(conversation.status === "QUEUED" ? { status: "OPEN" } : {})
+      } });
+    }
+  }
+  io?.to(`conversation:${message.conversationId}`).to("admins").emit("message:new", { conversationId: message.conversationId, message });
+  if (message.authorId) io?.to(`agent:${message.authorId}`).emit("message:new", { conversationId: message.conversationId, message });
 }
 
 export function safeProviderResponse(value: unknown): unknown {
