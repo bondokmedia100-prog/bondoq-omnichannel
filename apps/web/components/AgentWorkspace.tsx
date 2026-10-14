@@ -26,6 +26,7 @@ export default function AgentWorkspace() {
   const [showProducts, setShowProducts] = useState(false);
   const [productFilter, setProductFilter] = useState("ALL");
   const [filter, setFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("ACTIVE");
   const [search, setSearch] = useState("");
   const [text, setText] = useState("");
   const [showCanned, setShowCanned] = useState(false);
@@ -41,6 +42,9 @@ export default function AgentWorkspace() {
   const [sending, setSending] = useState(false);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
+  const [showHandoff, setShowHandoff] = useState(false);
+  const [handoffColleagues, setHandoffColleagues] = useState<AnyRecord[]>([]);
+  const [handoffBusyId, setHandoffBusyId] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [sendingProducts, setSendingProducts] = useState(false);
   const sendingRef = useRef(false);
@@ -79,6 +83,29 @@ export default function AgentWorkspace() {
       }
     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
+  async function openHandoffDialog() {
+    try {
+      const colleagues = await api("/api/agents/customer-care-colleagues");
+      setHandoffColleagues(colleagues);
+      setShowHandoff(true);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحميل زملاء خدمة العملاء"); }
+  }
+  async function handoffToColleague(agentId: string, agentName: string) {
+    if (!activeId || handoffBusyId) return;
+    const conversationId = activeId;
+    setHandoffBusyId(agentId);
+    try {
+      await api(`/api/conversations/${conversationId}/handoff`, { method: "POST", body: JSON.stringify({ agentId }) });
+      setShowHandoff(false);
+      socketRef.current?.emit("conversation:leave", conversationId);
+      activeIdRef.current = "";
+      setActiveId("");
+      setDetail(null);
+      setIncomingNotice({ isHandoffSent: true, conversationId, customerName: detail?.customer?.name || "العميل", channel: detail?.channel, preview: `يتابع ${agentName} هذه المحادثة الآن.` });
+      void loadChats();
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحويل المحادثة للزميل"); }
+    finally { setHandoffBusyId(""); }
+  }
 
   useEffect(() => {
     if (!getToken()) return router.replace("/login");
@@ -93,6 +120,10 @@ export default function AgentWorkspace() {
       connection.on("connect", () => { void loadChats(); if (activeIdRef.current) void openChat(activeIdRef.current); });
       connection.on("canned:updated", () => { void api("/api/canned-responses").then(setCanned).catch(() => {}); });
       connection.on("conversation:assigned", () => loadChats());
+      connection.on("conversation:handoff", (event) => {
+        void loadChats();
+        setIncomingNotice({ isHandoff: true, conversationId: event.conversation.id, customerName: event.conversation.customer?.name || "عميل جديد", channel: event.conversation.channel, preview: `حوّلها إليك ${event.fromAgentName || "زميلك"}.` });
+      });
       connection.on("conversation:unassigned", (event) => {
         void loadChats();
         if (event.id === activeIdRef.current) {
@@ -100,7 +131,7 @@ export default function AgentWorkspace() {
           activeIdRef.current = "";
           setActiveId("");
           setDetail(null);
-          setNotice("أُعيدت المحادثة إلى الطابور لأن إسنادها تغيّر.");
+          setIncomingNotice({ isHandoffSent: true, conversationId: event.id, customerName: event.customer?.name || "العميل", channel: event.channel, preview: event.assignedAgent?.name ? `يتابع ${event.assignedAgent.name} هذه المحادثة الآن.` : "أُعيدت المحادثة إلى الطابور." });
         }
       });
       connection.on("message:new", (event) => {
@@ -196,6 +227,7 @@ export default function AgentWorkspace() {
     try {
       const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId }) });
       setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => item.id !== localId), message) } : old);
+      if (message.deliveryStatus === "FAILED") setNotice("تعذر إضافة الرسالة إلى قائمة الإرسال. تحقق من اتصال WhatsApp.");
       void loadChats();
     } catch (error) {
       setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== localId) } : old);
@@ -294,9 +326,10 @@ export default function AgentWorkspace() {
       const result = await api(`/api/conversations/${conversationId}/products`, { method: "POST", body: JSON.stringify({ productIds }) });
       setShowProducts(false);
       setSelectedProductIds([]);
-      const failedImages = result.items?.filter((item: AnyRecord) => item.captionDelivery === "sent" && item.imageDelivery === "failed") || [];
-      const failedCaptions = result.items?.filter((item: AnyRecord) => item.captionDelivery !== "sent") || [];
-      setNotice(failedCaptions.length ? `تعذر إرسال ${failedCaptions.length} من المنتجات المحددة.` : failedImages.length ? `وصلت تفاصيل ${result.items.length} منتجات، وتعذر إرسال صورة ${failedImages.length} منها.` : `تم إرسال ${result.items?.length || selected.length} منتجات مع صورها.`);
+      const failedImages = result.items?.filter((item: AnyRecord) => item.captionDelivery !== "failed" && item.imageDelivery === "failed") || [];
+      const failedCaptions = result.items?.filter((item: AnyRecord) => item.captionDelivery === "failed") || [];
+      const queuedCount = result.items?.filter((item: AnyRecord) => item.captionDelivery === "queued" || item.imageDelivery === "queued").length || 0;
+      setNotice(failedCaptions.length ? `تعذر إرسال تفاصيل ${failedCaptions.length} من المنتجات المحددة.` : failedImages.length ? `وصلت تفاصيل المنتجات، وتعذر إرسال صورة ${failedImages.length} منها.` : queuedCount ? `أُضيفت ${result.items?.length || selected.length} منتجات إلى قائمة إرسال WhatsApp في الخلفية.` : `تم إرسال ${result.items?.length || selected.length} منتجات مع صورها.`);
       const sentMessages = (result.items || []).flatMap((item: AnyRecord) => [item.textMessage, item.imageMessage].filter(Boolean));
       setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => !pendingIds.includes(item.id)), sentMessages) } : old);
       void loadChats();
@@ -317,7 +350,10 @@ export default function AgentWorkspace() {
   }
   async function logout() { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* clear the local session even if the API is unreachable */ } socket?.disconnect(); localStorage.removeItem("bondoq_token"); router.replace("/login"); }
 
-  const visible = conversations.filter((chat) => (filter === "ALL" || chat.channel === filter) && `${chat.customer?.name || "عميل"} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
+  const visible = conversations.filter((chat) => {
+    const statusMatches = statusFilter === "ALL" || (statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter);
+    return statusMatches && (filter === "ALL" || chat.channel === filter) && `${chat.customer?.name || "عميل"} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase());
+  });
   const filteredCanned = canned.filter((item) => !text.startsWith("/") || item.shortcut.toLowerCase().includes(text.toLowerCase()) || item.title.includes(text.slice(1)));
   const visibleProducts = products.filter((product) => productFilter === "ALL" || product.category === productFilter);
 
@@ -327,14 +363,15 @@ export default function AgentWorkspace() {
       <div className="flex items-center gap-1 sm:gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><PushNotificationsButton /><InstallAppButton /><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-9 w-9 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={17} /> : <BellOff size={17} />}</button><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
     </header>
 
-     {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">رسالة جديدة من {incomingNotice.customerName}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "رسالة واردة"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div><button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button><button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
+      {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "رسالة واردة"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
 
     <section data-chat-open={Boolean(activeId)} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
       <aside className="workspace-list panel flex min-h-0 flex-col overflow-hidden">
         <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{conversations.length} محادثة مسندة إليك</p></div><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="بحث عن عميل..." className="w-full bg-transparent text-xs outline-none" /></label>
-          <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{channels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
+           <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{channels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
+           <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => setStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
         </div>
-        <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={chat.customer?.name || "ع"} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><b className="truncate text-xs">{chat.customer?.name || "عميل جديد"}</b><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{chat.slaBreachedAt && <span className="mt-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</div>
+         <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={chat.customer?.name || "ع"} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><b className="truncate text-xs">{chat.customer?.name || "عميل جديد"}</b><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</div>
         <div className="flex items-center justify-between border-t border-stone-100 px-4 py-3 text-[10px] text-stone-400"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متصل بالنظام</span><span>{user?.email}</span></div>
       </aside>
 
@@ -342,8 +379,9 @@ export default function AgentWorkspace() {
         <input ref={uploadInputRef} type="file" className="hidden" accept="image/jpeg,image/png,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,audio/webm,audio/aac,application/pdf,text/plain,.doc,.docx,.xls,.xlsx" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadAndSend(file); }} />
         {detail ? <>
             <button type="button" onClick={() => { ++detailRequest.current; detailLoadingIdRef.current = ""; loadingMessagesRef.current.delete(activeId); socketRef.current?.emit("conversation:leave", activeId); activeIdRef.current = ""; setActiveId(""); setDetail(null); setIncomingNotice(null); }} className="mobile-chat-back"><ArrowLeft size={16} /> رجوع للمحادثات</button>
-            <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-stone-100 bg-white px-4"><div className="flex min-w-0 items-center gap-3"><Avatar name={detail.customer?.name || "ع"} src={detail.customer?.avatarUrl} /><div className="min-w-0"><h2 className="truncate text-sm font-extrabold">{detail.customer?.name || "عميل جديد"} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</h2><div className="flex items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}</div></div></div><div className="flex items-center gap-1"><button onClick={() => api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "PENDING" }) }).then(() => setNotice("تم تأجيل المحادثة للمتابعة لاحقًا."))} title="تأجيل" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><Clock3 size={17} /></button><button onClick={resolveConversation} title="تم الحل وإرسال استبيان الرضا" className="grid h-9 w-9 place-items-center rounded-lg text-emerald-600 hover:bg-emerald-50"><CheckCircle2 size={17} /></button><button onClick={closeConversation} title="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-emerald-50 hover:text-emerald-700"><Archive size={17} /></button><button title="خيارات" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><MoreHorizontal size={18} /></button></div></div>
-           {metaChannel && <div className={`flex shrink-0 items-center gap-2 px-4 py-2 text-[10px] font-bold ${!metaWindowOpen ? "bg-red-50 text-red-700" : expiringSoon ? "bg-[#FFC107]/20 text-[#8c650a]" : "bg-emerald-50 text-emerald-700"}`}><Clock3 size={14} />{metaWindowOpen ? `نافذة Meta مفتوحة · متبقي ${formatCountdown(windowRemaining)}` : "انتهت نافذة الـ24 ساعة للرد الحر"}{detail.isComplaint && <span className="mr-auto rounded-full bg-red-100 px-2 py-0.5 text-red-700">تحويل للجودة</span>}</div>}
+            <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-stone-100 bg-white px-4"><div className="flex min-w-0 items-center gap-3"><Avatar name={detail.customer?.name || "ع"} src={detail.customer?.avatarUrl} /><div className="min-w-0"><h2 className="truncate text-sm font-extrabold">{detail.customer?.name || "عميل جديد"} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</h2><div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</div></div></div><div className="flex items-center gap-1"><button onClick={() => api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "PENDING" }) }).then(() => setNotice("تم تأجيل المحادثة للمتابعة لاحقًا."))} title="تأجيل" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><Clock3 size={17} /></button><button onClick={resolveConversation} title="تم الحل وإرسال استبيان الرضا" className="grid h-9 w-9 place-items-center rounded-lg text-emerald-600 hover:bg-emerald-50"><CheckCircle2 size={17} /></button><button onClick={closeConversation} title="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-emerald-50 hover:text-emerald-700"><Archive size={17} /></button><button title="خيارات" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><MoreHorizontal size={18} /></button></div></div>
+            {user?.role === "AGENT" && user.department === "CUSTOMER_CARE" && <div className="flex justify-end border-b border-stone-100 bg-white px-4 py-2"><button type="button" onClick={() => void openHandoffDialog()} className="flex items-center gap-1.5 rounded-lg bg-[#fff8e9] px-3 py-2 text-[10px] font-bold text-[#9b7219] hover:bg-amber-100"><Users size={14} /> تحويل لزميل متاح</button></div>}
+            {metaChannel && <div className={`flex shrink-0 items-center gap-2 px-4 py-2 text-[10px] font-bold ${!metaWindowOpen ? "bg-red-50 text-red-700" : expiringSoon ? "bg-[#FFC107]/20 text-[#8c650a]" : "bg-emerald-50 text-emerald-700"}`}><Clock3 size={14} />{metaWindowOpen ? `نافذة Meta مفتوحة · متبقي ${formatCountdown(windowRemaining)}` : "انتهت نافذة الـ24 ساعة للرد الحر"}{detail.isComplaint && <span className="mr-auto rounded-full bg-red-100 px-2 py-0.5 text-red-700">تحويل للجودة</span>}</div>}
           {watching && <div className="flex h-9 shrink-0 items-center gap-2 border-b border-blue-100 bg-blue-50 px-4 text-[11px] font-semibold text-blue-700"><Users size={14} /> المدير يراقب هذه المحادثة معك الآن</div>}
           {notice && <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-100 bg-amber-50 px-4 py-2 text-[11px] text-amber-900"><span>{notice}</span><button onClick={() => setNotice("")}><span>×</span></button></div>}
            <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-7">
@@ -377,6 +415,7 @@ export default function AgentWorkspace() {
         </> : <div className="grid flex-1 place-items-center text-center text-xs text-stone-400"><div><UserRound size={25} className="mx-auto text-stone-300" /><p className="mt-2">ملف العميل سيظهر هنا</p></div></div>}
       </aside>
     </section>
+    {showHandoff && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowHandoff(false)}><section role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="handoff-title" className="text-base font-extrabold">تحويل المحادثة لزميل</h2><p className="mt-1 text-xs leading-5 text-stone-500">اختر موظفًا متاحًا من خدمة العملاء ليتابع مع العميل.</p></div><button type="button" onClick={() => setShowHandoff(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><div className="max-h-[55vh] space-y-2 overflow-y-auto">{handoffColleagues.map((colleague) => <button key={colleague.id} type="button" disabled={Boolean(handoffBusyId)} onClick={() => void handoffToColleague(colleague.id, colleague.name)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50 disabled:opacity-60"><Avatar name={colleague.name} /><span className="min-w-0 flex-1"><b className="block truncate text-sm">{colleague.name}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متاح الآن</span></span><span className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">{handoffBusyId === colleague.id ? "جارٍ التحويل..." : "تحويل"}</span></button>)}{!handoffColleagues.length && <div className="rounded-xl bg-stone-50 p-5 text-center text-xs leading-6 text-stone-500">لا يوجد زميل متاح الآن في خدمة العملاء. جرّب لاحقًا أو أبقِ المحادثة لديك.</div>}</div></section></div>}
     {showProducts && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }}><section className="panel max-h-[90vh] w-full max-w-4xl overflow-y-auto p-4 sm:p-6" onClick={(event) => event.stopPropagation()}>
       <div className="mb-4 flex items-center justify-between gap-3"><div><h2 className="text-lg font-extrabold">كتالوج حلواني بندق</h2><p className="text-xs text-stone-400">حدد منتجًا واحدًا أو أكثر لإرسال السعر والصورة معًا</p></div><button type="button" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }} className="rounded-lg px-3 py-1 text-xl text-stone-400">×</button></div>
       <div className="soft-scroll mb-4 flex gap-2 overflow-x-auto pb-1">{[{ id: "ALL", label: "الكل" }, { id: "EASTERN", label: "شرقي" }, { id: "WESTERN", label: "غربي" }, { id: "CAKES", label: "تورتات" }, { id: "BAKERY", label: "مخبوزات" }, { id: "KAHK", label: "كحك وبسكويت" }, { id: "CHOCOLATE", label: "شوكولاتة" }, { id: "MOULID", label: "حلاوة المولد" }, { id: "OCCASIONS", label: "مناسبات" }, { id: "MIX_BONDOQ", label: "ميكس بندق" }].map((item) => <button type="button" key={item.id} onClick={() => setProductFilter(item.id)} className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-bold ${productFilter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500"}`}>{item.label}</button>)}</div>
@@ -409,7 +448,7 @@ function Message({ message, conversationId, onUseAsCakeImage }: { message: AnyRe
     {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
     {onUseAsCakeImage && <button onClick={onUseAsCakeImage} className="mb-2 block rounded-lg bg-white/80 px-2.5 py-1.5 text-[10px] font-bold text-[#9a7014]">إرفاق صورة التورتة بنموذج الطلب</button>}
     {message.kind === "LOCATION" ? <a className="flex items-center gap-2 text-sm text-blue-700 underline" href={`https://maps.google.com/?q=${message.latitude},${message.longitude}`} target="_blank"><MapPin size={16} /> فتح موقع العميل</a> : message.text && <p className="whitespace-pre-wrap text-sm leading-7">{message.text}</p>}
-    <div className="mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{outgoing && (message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.author?.name || "تم الإرسال")}{outgoing && " · "}{formatCairoTime(message.createdAt)}{outgoing && message.deliveryStatus !== "PENDING" && <Check size={11} className="text-emerald-600" />}</div>
+     <div className="mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{outgoing && (message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.author?.name || "تم الإرسال")}{outgoing && " · "}{formatCairoTime(message.createdAt)}{outgoing && (!message.deliveryStatus || message.deliveryStatus === "SENT") && <Check size={11} className="text-emerald-600" />}</div>
   </div></div>;
 }
 function ProtectedMedia({ conversationId, message }: { conversationId: string; message: AnyRecord }) {
