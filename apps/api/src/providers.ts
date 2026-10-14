@@ -1,5 +1,5 @@
 import { Channel, MessageKind } from "@prisma/client";
-import { enqueueKalemlyMessage } from "./KalemlyWaService";
+import { enqueueKalemlyMessage, getKalemlySettings } from "./KalemlyWaService";
 import { AUTO_REPLY_MENU_TEXT } from "./autoReplies";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
@@ -157,6 +157,28 @@ export function parseTelegramWebhook(body: any): NormalizedInbound[] {
 }
 
 export async function fetchInboundMedia(channel: Channel, metadata: Record<string, unknown>, mediaUrl?: string) {
+  const kalemlyMediaId = typeof metadata.mediaId === "string" ? metadata.mediaId : "";
+  if (channel === Channel.WHATSAPP && metadata.provider === "kalemlywa" && kalemlyMediaId) {
+    if (metadata.mediaAvailable === false) throw new Error("KalemlyWA inbound media is unavailable or expired");
+    const settings = await getKalemlySettings();
+    if (!settings.authKey || !settings.appKey) throw new Error("KalemlyWA media credentials are not configured");
+    const endpoint = new URL("/api/inbound-media/download", settings.endpoint);
+    if (endpoint.protocol !== "https:" || endpoint.hostname !== "whatsapp.kalemly.com") throw new Error("KalemlyWA endpoint must use the verified HTTPS host whatsapp.kalemly.com");
+    const response = await fetch(endpoint, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ authkey: settings.authKey, appkey: settings.appKey, media_id: kalemlyMediaId }),
+      signal: AbortSignal.timeout(45_000)
+    });
+    if (!response.ok) throw new Error(`KalemlyWA media download failed (${response.status})`);
+    const maxBytes = 30 * 1024 * 1024;
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > maxBytes) throw new Error("KalemlyWA inbound media exceeds the 30 MiB limit");
+    const body = Buffer.from(await response.arrayBuffer());
+    if (!body.length) throw new Error("KalemlyWA returned an empty media file");
+    if (body.length > maxBytes) throw new Error("KalemlyWA inbound media exceeds the 30 MiB limit");
+    return { body, contentType: response.headers.get("content-type") || String(metadata.mediaMimeType || "application/octet-stream") };
+  }
+
   let url = mediaUrl || String(metadata.attachmentUrl || "");
   const telegramSettings = channel === Channel.TELEGRAM ? await getTelegramSettings() : null;
   if (channel === Channel.TELEGRAM && metadata.fileId && telegramSettings?.botToken) {

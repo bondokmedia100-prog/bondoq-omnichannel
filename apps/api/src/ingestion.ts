@@ -3,11 +3,12 @@ import type { NormalizedInbound } from "./providers";
 import { prisma } from "./prisma";
 import { assignConversation, scheduleSla } from "./routing";
 import { io } from "./realtime";
-import { sendRoutingMenu, sendToChannel } from "./providers";
+import { fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
 import { AUTO_REPLY_HANDOFF_TEXT, AUTO_REPLY_RESTART_MS, buildRoutingMenuText, getServiceChoice, findMatchingAutoReply } from "./autoReplies";
 import { sendPushNotification } from "./pushNotifications";
+import { safeFileName } from "./mediaStorage";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
   const customer = await prisma.customer.upsert({
@@ -45,12 +46,32 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     }
   }
   if (!conversation) throw new Error("Conversation could not be created");
+  const storedExternalId = `${inbound.channel}:${inbound.externalId}`;
+  const existingMessage = await prisma.message.findUnique({ where: { externalId: storedExternalId }, select: { id: true, conversationId: true } });
+  if (existingMessage) return { duplicate: true, conversationId: existingMessage.conversationId };
+  const metadata = (inbound.metadata || {}) as Record<string, unknown>;
+  let cachedMedia: { body: Buffer; contentType: string } | undefined;
+  if (metadata.provider === "kalemlywa" && typeof metadata.mediaId === "string" && metadata.mediaId) {
+    try {
+      cachedMedia = await fetchInboundMedia(inbound.channel, metadata, inbound.mediaUrl);
+    } catch (error) {
+      console.warn("KalemlyWA inbound media cache failed", error instanceof Error ? error.message : error);
+    }
+  }
   let message;
   try {
+    const contentType = cachedMedia?.contentType || String(metadata.mediaMimeType || "application/octet-stream");
+    const extension = contentType.split(";")[0].split("/")[1]?.replace(/[^a-zA-Z0-9.+-]/g, "") || "bin";
+    const fileName = inbound.kind === MessageKind.AUDIO
+      ? `${metadata.voiceNote === true ? "voice-note" : "audio"}.${extension}`
+      : inbound.kind === MessageKind.IMAGE ? `image.${extension}` : `attachment.${extension}`;
     message = await prisma.message.create({ data: {
-      conversationId: conversation.id, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
-      text: inbound.text, mediaUrl: inbound.mediaUrl, latitude: inbound.latitude, longitude: inbound.longitude,
-      externalId: `${inbound.channel}:${inbound.externalId}`, metadata: (inbound.metadata || {}) as Prisma.InputJsonValue
+      conversation: { connect: { id: conversation.id } }, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
+      text: inbound.text, mediaUrl: cachedMedia ? undefined : inbound.mediaUrl, latitude: inbound.latitude, longitude: inbound.longitude,
+      externalId: storedExternalId, metadata: metadata as Prisma.InputJsonValue,
+      ...(cachedMedia ? { mediaAsset: { create: {
+        fileName: safeFileName(fileName), contentType, size: cachedMedia.body.length, data: Uint8Array.from(cachedMedia.body)
+      } } } : {})
     } });
   } catch (error) {
     if ((error as { code?: string }).code === "P2002") return { duplicate: true, conversationId: conversation.id };

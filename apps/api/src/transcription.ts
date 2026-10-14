@@ -8,9 +8,11 @@ const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
 export async function transcribeAudioMessage(messageId: string) {
   if (!config.openaiApiKey) return;
-  const message = await prisma.message.findUnique({ where: { id: messageId }, include: { conversation: true } });
+  const message = await prisma.message.findUnique({ where: { id: messageId }, include: { conversation: true, mediaAsset: true } });
   if (!message || message.kind !== MessageKind.AUDIO || message.transcription) return;
-  const media = await fetchInboundMedia(message.conversation.channel, (message.metadata || {}) as unknown as Record<string, unknown>, message.mediaUrl || undefined);
+  const media = message.mediaAsset
+    ? { body: Buffer.from(message.mediaAsset.data), contentType: message.mediaAsset.contentType }
+    : await fetchInboundMedia(message.conversation.channel, (message.metadata || {}) as unknown as Record<string, unknown>, message.mediaUrl || undefined);
   if (media.body.length > MAX_AUDIO_BYTES) throw new Error("Voice note exceeds the 25 MB transcription limit");
 
   const bytes = new ArrayBuffer(media.body.length);

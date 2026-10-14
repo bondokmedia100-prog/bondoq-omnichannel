@@ -55,3 +55,44 @@ test("falls through unparseable identities to another international sender field
 test("does not treat delivery status events as inbound messages", () => {
   assert.deepEqual(parseKalemlyWebhook({ event: "message.status", data: { phone: "201012345678", text: "delivered" } }), []);
 });
+
+test("parses Kalemly temporary voice-note media IDs", () => {
+  const [message] = parseKalemlyWebhook({
+    event: "message.inbound",
+    data: {
+      from: "201001234567@s.whatsapp.net",
+      phone: "201001234567",
+      message_type: "voice_note",
+      media: {
+        available: true,
+        id: "voice-media-1",
+        mime_type: "audio/ogg; codecs=opus",
+        size_bytes: 24576,
+        voice_note: true,
+        expires_at: "2026-10-15T12:00:00.000Z"
+      }
+    }
+  });
+
+  assert.equal(message.kind, "AUDIO");
+  assert.equal(message.mediaUrl, undefined);
+  assert.equal(message.metadata?.mediaId, "voice-media-1");
+  assert.equal(message.metadata?.mediaMimeType, "audio/ogg; codecs=opus");
+  assert.equal(message.metadata?.voiceNote, true);
+});
+
+test("parses Kalemly media metadata for inbound images", () => {
+  const [message] = parseKalemlyWebhook({
+    event: "message.inbound",
+    data: {
+      from: "201001234567@s.whatsapp.net",
+      phone: "201001234567",
+      message_type: "image",
+      media: { available: true, id: "image-media-1", mime_type: "image/jpeg", size_bytes: 128000 }
+    }
+  });
+
+  assert.equal(message.kind, "IMAGE");
+  assert.equal(message.metadata?.mediaId, "image-media-1");
+  assert.equal(message.metadata?.mediaAvailable, true);
+});
