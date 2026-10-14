@@ -10,7 +10,7 @@ import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
 import AccountSettingsModal from "./AccountSettingsModal";
 import PushNotificationsButton from "./PushNotificationsButton";
 import InstallAppButton from "./InstallAppButton";
-import IncomingWhatsAppCallModal from "./IncomingWhatsAppCallModal";
+import IncomingWhatsAppCallModal, { type IncomingCall } from "./IncomingWhatsAppCallModal";
 import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
@@ -36,7 +36,7 @@ export default function AgentWorkspace() {
   const [watching, setWatching] = useState(false);
   const [notice, setNotice] = useState("");
   const [incomingNotice, setIncomingNotice] = useState<AnyRecord | null>(null);
-  const [incomingCall, setIncomingCall] = useState<AnyRecord | null>(null);
+  const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [now, setNow] = useState(Date.now());
   const [savedOrder, setSavedOrder] = useState<AnyRecord | null>(null);

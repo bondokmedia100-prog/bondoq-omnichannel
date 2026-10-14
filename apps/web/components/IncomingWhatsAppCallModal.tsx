@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, PhoneCall, PhoneOff, UserRound, X } from "lucide-react";
 
-type IncomingCall = { callId: string; callerJid: string; phoneNumber?: string; customerName?: string; conversationId?: string; isVideo?: boolean };
+export type IncomingCall = { callId: string; callerJid: string; phoneNumber?: string; customerName?: string; conversationId?: string; isVideo?: boolean };
 
 export default function IncomingWhatsAppCallModal({ call, onReject, onOpenConversation, onDismiss }: {
   call: IncomingCall;
