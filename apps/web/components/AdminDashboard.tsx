@@ -11,7 +11,7 @@ import { MessengerSettingsModal, TelegramSettingsModal } from "./ChannelIntegrat
 import PushNotificationsButton from "./PushNotificationsButton";
 import InstallAppButton from "./InstallAppButton";
 import TeamManagementModal from "./TeamManagementModal";
-import IncomingWhatsAppCallModal from "./IncomingWhatsAppCallModal";
+import IncomingWhatsAppCallModal, { type IncomingCall } from "./IncomingWhatsAppCallModal";
 import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
@@ -48,7 +48,7 @@ export default function AdminDashboard() {
   const [showTelegram, setShowTelegram] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [incomingNotifications, setIncomingNotifications] = useState<AnyRecord[]>([]);
-  const [incomingCall, setIncomingCall] = useState<AnyRecord | null>(null);
+  const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [showNotifications, setShowNotifications] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
