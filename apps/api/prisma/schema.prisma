@@ -14,6 +14,13 @@ enum Role {
   BRANCH_USER
 }
 
+enum PasswordResetStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  USED
+}
+
 enum Department {
   CAKES
   DELIVERY
@@ -115,9 +122,29 @@ model User {
   pushSubscriptions        PushSubscription[]
   favoriteConversations    ConversationFavorite[]
   messageReactions         MessageReaction[]
+  passwordResetRequest       PasswordResetRequest? @relation("PasswordResetSubject")
+  passwordResetReviews       PasswordResetRequest[] @relation("PasswordResetReviewer")
   branch                   Branch?                @relation("BranchUsers", fields: [branchId], references: [id], onDelete: SetNull)
 
   @@index([branchId, role, presence, isActive])
+}
+
+model PasswordResetRequest {
+  id          String             @id @default(cuid())
+  userId      String             @unique
+  status      PasswordResetStatus @default(PENDING)
+  requestedAt DateTime           @default(now())
+  tokenHash   String?            @unique
+  expiresAt   DateTime?
+  approvalTokenHash String?      @unique
+  approvalExpiresAt DateTime?
+  reviewedAt  DateTime?
+  usedAt      DateTime?
+  reviewerId  String?
+  user        User               @relation("PasswordResetSubject", fields: [userId], references: [id], onDelete: Cascade)
+  reviewer    User?              @relation("PasswordResetReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  @@index([status, requestedAt])
 }
 
 model Branch {

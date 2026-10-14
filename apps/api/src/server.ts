@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { z } from "zod";
-import { Channel, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
+import { Channel, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
 import { config } from "./config";
 import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
@@ -21,12 +21,23 @@ import { getMessengerSettings, getTelegramSettings, saveMessengerSettings, saveT
 import { allowedMediaTypes, imageSignatureMatches, publicMediaUrl, safeFileName, uploadLimitBytes, verifyPublicMediaUrl } from "./mediaStorage";
 import { getPushConfig, sendPushNotification } from "./pushNotifications";
 import { customerProfileSchema } from "./customerProfile";
+import { sendPasswordResetApprovalEmail, sendPasswordResetEmail } from "./email";
+import { createPasswordResetToken, hashPasswordResetToken } from "./passwordResetToken";
 
 const app = express();
 const server = http.createServer(app);
 initRealtime(server);
 app.use(cors({ origin: config.webOrigin, credentials: true }));
 app.use(express.json({ limit: "15mb", verify: (req: any, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
+const redis = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
+
+async function reservePasswordResetEmail() {
+  const bucket = Math.floor(Date.now() / (60 * 60 * 1000));
+  const key = `password-reset-email-limit:${bucket}`;
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, 3700);
+  return count <= 20;
+}
 
 const audit = (actorId: string | null, action: string, conversationId?: string, details: Prisma.InputJsonValue = {}) =>
   prisma.auditLog.create({ data: { actorId, action, conversationId, details } });
@@ -42,6 +53,10 @@ async function ensureBranches() {
 }
 const isMessenger = (channel: Channel) => channel === Channel.MESSENGER;
 const isUniqueConstraintError = (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+const systemAdminGuard: express.RequestHandler[] = [authenticate as express.RequestHandler, ((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if ((req as AuthedRequest).user?.role !== Role.ADMIN) return res.status(403).json({ error: "يتطلب هذا الإجراء صلاحية مدير النظام" });
+  next();
+}) as express.RequestHandler];
 async function lastInboundAt(conversationId: string, stored?: Date | null) {
   if (stored) return stored;
   const latest = await prisma.message.findFirst({ where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
@@ -160,6 +175,155 @@ app.patch("/api/auth/me/password", authenticate, async (req: AuthedRequest, res:
   await audit(req.user!.id, "PASSWORD_CHANGED");
   io.in(`user:${req.user!.id}`).disconnectSockets(true);
   res.sendStatus(204);
+});
+
+const genericPasswordResetRequestMessage = "إذا كانت البيانات تخص حسابًا نشطًا، فسيظهر طلب إعادة الضبط للموافقة.";
+app.post("/api/auth/password-reset/request", async (req, res) => {
+  const parsed = z.object({ identifier: z.string().trim().min(1).max(254) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "أدخل البريد المسجّل أو اسم المستخدم" });
+  if (!config.resendApiKey || !config.emailFrom) return res.status(503).json({ error: "خدمة البريد غير مهيأة حاليًا. حاول لاحقًا." });
+  const identifier = parsed.data.identifier.toLowerCase();
+  const user = await prisma.user.findFirst({ where: { OR: [{ email: identifier }, { username: identifier }], isActive: true }, select: { id: true, name: true, email: true, username: true, role: true } });
+  if (user) {
+    const current = await prisma.passwordResetRequest.findUnique({ where: { userId: user.id } });
+    const now = new Date();
+    const canStartNewRequest = !current || current.status === PasswordResetStatus.REJECTED || current.status === PasswordResetStatus.USED || current.status === PasswordResetStatus.APPROVED && Boolean(current.expiresAt && current.expiresAt <= now);
+    const canResendApproval = current?.status === PasswordResetStatus.PENDING && (!current.approvalTokenHash || !current.approvalExpiresAt || current.approvalExpiresAt <= now);
+    if (canStartNewRequest || canResendApproval) {
+      if (!await reservePasswordResetEmail()) return res.status(429).json({ error: "تم بلوغ حد إرسال رسائل الاستعادة مؤقتًا. حاول بعد ساعة." });
+      const { token, tokenHash: approvalTokenHash } = createPasswordResetToken();
+      const approvalExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+      const requestedAt = new Date();
+      let requestId: string;
+      if (current) {
+        const updated = await prisma.passwordResetRequest.update({ where: { userId: user.id }, data: { status: PasswordResetStatus.PENDING, requestedAt, tokenHash: null, expiresAt: null, approvalTokenHash, approvalExpiresAt, reviewedAt: null, reviewerId: null, usedAt: null } });
+        requestId = updated.id;
+      } else {
+        try {
+          const created = await prisma.passwordResetRequest.create({ data: { userId: user.id, approvalTokenHash, approvalExpiresAt } });
+          requestId = created.id;
+        } catch (error) {
+          if (!isUniqueConstraintError(error)) throw error;
+          return res.json({ message: genericPasswordResetRequestMessage });
+        }
+      }
+      const approvalUrl = new URL("/approve-password-reset", config.webOrigin);
+      approvalUrl.searchParams.set("token", token);
+      try {
+        await sendPasswordResetApprovalEmail(config.passwordResetRecoveryEmail, user.name, `${user.email} · ${user.username} · ${user.role}`, approvalUrl.toString());
+      } catch (error) {
+        await prisma.passwordResetRequest.updateMany({ where: { id: requestId, approvalTokenHash }, data: { approvalTokenHash: null, approvalExpiresAt: null } });
+        console.error("Password reset approval email could not be sent", error);
+        return res.status(503).json({ error: "تعذر إرسال رسالة الموافقة. لم يتم تغيير كلمة المرور؛ حاول لاحقًا." });
+      }
+      await audit(null, "PASSWORD_RESET_REQUESTED", undefined, { userId: user.id });
+    }
+  }
+  res.json({ message: genericPasswordResetRequestMessage });
+});
+
+app.get("/api/admin/password-reset-requests", systemAdminGuard, async (_req, res) => {
+  const requests = await prisma.passwordResetRequest.findMany({
+    where: { status: { in: [PasswordResetStatus.PENDING, PasswordResetStatus.APPROVED] } },
+    select: { id: true, status: true, requestedAt: true, expiresAt: true, user: { select: { id: true, name: true, email: true, username: true, role: true, isActive: true } } },
+    orderBy: { requestedAt: "asc" }
+  });
+  res.json(requests);
+});
+
+app.post("/api/admin/password-reset-requests/:id/approve", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const request = await prisma.passwordResetRequest.findUnique({ where: { id: req.params.id }, include: { user: { select: { id: true, name: true, email: true, username: true, role: true, isActive: true } } } });
+  if (!request) return res.status(404).json({ error: "طلب إعادة الضبط غير موجود" });
+  if (request.userId === req.user!.id) return res.status(403).json({ error: "يجب أن يوافق مدير آخر على طلبك" });
+  if (!request.user.isActive) return res.status(409).json({ error: "الحساب موقوف" });
+  if (request.status !== PasswordResetStatus.PENDING && request.status !== PasswordResetStatus.APPROVED) return res.status(409).json({ error: "الطلب لم يعد متاحًا للموافقة" });
+  if (!config.resendApiKey || !config.emailFrom) return res.status(503).json({ error: "لم يتم إعداد إرسال البريد. أضف RESEND_API_KEY و EMAIL_FROM أولًا." });
+  if (!await reservePasswordResetEmail()) return res.status(429).json({ error: "تم بلوغ حد إرسال رسائل الاستعادة مؤقتًا. حاول بعد ساعة." });
+
+  const { token, tokenHash } = createPasswordResetToken();
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+  const previous = { status: request.status, tokenHash: request.tokenHash, expiresAt: request.expiresAt, approvalTokenHash: request.approvalTokenHash, approvalExpiresAt: request.approvalExpiresAt, reviewedAt: request.reviewedAt, reviewerId: request.reviewerId };
+  await prisma.passwordResetRequest.update({ where: { id: request.id }, data: { status: PasswordResetStatus.APPROVED, tokenHash, expiresAt, approvalTokenHash: null, approvalExpiresAt: null, reviewedAt: new Date(), reviewerId: req.user!.id } });
+  const resetUrl = new URL("/reset-password", config.webOrigin);
+  resetUrl.searchParams.set("token", token);
+  try {
+    await sendPasswordResetEmail(config.passwordResetRecoveryEmail, resetUrl.toString());
+  } catch (error) {
+    await prisma.passwordResetRequest.updateMany({ where: { id: request.id, tokenHash }, data: previous });
+    console.error("Password reset email could not be sent", error);
+    return res.status(503).json({ error: "تعذر إرسال رسالة إعادة الضبط. لم يتغير الطلب، ويمكن إعادة المحاولة." });
+  }
+  await audit(req.user!.id, "PASSWORD_RESET_APPROVED", undefined, { targetUserId: request.userId, recoveryEmail: config.passwordResetRecoveryEmail });
+  res.json({ message: `تمت الموافقة وإرسال رابط إعادة الضبط إلى ${config.passwordResetRecoveryEmail}.` });
+});
+
+app.post("/api/auth/password-reset/approve-by-email", async (req, res) => {
+  const parsed = z.object({ token: z.string().min(40).max(100) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "رابط الموافقة غير صالح أو منتهي الصلاحية" });
+  const approvalTokenHash = hashPasswordResetToken(parsed.data.token);
+  const request = await prisma.passwordResetRequest.findUnique({ where: { approvalTokenHash }, include: { user: { select: { id: true, isActive: true } } } });
+  const now = new Date();
+  if (!request || request.status !== PasswordResetStatus.PENDING || !request.approvalExpiresAt || request.approvalExpiresAt <= now || !request.user.isActive) {
+    return res.status(400).json({ error: "رابط الموافقة غير صالح أو منتهي الصلاحية" });
+  }
+  if (!await reservePasswordResetEmail()) return res.status(429).json({ error: "تم بلوغ حد إرسال رسائل الاستعادة مؤقتًا. حاول بعد ساعة." });
+
+  const { token, tokenHash } = createPasswordResetToken();
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+  const previous = { status: request.status, tokenHash: request.tokenHash, expiresAt: request.expiresAt, approvalTokenHash: request.approvalTokenHash, approvalExpiresAt: request.approvalExpiresAt, reviewedAt: request.reviewedAt, reviewerId: request.reviewerId };
+  const claimed = await prisma.passwordResetRequest.updateMany({
+    where: { id: request.id, status: PasswordResetStatus.PENDING, approvalTokenHash, approvalExpiresAt: { gt: new Date() } },
+    data: { status: PasswordResetStatus.APPROVED, tokenHash, expiresAt, approvalTokenHash: null, approvalExpiresAt: null, reviewedAt: new Date(), reviewerId: null }
+  });
+  if (!claimed.count) return res.status(400).json({ error: "رابط الموافقة غير صالح أو منتهي الصلاحية" });
+  const resetUrl = new URL("/reset-password", config.webOrigin);
+  resetUrl.searchParams.set("token", token);
+  try {
+    await sendPasswordResetEmail(config.passwordResetRecoveryEmail, resetUrl.toString());
+  } catch (error) {
+    await prisma.passwordResetRequest.updateMany({ where: { id: request.id, tokenHash }, data: previous });
+    console.error("Password reset email could not be sent", error);
+    return res.status(503).json({ error: "تعذر إرسال رابط التغيير. أعد فتح رسالة الموافقة وحاول مجددًا." });
+  }
+  await audit(null, "PASSWORD_RESET_APPROVED", undefined, { targetUserId: request.userId, recoveryEmail: config.passwordResetRecoveryEmail, approvalMethod: "RECOVERY_EMAIL" });
+  res.json({ message: `تمت الموافقة، وأُرسل رابط تغيير كلمة المرور إلى ${config.passwordResetRecoveryEmail}.` });
+});
+
+app.post("/api/admin/password-reset-requests/:id/reject", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const result = await prisma.passwordResetRequest.updateMany({
+    where: { id: req.params.id, status: { in: [PasswordResetStatus.PENDING, PasswordResetStatus.APPROVED] } },
+    data: { status: PasswordResetStatus.REJECTED, tokenHash: null, expiresAt: null, approvalTokenHash: null, approvalExpiresAt: null, reviewedAt: new Date(), reviewerId: req.user!.id }
+  });
+  if (!result.count) return res.status(409).json({ error: "الطلب لم يعد متاحًا للرفض" });
+  const request = await prisma.passwordResetRequest.findUnique({ where: { id: req.params.id }, select: { userId: true } });
+  if (request) await audit(req.user!.id, "PASSWORD_RESET_REJECTED", undefined, { targetUserId: request.userId });
+  res.json({ message: "تم رفض طلب إعادة ضبط كلمة المرور." });
+});
+
+app.post("/api/auth/password-reset/complete", async (req, res) => {
+  const parsed = z.object({ token: z.string().min(40).max(100), newPassword: z.string().min(12).max(200) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "كلمة المرور الجديدة يجب أن تتكون من 12 حرفًا على الأقل" });
+  const tokenHash = hashPasswordResetToken(parsed.data.token);
+  const request = await prisma.passwordResetRequest.findUnique({ where: { tokenHash }, include: { user: { select: { id: true, isActive: true } } } });
+  const now = new Date();
+  if (!request || request.status !== PasswordResetStatus.APPROVED || !request.expiresAt || request.expiresAt <= now || !request.user.isActive) {
+    return res.status(400).json({ error: "رابط إعادة الضبط غير صالح أو منتهي الصلاحية" });
+  }
+  const passwordHash = await bcrypt.hash(parsed.data.newPassword, 12);
+  let consumed = false;
+  await prisma.$transaction(async (tx) => {
+    const claimed = await tx.passwordResetRequest.updateMany({
+      where: { id: request.id, status: PasswordResetStatus.APPROVED, tokenHash, expiresAt: { gt: new Date() } },
+      data: { status: PasswordResetStatus.USED, usedAt: new Date() }
+    });
+    if (!claimed.count) return;
+    await tx.user.update({ where: { id: request.userId }, data: { passwordHash, authVersion: { increment: 1 } } });
+    consumed = true;
+  });
+  if (!consumed) return res.status(400).json({ error: "رابط إعادة الضبط غير صالح أو منتهي الصلاحية" });
+  await audit(request.userId, "PASSWORD_RESET_COMPLETED");
+  io.in(`user:${request.userId}`).disconnectSockets(true);
+  res.json({ message: "تم تغيير كلمة المرور. يمكنك تسجيل الدخول الآن." });
 });
 
 app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -1283,7 +1447,6 @@ app.post("/webhooks/telegram", async (req, res) => {
   catch (error) { console.error("Telegram webhook ingestion failed", error); }
 });
 
-const redis = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
 const kalemlyWorker = startKalemlyWaWorker();
 kalemlyWorker.on("failed", (job, error) => console.error("KalemlyWA outbound delivery failed", job?.id, error));
 void initializeWhatsAppEngine().catch((error) => console.error("Could not initialize WhatsApp engine", error));

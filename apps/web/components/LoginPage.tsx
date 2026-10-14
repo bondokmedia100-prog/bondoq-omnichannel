@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { ArrowLeft, Eye, EyeOff, LockKeyhole, Mail, MessageCircleMore, ShieldCheck, Sparkles } from "lucide-react";
 import { API_URL } from "@/lib/api";
 
@@ -51,6 +52,7 @@ export default function LoginPage() {
         <form onSubmit={submit} className="space-y-5">
           <label className="block"><span className="mb-2 block text-sm font-bold text-stone-700">البريد الإلكتروني أو اسم المستخدم</span><span className="flex h-13 items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 focus-within:border-[#d32f2f] focus-within:ring-4 focus-within:ring-red-50"><Mail size={18} className="text-stone-400" /><input autoComplete="username" required value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="name@bondoq.com" className="h-full w-full border-0 bg-transparent text-sm outline-none placeholder:text-stone-300" /></span></label>
           <label className="block"><span className="mb-2 block text-sm font-bold text-stone-700">كلمة المرور</span><span className="flex h-13 items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 focus-within:border-[#d32f2f] focus-within:ring-4 focus-within:ring-red-50"><LockKeyhole size={18} className="text-stone-400" /><input autoComplete="current-password" required type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••" className="h-full w-full border-0 bg-transparent text-sm outline-none placeholder:text-stone-300" /><button type="button" onClick={() => setShowPassword(!showPassword)} className="text-stone-400">{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></span></label>
+          <div className="-mt-2 flex justify-end"><Link href="/forgot-password" className="text-xs font-bold text-[#a87415] hover:underline">نسيت كلمة المرور؟</Link></div>
           {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
           <button disabled={busy} className="flex h-13 w-full items-center justify-center gap-2 rounded-xl bg-[#d32f2f] font-bold text-white shadow-lg shadow-red-200/60 transition hover:bg-[#b71c1c] disabled:opacity-60">{busy ? "جارٍ التحقق..." : "دخول إلى مساحة العمل"}<ArrowLeft size={17} /></button>
         </form>
