@@ -1,4 +1,4 @@
-const CACHE = "bondoq-shell-v1";
+const CACHE = "bondoq-shell-v2";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -15,18 +15,15 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
+  const staticAsset = url.pathname.startsWith("/_next/static/") || ["/icon.svg", "/manifest.webmanifest"].includes(url.pathname);
+  if (url.origin !== self.location.origin || !staticAsset) return;
   event.respondWith((async () => {
-    try {
-      const response = await fetch(event.request);
-      if (response.ok) {
-        const cache = await caches.open(CACHE);
-        await cache.put(event.request, response.clone());
-      }
-      return response;
-    } catch {
-      return await caches.match(event.request) || Response.error();
-    }
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(event.request);
+    if (cached) return cached;
+    const response = await fetch(event.request);
+    if (response.ok) await cache.put(event.request, response.clone());
+    return response;
   })());
 });
 
