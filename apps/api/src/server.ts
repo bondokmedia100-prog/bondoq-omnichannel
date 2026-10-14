@@ -15,6 +15,7 @@ import { assignConversation, dispatchQueued, releaseAgentConversations } from ".
 import { answerTelegramCallback, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, sendCsatPrompt, sendToChannel } from "./providers";
 import { ingestMessage } from "./ingestion";
 import { getKalemlySettings, safeProviderResponse, saveKalemlySettings, sendKalemlyTest, startKalemlyWaWorker, kalemlyExternalMessageId } from "./KalemlyWaService";
+import { defaultCallReply, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, logoutBaileysWhatsApp, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, type WhatsAppMode } from "./BaileysWhatsAppService";
 import { startOfCairoDay } from "./cairoTime";
 import { getMessengerSettings, getTelegramSettings, saveMessengerSettings, saveTelegramSettings } from "./ChannelIntegrationService";
 import { allowedMediaTypes, imageSignatureMatches, publicMediaUrl, safeFileName, uploadLimitBytes, verifyPublicMediaUrl } from "./mediaStorage";
@@ -55,7 +56,7 @@ async function queueWhatsAppMessage(messageId: string, conversationId: string, a
     if (authorId) targets.to(`agent:${authorId}`).emit("message:new", { conversationId, message });
     else targets.emit("message:new", { conversationId, message });
   };
-  const queued = await prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } } } });
+  const queued = await prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
   if (queued) emitMessage(queued);
   try {
     await sendToChannel({ ...input, outboundMessageId: messageId });
@@ -64,7 +65,7 @@ async function queueWhatsAppMessage(messageId: string, conversationId: string, a
     const failed = await prisma.message.update({ where: { id: messageId }, data: { deliveryStatus: "FAILED" }, include: { author: { select: { id: true, name: true } } } });
     emitMessage(failed);
   }
-  return prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } } } });
+  return prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
 }
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "bondoq-api" }));
@@ -138,16 +139,27 @@ app.get("/api/auth/me", authenticate, async (req: AuthedRequest, res) => {
 });
 
 app.patch("/api/auth/me", authenticate, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ username: usernameSchema }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "اسم المستخدم غير صالح" });
+  const parsed = z.object({ username: usernameSchema.optional(), name: z.string().trim().min(2).max(120).optional() }).strict().refine((value) => value.username !== undefined || value.name !== undefined).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "أدخل اسمًا أو اسم مستخدم صالحًا" });
   try {
-    const user = await prisma.user.update({ where: { id: req.user!.id }, data: { username: parsed.data.username }, select: { id: true, username: true, name: true, email: true, role: true, department: true, presence: true } });
-    await audit(user.id, "USERNAME_UPDATED");
+    const user = await prisma.user.update({ where: { id: req.user!.id }, data: parsed.data, select: { id: true, username: true, name: true, email: true, role: true, department: true, presence: true } });
+    await audit(user.id, parsed.data.username ? "USERNAME_UPDATED" : "PROFILE_UPDATED", undefined, { nameChanged: parsed.data.name !== undefined, usernameChanged: parsed.data.username !== undefined });
     res.json(user);
   } catch (error) {
     if (isUniqueConstraintError(error)) return res.status(409).json({ error: "اسم المستخدم مستخدم بالفعل" });
     throw error;
   }
+});
+
+app.patch("/api/auth/me/password", authenticate, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ currentPassword: z.string().min(1).max(200), newPassword: z.string().min(12).max(200) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "كلمة المرور الجديدة يجب أن تتكون من 12 حرفًا على الأقل" });
+  const user = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { passwordHash: true } });
+  if (!user || !(await bcrypt.compare(parsed.data.currentPassword, user.passwordHash))) return res.status(401).json({ error: "كلمة المرور الحالية غير صحيحة" });
+  await prisma.user.update({ where: { id: req.user!.id }, data: { passwordHash: await bcrypt.hash(parsed.data.newPassword, 12), authVersion: { increment: 1 } } });
+  await audit(req.user!.id, "PASSWORD_CHANGED");
+  io.in(`user:${req.user!.id}`).disconnectSockets(true);
+  res.sendStatus(204);
 });
 
 app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -163,10 +175,32 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
   res.json(conversations);
 });
 
+app.get("/api/conversations/favorites", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
+  const favorites = await prisma.conversationFavorite.findMany({
+    where: { userId: req.user!.id, ...(!canSeeAll ? { conversation: { is: { assignedAgentId: req.user!.id } } } : {}) },
+    include: { conversation: { include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: { createdAt: "desc" }, take: 1 } } } },
+    orderBy: { createdAt: "desc" }, take: 100
+  });
+  res.json(favorites.map((favorite) => favorite.conversation));
+});
+
+app.put("/api/conversations/:id/favorite", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ favorite: z.boolean() }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "حالة المفضلة غير صالحة" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  if (parsed.data.favorite) await prisma.conversationFavorite.upsert({ where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } }, create: { userId: req.user!.id, conversationId: conversation.id }, update: {} });
+  else await prisma.conversationFavorite.deleteMany({ where: { userId: req.user!.id, conversationId: conversation.id } });
+  await audit(req.user!.id, parsed.data.favorite ? "CONVERSATION_FAVORITED" : "CONVERSATION_UNFAVORITED", conversation.id);
+  res.json({ conversationId: conversation.id, favorite: parsed.data.favorite });
+});
+
 app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   let conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: {
-    customer: { include: { orders: { orderBy: { createdAt: "desc" }, take: 10 } } }, assignedAgent: { select: { id: true, name: true } },
-    messages: { include: { author: { select: { id: true, name: true } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "asc" } }
+    customer: { include: { orders: { orderBy: { createdAt: "desc" }, take: 10 }, tags: { include: { tag: true } } } }, assignedAgent: { select: { id: true, name: true } },
+    messages: { include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "asc" } }, internalNotes: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: "asc" } }
   } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
@@ -194,40 +228,240 @@ app.patch("/api/conversations/:id/customer", agentGuard, async (req: AuthedReque
   res.json(customer);
 });
 
+app.get("/api/customers", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
+  const tagId = typeof req.query.tagId === "string" ? req.query.tagId : undefined;
+  const pageValue = Number(req.query.page || 1);
+  const page = Number.isInteger(pageValue) ? Math.max(1, Math.min(pageValue, 10_000)) : 1;
+  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
+  const where: Prisma.CustomerWhereInput = {
+    ...(q ? { OR: [
+      { displayName: { contains: q, mode: "insensitive" } }, { name: { contains: q, mode: "insensitive" } },
+      { phone: { contains: q } }, { email: { contains: q, mode: "insensitive" } }
+    ] } : {}),
+    ...(tagId ? { tags: { some: { tagId } } } : {}),
+    ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {})
+  };
+  const [customers, total] = await prisma.$transaction([
+    prisma.customer.findMany({ where, include: { tags: { include: { tag: true } } }, orderBy: { updatedAt: "desc" }, skip: (page - 1) * 50, take: 50 }),
+    prisma.customer.count({ where })
+  ]);
+  res.json({ customers, total, page, pageSize: 50 });
+});
+
+app.get("/api/admin/customers/export.csv", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => {
+  const customers = await prisma.customer.findMany({ include: { tags: { include: { tag: true } } }, orderBy: { createdAt: "asc" } });
+  const cell = (value: unknown) => {
+    let text = String(value ?? "");
+    if (/^[=+@-]/.test(text)) text = `'${text}`;
+    return `"${text.replace(/"/g, '""')}"`;
+  };
+  const rows = [["displayName", "phone", "email", "notes", "tags"], ...customers.map((customer) => [
+    customer.displayName || customer.name || "", customer.phone || "", customer.email || "", customer.notes || "", customer.tags.map((item) => item.tag.name).join(" | ")
+  ])];
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", "attachment; filename*=UTF-8''contacts.csv");
+  res.send(`\uFEFF${rows.map((row) => row.map(cell).join(",")).join("\r\n")}`);
+});
+
+app.post("/api/admin/customers/import", permissionGuard("canManageTeam"), async (req: AuthedRequest, res: express.Response) => {
+  const optionalText = (max: number) => z.preprocess((value) => typeof value === "string" && !value.trim() ? null : value, z.string().trim().max(max).nullable().optional());
+  const importedCustomer = z.object({
+    displayName: optionalText(120), phone: optionalText(32), email: z.preprocess((value) => typeof value === "string" && !value.trim() ? null : value, z.string().trim().email().max(254).nullable().optional()), notes: optionalText(4000)
+  }).strict().refine((value) => Boolean(value.displayName || value.phone || value.email));
+  const parsed = z.object({ customers: z.array(importedCustomer).min(1).max(1000) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "ملف الاستيراد غير صالح؛ الحد الأقصى 1000 جهة اتصال" });
+  let created = 0;
+  let updated = 0;
+  await prisma.$transaction(async (tx) => {
+    for (const row of parsed.data.customers) {
+      const identity = [row.phone ? { phone: row.phone } : null, row.email ? { email: { equals: row.email, mode: "insensitive" as const } } : null].filter(Boolean) as Prisma.CustomerWhereInput[];
+      const existing = identity.length ? await tx.customer.findFirst({ where: { OR: identity }, select: { id: true } }) : null;
+      const contactFields = { ...(row.displayName !== undefined ? { displayName: row.displayName, ...(row.displayName ? { name: row.displayName } : {}) } : {}), ...(row.phone !== undefined ? { phone: row.phone } : {}), ...(row.email !== undefined ? { email: row.email } : {}), ...(row.notes !== undefined ? { notes: row.notes } : {}) };
+      if (existing) { await tx.customer.update({ where: { id: existing.id }, data: contactFields }); updated++; }
+      else { await tx.customer.create({ data: { ...contactFields, name: row.displayName || null } }); created++; }
+    }
+  });
+  await audit(req.user!.id, "CUSTOMERS_IMPORTED", undefined, { created, updated });
+  res.json({ created, updated });
+});
+
+app.get("/api/customers/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
+  const customer = await prisma.customer.findFirst({ where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) }, include: {
+     tags: { include: { tag: true } }, orders: { where: canSeeAll ? {} : { conversation: { is: { assignedAgentId: req.user!.id } } }, orderBy: { createdAt: "desc" }, take: 50 },
+    conversations: { where: canSeeAll ? {} : { assignedAgentId: req.user!.id }, select: { id: true, channel: true, status: true, subject: true, lastMessageAt: true }, orderBy: { lastMessageAt: "desc" }, take: 50 }
+  } });
+  if (!customer) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
+  res.json(customer);
+});
+
+app.patch("/api/customers/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = customerProfileSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "بيانات ملف العميل غير صالحة" });
+  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
+  const existing = await prisma.customer.findFirst({ where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) }, select: { id: true } });
+  if (!existing) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
+  const customer = await prisma.customer.update({ where: { id: existing.id }, data: parsed.data, include: { tags: { include: { tag: true } } } });
+  await audit(req.user!.id, "CUSTOMER_PROFILE_UPDATED", undefined, { customerId: customer.id });
+  const conversations = await prisma.conversation.findMany({ where: { customerId: customer.id, ...(!canSeeAll ? { assignedAgentId: req.user!.id } : {}) }, select: { id: true } });
+  for (const conversation of conversations) io.to(`conversation:${conversation.id}`).emit("customer:updated", { conversationId: conversation.id, customerId: customer.id, customer });
+  io.to("admins").emit("customer:updated", { customerId: customer.id, customer });
+  res.json(customer);
+});
+
+app.get("/api/customer-tags", agentGuard, async (_req: express.Request, res: express.Response) => {
+  res.json(await prisma.customerTag.findMany({ orderBy: { name: "asc" } }));
+});
+
+app.get("/api/admin/customer-tags", permissionGuard("canManageCatalog"), async (_req: express.Request, res: express.Response) => {
+  res.json(await prisma.customerTag.findMany({ include: { _count: { select: { customers: true } } }, orderBy: { name: "asc" } }));
+});
+
+app.post("/api/admin/customer-tags", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ name: z.string().trim().min(1).max(40), color: z.string().regex(/^#[0-9a-fA-F]{6}$/).default("#2563eb") }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "أدخل اسمًا ولونًا صالحين للوسم" });
+  try {
+    const tag = await prisma.customerTag.create({ data: parsed.data });
+    await audit(req.user!.id, "CUSTOMER_TAG_CREATED", undefined, { tagId: tag.id });
+    res.status(201).json(tag);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "اسم الوسم مستخدم بالفعل" });
+    throw error;
+  }
+});
+
+app.patch("/api/admin/customer-tags/:id", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ name: z.string().trim().min(1).max(40).optional(), color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "راجع اسم الوسم ولونه" });
+  try {
+    const tag = await prisma.customerTag.update({ where: { id: req.params.id }, data: parsed.data });
+    await audit(req.user!.id, "CUSTOMER_TAG_UPDATED", undefined, { tagId: tag.id });
+    res.json(tag);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "اسم الوسم مستخدم بالفعل" });
+    throw error;
+  }
+});
+
+app.delete("/api/admin/customer-tags/:id", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  await prisma.customerTag.delete({ where: { id: req.params.id } });
+  await audit(req.user!.id, "CUSTOMER_TAG_DELETED", undefined, { tagId: req.params.id });
+  res.sendStatus(204);
+});
+
+app.put("/api/customers/:id/tags", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ tagIds: z.array(z.string().min(1)).max(30) }).strict().safeParse(req.body);
+  if (!parsed.success || new Set(parsed.data?.tagIds || []).size !== parsed.data?.tagIds.length) return res.status(400).json({ error: "قائمة الوسوم غير صالحة" });
+  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
+  const customer = await prisma.customer.findFirst({ where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) }, select: { id: true } });
+  if (!customer) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
+  const validTags = await prisma.customerTag.count({ where: { id: { in: parsed.data.tagIds } } });
+  if (validTags !== new Set(parsed.data.tagIds).size) return res.status(400).json({ error: "أحد الوسوم المحددة غير موجود" });
+  await prisma.$transaction(async (tx) => {
+    await tx.customerTagAssignment.deleteMany({ where: { customerId: customer.id } });
+    if (parsed.data.tagIds.length) await tx.customerTagAssignment.createMany({ data: parsed.data.tagIds.map((tagId) => ({ customerId: customer.id, tagId })), skipDuplicates: true });
+  });
+  const tags = await prisma.customerTagAssignment.findMany({ where: { customerId: customer.id }, include: { tag: true } });
+  await audit(req.user!.id, "CUSTOMER_TAGS_UPDATED", undefined, { customerId: customer.id, tagIds: parsed.data.tagIds });
+  const conversations = await prisma.conversation.findMany({ where: { customerId: customer.id, ...(!canSeeAll ? { assignedAgentId: req.user!.id } : {}) }, select: { id: true } });
+  const payload = { customerId: customer.id, tags };
+  for (const conversation of conversations) io.to(`conversation:${conversation.id}`).emit("customer:tags-updated", payload);
+  io.to("admins").emit("customer:tags-updated", payload);
+  res.json(tags);
+});
+
+app.get("/api/directory", agentGuard, async (_req: express.Request, res: express.Response) => {
+  res.json(await prisma.directoryCategory.findMany({ where: { isActive: true }, include: { entries: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }));
+});
+
+app.get("/api/admin/directory", permissionGuard("canManageCatalog"), async (_req: express.Request, res: express.Response) => {
+  res.json(await prisma.directoryCategory.findMany({ include: { entries: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }));
+});
+
+app.post("/api/admin/directory/categories", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ name: z.string().trim().min(1).max(80), sortOrder: z.number().int().min(0).max(10_000).default(0) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اسم القسم غير صالح" });
+  try {
+    const category = await prisma.directoryCategory.create({ data: parsed.data });
+    await audit(req.user!.id, "DIRECTORY_CATEGORY_CREATED", undefined, { categoryId: category.id });
+    res.status(201).json(category);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "اسم القسم موجود بالفعل" });
+    throw error;
+  }
+});
+
+app.patch("/api/admin/directory/categories/:id", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ name: z.string().trim().min(1).max(80).optional(), sortOrder: z.number().int().min(0).max(10_000).optional(), isActive: z.boolean().optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "بيانات القسم غير صالحة" });
+  try {
+    const category = await prisma.directoryCategory.update({ where: { id: req.params.id }, data: parsed.data });
+    await audit(req.user!.id, "DIRECTORY_CATEGORY_UPDATED", undefined, { categoryId: category.id });
+    res.json(category);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "اسم القسم موجود بالفعل" });
+    throw error;
+  }
+});
+
+app.post("/api/admin/directory/entries", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  const optionalText = (max: number) => z.string().trim().max(max).nullable().optional();
+  const parsed = z.object({ categoryId: z.string().min(1), name: z.string().trim().min(1).max(120), phone: optionalText(32), whatsappNumber: optionalText(32), email: z.string().trim().email().max(254).nullable().optional(), description: optionalText(1000), sortOrder: z.number().int().min(0).max(10_000).default(0) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "راجع بيانات جهة الاتصال" });
+  const category = await prisma.directoryCategory.findUnique({ where: { id: parsed.data.categoryId }, select: { id: true } });
+  if (!category) return res.status(400).json({ error: "القسم المحدد غير موجود" });
+  const entry = await prisma.directoryEntry.create({ data: parsed.data });
+  await audit(req.user!.id, "DIRECTORY_ENTRY_CREATED", undefined, { entryId: entry.id, categoryId: entry.categoryId });
+  res.status(201).json(entry);
+});
+
+app.patch("/api/admin/directory/entries/:id", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  const optionalText = (max: number) => z.string().trim().max(max).nullable().optional();
+  const parsed = z.object({ categoryId: z.string().min(1).optional(), name: z.string().trim().min(1).max(120).optional(), phone: optionalText(32), whatsappNumber: optionalText(32), email: z.string().trim().email().max(254).nullable().optional(), description: optionalText(1000), sortOrder: z.number().int().min(0).max(10_000).optional(), isActive: z.boolean().optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "راجع بيانات جهة الاتصال" });
+  if (parsed.data.categoryId && !await prisma.directoryCategory.findUnique({ where: { id: parsed.data.categoryId }, select: { id: true } })) return res.status(400).json({ error: "القسم المحدد غير موجود" });
+  const entry = await prisma.directoryEntry.update({ where: { id: req.params.id }, data: parsed.data });
+  await audit(req.user!.id, "DIRECTORY_ENTRY_UPDATED", undefined, { entryId: entry.id, categoryId: entry.categoryId });
+  res.json(entry);
+});
+
 app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: httpsUrl.optional(), mediaAssetId: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional() }).safeParse(req.body);
+  const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: httpsUrl.optional(), mediaAssetId: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional(), quotedMessageId: z.string().min(1).optional() }).strict().safeParse(req.body);
   if (!parsed.success || (!parsed.data.text && parsed.data.kind === MessageKind.TEXT)) return res.status(400).json({ error: "الرسالة غير صالحة" });
-  const mediaKind = parsed.data.kind === MessageKind.IMAGE || parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.FILE;
+   const mediaKind = parsed.data.kind === MessageKind.IMAGE || parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.VIDEO || parsed.data.kind === MessageKind.FILE;
   if (mediaKind && !parsed.data.mediaUrl && !parsed.data.mediaAssetId || parsed.data.kind === MessageKind.LOCATION && (parsed.data.latitude === undefined || parsed.data.longitude === undefined)) return res.status(400).json({ error: "يلزم إرفاق ملف أو رابط وسيط أو إحداثيات الموقع" });
   if (!mediaKind && (parsed.data.mediaAssetId || parsed.data.mediaUrl)) return res.status(400).json({ error: "نوع الملف لا يطابق نوع الرسالة" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية الرد على هذه المحادثة" });
+  if (parsed.data.quotedMessageId && !await prisma.message.findFirst({ where: { id: parsed.data.quotedMessageId, conversationId: conversation.id }, select: { id: true } })) return res.status(400).json({ error: "الرسالة المقتبسة لا تنتمي إلى هذه المحادثة" });
+  const { quotedMessageId, ...replyInput } = parsed.data;
   const receivedAt = await lastInboundAt(conversation.id, conversation.lastInboundAt);
   if (!messengerWindowOpen(conversation.channel, receivedAt)) return res.status(409).json({ code: "META_WINDOW_EXPIRED", error: "انتهت نافذة الرد في Messenger. انتظر رسالة جديدة من العميل." });
   try {
     const asset = parsed.data.mediaAssetId ? await prisma.mediaAsset.findUnique({ where: { id: parsed.data.mediaAssetId } }) : null;
     if (parsed.data.mediaAssetId && !asset) return res.status(404).json({ error: "الملف المرفق غير موجود" });
-    if (asset && (parsed.data.kind === MessageKind.IMAGE && !asset.contentType.startsWith("image/") || parsed.data.kind === MessageKind.AUDIO && !asset.contentType.startsWith("audio/") || parsed.data.kind === MessageKind.FILE && (asset.contentType.startsWith("image/") || asset.contentType.startsWith("audio/")))) return res.status(400).json({ error: "نوع الملف لا يطابق نوع الرسالة" });
+     if (asset && (parsed.data.kind === MessageKind.IMAGE && !asset.contentType.startsWith("image/") || parsed.data.kind === MessageKind.AUDIO && !asset.contentType.startsWith("audio/") || parsed.data.kind === MessageKind.VIDEO && !asset.contentType.startsWith("video/") || parsed.data.kind === MessageKind.FILE && /^(?:image|audio|video)\//.test(asset.contentType))) return res.status(400).json({ error: "نوع الملف لا يطابق نوع الرسالة" });
     const mediaUrl = asset ? publicMediaUrl(asset.id, conversation.channel === Channel.WHATSAPP ? 0 : undefined) : parsed.data.mediaUrl;
     if (conversation.channel === Channel.WHATSAPP) {
       const message = await prisma.message.create({ data: {
         conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND,
         kind: parsed.data.kind, text: parsed.data.text, mediaUrl, mediaAssetId: asset?.id, deliveryStatus: "QUEUED", latitude: parsed.data.latitude,
-        longitude: parsed.data.longitude
-      }, include: { author: { select: { id: true, name: true } } } });
+        longitude: parsed.data.longitude, quotedMessageId
+      }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: message.createdAt, status: ConversationStatus.OPEN } });
       await audit(req.user!.id, "MESSAGE_QUEUED", conversation.id, { kind: parsed.data.kind });
-      const queuedMessage = await queueWhatsAppMessage(message.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, ...parsed.data, mediaUrl, mediaContentType: asset?.contentType });
+       const queuedMessage = await queueWhatsAppMessage(message.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, ...replyInput, mediaUrl, mediaAssetId: asset?.id, mediaContentType: asset?.contentType });
       return res.status(202).json(queuedMessage || message);
     }
-    const result: any = await sendToChannel({ channel: conversation.channel, recipient: conversation.externalCustomerId, ...parsed.data, mediaUrl, mediaContentType: asset?.contentType });
+    const result: any = await sendToChannel({ channel: conversation.channel, recipient: conversation.externalCustomerId, ...replyInput, mediaUrl, mediaContentType: asset?.contentType });
     const providerId = kalemlyExternalMessageId(result);
     const message = await prisma.message.create({ data: {
       conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND,
       kind: parsed.data.kind, text: parsed.data.text, mediaUrl, mediaAssetId: asset?.id, deliveryStatus: "SENT", latitude: parsed.data.latitude,
-      longitude: parsed.data.longitude, externalId: providerId ? `${conversation.channel}:${providerId}` : undefined
-    } });
+      longitude: parsed.data.longitude, externalId: providerId ? `${conversation.channel}:${providerId}` : undefined, quotedMessageId
+    }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
     await prisma.conversation.update({ where: { id: conversation.id }, data: {
       lastMessageAt: message.createdAt, lastAgentResponseAt: message.createdAt, firstResponseAt: conversation.firstResponseAt || message.createdAt, slaBreachedAt: null, status: ConversationStatus.OPEN
     } });
@@ -266,7 +500,7 @@ app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedReques
         const queuedText = await queueWhatsAppMessage(textMessage.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, text });
         const imageUrl = product.imageAssetId ? publicMediaUrl(product.imageAssetId, 0) : product.imageUrl!;
         const imageMessage = await prisma.message.create({ data: { conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.IMAGE, mediaUrl: imageUrl, mediaAssetId: product.imageAssetId, productId: product.id, deliveryStatus: "QUEUED" } });
-        const queuedImage = await queueWhatsAppMessage(imageMessage.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, kind: MessageKind.IMAGE, mediaUrl: imageUrl });
+         const queuedImage = await queueWhatsAppMessage(imageMessage.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, kind: MessageKind.IMAGE, mediaUrl: imageUrl, mediaAssetId: product.imageAssetId || undefined });
         const captionDelivery = queuedText?.deliveryStatus === "FAILED" ? "failed" : queuedText?.deliveryStatus === "SENT" ? "sent" : "queued";
         const imageDelivery = queuedImage?.deliveryStatus === "FAILED" ? "failed" : queuedImage?.deliveryStatus === "SENT" ? "sent" : "queued";
         results.push({ productId: product.id, name: product.name, textMessage: queuedText || textMessage, imageMessage: queuedImage || imageMessage, captionDelivery, imageDelivery });
@@ -347,6 +581,18 @@ app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest
   const note = await prisma.whisperNote.create({ data: { conversationId: conversation.id, authorId: req.user!.id, text: parsed.data.text } });
   await audit(req.user!.id, "WHISPER_SENT", conversation.id);
   io.to(`agent:${conversation.assignedAgentId}`).to(`conversation:${conversation.id}`).emit("whisper:new", note);
+  res.status(201).json(note);
+});
+
+app.post("/api/conversations/:id/notes", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ text: z.string().trim().min(1).max(4000) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اكتب ملاحظة داخلية لا تتجاوز 4000 حرف" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية إضافة ملاحظة لهذه المحادثة" });
+  const note = await prisma.conversationNote.create({ data: { conversationId: conversation.id, authorId: req.user!.id, text: parsed.data.text }, include: { author: { select: { id: true, name: true } } } });
+  await audit(req.user!.id, "CONVERSATION_NOTE_ADDED", conversation.id, { noteId: note.id });
+  io.to(`conversation:${conversation.id}`).to("admins").emit("conversation-note:new", { conversationId: conversation.id, note });
   res.status(201).json(note);
 });
 
@@ -464,6 +710,30 @@ app.get("/api/conversations/:id/messages/:messageId/media", agentGuard, async (r
     const media = await fetchInboundMedia(message.conversation.channel, (message.metadata || {}) as unknown as Record<string, unknown>, message.mediaUrl || undefined);
     res.setHeader("Content-Type", media.contentType); res.setHeader("Cache-Control", "private, max-age=300"); res.setHeader("X-Content-Type-Options", "nosniff"); res.send(media.body);
   } catch { res.status(404).json({ error: "تعذر تحميل الملف من المنصة" }); }
+});
+
+app.put("/api/conversations/:id/messages/:messageId/reaction", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ emoji: z.string().trim().min(1).max(16) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اختر تفاعلًا صالحًا" });
+  const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
+  if (!message) return res.status(404).json({ error: "الرسالة غير موجودة" });
+  if (!canReadConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية التفاعل مع هذه الرسالة" });
+  const reaction = await prisma.messageReaction.upsert({
+    where: { messageId_userId: { messageId: message.id, userId: req.user!.id } },
+    create: { messageId: message.id, userId: req.user!.id, emoji: parsed.data.emoji },
+    update: { emoji: parsed.data.emoji }, include: { user: { select: { id: true, name: true } } }
+  });
+  io.to(`conversation:${message.conversationId}`).to("admins").emit("message:reaction", { conversationId: message.conversationId, messageId: message.id, reaction });
+  res.json(reaction);
+});
+
+app.delete("/api/conversations/:id/messages/:messageId/reaction", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
+  if (!message) return res.status(404).json({ error: "الرسالة غير موجودة" });
+  if (!canReadConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل التفاعل" });
+  await prisma.messageReaction.deleteMany({ where: { messageId: message.id, userId: req.user!.id } });
+  io.to(`conversation:${message.conversationId}`).to("admins").emit("message:reaction-removed", { conversationId: message.conversationId, messageId: message.id, userId: req.user!.id });
+  res.sendStatus(204);
 });
 
 app.post("/api/conversations/:id/orders", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -621,8 +891,9 @@ app.delete("/api/push/subscriptions", agentGuard, async (req: AuthedRequest, res
 
 app.get("/api/admin/integrations/kalemlywa", adminGuard, async (_req: express.Request, res: express.Response) => {
   const settings = await getKalemlySettings();
+  const integration = await prisma.integrationSetting.findUnique({ where: { id: "kalemlywa" }, select: { whatsappCallReplyText: true } });
   const webhookSecret = config.kalemlyWebhookSecret || settings.appKey;
-  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookAuthConfigured: Boolean(webhookSecret), webhookUrlToken: webhookSecret ? kalemlyWebhookUrlToken(webhookSecret) : "" });
+  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookAuthConfigured: Boolean(webhookSecret), webhookUrlToken: webhookSecret ? kalemlyWebhookUrlToken(webhookSecret) : "", whatsappMode: await getWhatsAppMode(), whatsappConnection: getBaileysWhatsAppState(), callReplyText: integration?.whatsappCallReplyText || defaultCallReply });
 });
 
 app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -631,7 +902,71 @@ app.put("/api/admin/integrations/kalemlywa", adminGuard, async (req: AuthedReque
   const settings = await saveKalemlySettings(parsed.data);
   await audit(req.user!.id, "KALEMLYWA_SETTINGS_UPDATED", undefined, { authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodeUpdated: parsed.data.qrCodePayload !== undefined || Boolean(parsed.data.clearQrCode) });
   const webhookSecret = config.kalemlyWebhookSecret || settings.appKey;
-  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookAuthConfigured: Boolean(webhookSecret), webhookUrlToken: webhookSecret ? kalemlyWebhookUrlToken(webhookSecret) : "" });
+  res.json({ endpoint: settings.endpoint, authKeyConfigured: Boolean(settings.authKey), appKeyConfigured: Boolean(settings.appKey), qrCodePayload: settings.qrCodePayload, webhookAuthConfigured: Boolean(webhookSecret), webhookUrlToken: webhookSecret ? kalemlyWebhookUrlToken(webhookSecret) : "", whatsappMode: await getWhatsAppMode(), whatsappConnection: getBaileysWhatsAppState(), callReplyText: await getWhatsAppCallReply() });
+});
+
+app.put("/api/admin/integrations/whatsapp/mode", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ mode: z.enum(["BAILEYS", "API"]) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اختر وضع اتصال واتساب صالحًا" });
+  const result = await setWhatsAppMode(parsed.data.mode as WhatsAppMode);
+  await audit(req.user!.id, "WHATSAPP_MODE_UPDATED", undefined, { mode: result.mode });
+  res.json(result);
+});
+
+app.post("/api/admin/integrations/whatsapp/baileys/start", adminGuard, async (_req: AuthedRequest, res: express.Response) => {
+  if (await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "حوّل الوضع إلى المحرك الداخلي قبل بدء الاتصال" });
+  res.json(await startBaileysWhatsApp());
+});
+
+app.post("/api/admin/integrations/whatsapp/baileys/restart", adminGuard, async (_req: AuthedRequest, res: express.Response) => {
+  if (await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "حوّل الوضع إلى المحرك الداخلي قبل إعادة الاتصال" });
+  res.json(await restartBaileysWhatsApp());
+});
+
+app.post("/api/admin/integrations/whatsapp/baileys/logout", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  if (await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "حوّل الوضع إلى المحرك الداخلي قبل حذف جلسته" });
+  await audit(req.user!.id, "WHATSAPP_SESSION_LOGGED_OUT");
+  res.json(await logoutBaileysWhatsApp());
+});
+
+app.put("/api/admin/integrations/whatsapp/call-reply", adminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ text: z.string().trim().min(10).max(1000) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اكتب ردًا تلقائيًا من 10 إلى 1000 حرف" });
+  const text = await saveWhatsAppCallReply(parsed.data.text);
+  await audit(req.user!.id, "WHATSAPP_CALL_REPLY_UPDATED");
+  res.json({ text });
+});
+
+app.post("/api/integrations/whatsapp/calls/reject", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ callId: z.string().min(1).max(256), callerJid: z.string().min(1).max(256), text: z.string().trim().max(1000).optional() }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "بيانات المكالمة غير صالحة" });
+  if (await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "مكالمات WhatsApp الواردة تتطلب تفعيل المحرك الداخلي" });
+  const pending = getPendingBaileysCall(parsed.data.callId, parsed.data.callerJid);
+  if (!pending) return res.status(404).json({ error: "المكالمة لم تعد واردة أو انتهت بالفعل" });
+  const conversation = pending.conversationId ? await prisma.conversation.findUnique({ where: { id: pending.conversationId } }) : null;
+  if (conversation && !canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية معالجة هذه المكالمة" });
+  if (!conversation && req.user!.role !== Role.ADMIN && req.user!.role !== Role.SUPERVISOR) return res.status(403).json({ error: "هذه المكالمة غير مرتبطة بمحادثة مسندة إليك" });
+  try {
+    await rejectBaileysCall(pending.callId, pending.callerJid);
+  } catch (error) { return res.status(409).json({ error: error instanceof Error ? error.message : "تعذر رفض المكالمة" }); }
+  const text = parsed.data.text?.trim() || await getWhatsAppCallReply();
+  try {
+    const result: any = await sendToChannel({ channel: Channel.WHATSAPP, recipient: pending.phoneNumber || pending.callerJid, text });
+    if (conversation) {
+      const externalId = kalemlyExternalMessageId(result);
+      const message = await prisma.message.create({ data: { conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text, deliveryStatus: "SENT", externalId: externalId ? `WHATSAPP:${externalId}` : undefined }, include: { author: { select: { id: true, name: true } } } });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: message.createdAt, lastAgentResponseAt: message.createdAt, firstResponseAt: conversation.firstResponseAt || message.createdAt, slaBreachedAt: null, status: ConversationStatus.OPEN } });
+      await audit(req.user!.id, "WHATSAPP_CALL_REJECTED_WITH_REPLY", conversation.id, { callId: pending.callId });
+      io.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message });
+      res.json({ ok: true, message });
+    } else {
+      await audit(req.user!.id, "WHATSAPP_CALL_REJECTED_WITH_REPLY", undefined, { callId: pending.callId, phoneLastFour: pending.phoneNumber.replace(/\D/g, "").slice(-4) });
+      res.json({ ok: true });
+    }
+  } catch (error) {
+    await audit(req.user!.id, "WHATSAPP_CALL_REJECTED_REPLY_FAILED", conversation?.id, { callId: pending.callId });
+    res.status(502).json({ error: error instanceof Error ? `رُفضت المكالمة لكن تعذر إرسال الرد التلقائي: ${error.message}` : "رُفضت المكالمة لكن تعذر إرسال الرد التلقائي" });
+  }
 });
 
 app.post("/api/admin/integrations/kalemlywa/test", adminGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -928,6 +1263,7 @@ app.post("/webhooks/kalemlywa", async (req, res) => {
   if (!expected.length) return res.status(503).json({ error: "KalemlyWA webhook credentials are not configured" });
   const supplied = kalemlyWebhookCredentials(req);
   if (!expected.some((credential) => supplied.some((value) => secretMatches(credential, value) || secretMatches(kalemlyWebhookUrlToken(credential), value)))) return res.sendStatus(401);
+  if (await getWhatsAppMode() !== "API") return res.status(202).json({ ignored: true, reason: "BAILEYS mode is active" });
   try {
     for (const message of parseKalemlyWebhook(req.body)) await ingestMessage(message);
     res.sendStatus(200);
@@ -950,6 +1286,7 @@ app.post("/webhooks/telegram", async (req, res) => {
 const redis = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
 const kalemlyWorker = startKalemlyWaWorker();
 kalemlyWorker.on("failed", (job, error) => console.error("KalemlyWA outbound delivery failed", job?.id, error));
+void initializeWhatsAppEngine().catch((error) => console.error("Could not initialize WhatsApp engine", error));
 new Worker("conversation-sla", async (job) => {
   const { conversationId, messageId } = job.data as { conversationId: string; messageId: string };
   const [conversation, inboundMessage] = await Promise.all([
