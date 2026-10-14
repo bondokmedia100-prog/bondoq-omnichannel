@@ -6,7 +6,7 @@ import { io } from "./realtime";
 import { sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
-import { findMatchingAutoReply } from "./autoReplies";
+import { AUTO_REPLY_HANDOFF_TEXT, AUTO_REPLY_MENU_TEXT, AUTO_REPLY_RESTART_MS, getServiceChoice, findMatchingAutoReply } from "./autoReplies";
 import { sendPushNotification } from "./pushNotifications";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
@@ -51,28 +51,41 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     throw error;
   }
   const pendingSurvey = await prisma.csatSurvey.findUnique({ where: { conversationId: conversation.id } });
-  const autoRules = inbound.text ? await prisma.autoReplyRule.findMany({ where: { isActive: true, isWelcome: false }, orderBy: [{ priority: "desc" }, { createdAt: "asc" }] }) : [];
-  const autoReply = inbound.routingDepartment ? undefined : findMatchingAutoReply(autoRules, inbound.text);
-  const routeChoice = conversation.awaitingRouting ? inbound.routingDepartment || autoReply?.routingDepartment || (autoReply ? Department.HEADQUARTERS : undefined) : undefined;
   const ratingText = (inbound.text || "").trim()
     .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
     .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)));
   const customerRating = /^(?:[1-5]|[1-5]\s*(?:نجوم|star(?:s)?))$/i.test(ratingText)
     ? Number(ratingText.match(/[1-5]/)?.[0]) : undefined;
   const isRatingReply = Boolean(pendingSurvey && pendingSurvey.rating === null && customerRating);
-  let nextAwaitingRouting = conversation.awaitingRouting;
-  if (routeChoice) nextAwaitingRouting = false;
-  else if (conversation.awaitingRouting && !isNewConversation) nextAwaitingRouting = false;
+  const isTerminal = conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED;
+  const isIdle = Date.now() - conversation.lastMessageAt.getTime() >= AUTO_REPLY_RESTART_MS;
+  const restartAutomation = !isRatingReply && (isNewConversation || isTerminal || isIdle);
+  const awaitingChoice = !restartAutomation && conversation.awaitingRouting && !conversation.assignedAgentId;
+  const serviceChoice = awaitingChoice
+    ? getServiceChoice(inbound.text) || getServiceChoice(inbound.routingDepartment)
+    : undefined;
+  const directHandoff = awaitingChoice && !serviceChoice;
+  const autoRules = !restartAutomation && !awaitingChoice && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
+    ? await prisma.autoReplyRule.findMany({ where: { isActive: true, isWelcome: false }, orderBy: [{ priority: "desc" }, { createdAt: "asc" }] })
+    : [];
+  const autoReply = findMatchingAutoReply(autoRules, inbound.text);
+  const routeDepartment = serviceChoice?.routingDepartment as Department | undefined
+    || (autoReply?.routingDepartment as Department | null | undefined)
+    || inbound.routingDepartment;
   const shouldPreserveResolved = isRatingReply && (conversation.status === ConversationStatus.RESOLVED || conversation.status === ConversationStatus.CLOSED);
+  const initiallyAssignedAgentId = restartAutomation ? null : conversation.assignedAgentId;
   conversation = await prisma.conversation.update({
     where: { id: conversation.id },
     data: {
       lastMessageAt: message.createdAt, lastInboundAt: message.createdAt, unreadCount: { increment: 1 },
-      status: shouldPreserveResolved ? conversation.status : conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED ? ConversationStatus.OPEN : conversation.status,
-      closedAt: shouldPreserveResolved ? conversation.closedAt : conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED ? null : conversation.closedAt,
-      awaitingRouting: nextAwaitingRouting,
-      ...(routeChoice ? { routingDepartment: routeChoice, isComplaint: Boolean(inbound.isComplaint) } : {}),
-      ...(!routeChoice && conversation.awaitingRouting && !isNewConversation ? { routingDepartment: null, isComplaint: false } : {})
+      status: restartAutomation ? ConversationStatus.QUEUED : shouldPreserveResolved ? conversation.status : isTerminal ? ConversationStatus.OPEN : conversation.status,
+      closedAt: restartAutomation ? null : shouldPreserveResolved ? conversation.closedAt : isTerminal ? null : conversation.closedAt,
+      assignedAgentId: restartAutomation ? null : conversation.assignedAgentId,
+      awaitingRouting: restartAutomation ? true : awaitingChoice ? false : conversation.awaitingRouting,
+      routingDepartment: restartAutomation ? null : routeDepartment || (directHandoff ? null : conversation.routingDepartment),
+      serviceTag: restartAutomation ? null : serviceChoice?.label || (directHandoff ? "تواصل مباشر" : conversation.serviceTag),
+      isComplaint: restartAutomation ? false : serviceChoice?.isComplaint ?? (directHandoff ? false : inbound.isComplaint ?? conversation.isComplaint),
+      ...(restartAutomation ? { firstResponseAt: null, lastAgentResponseAt: null, slaBreachedAt: null } : {})
     }
   });
 
@@ -86,7 +99,6 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     return { conversationId: conversation.id, messageId: message.id, csatRating: customerRating };
   }
 
-  const initiallyAssignedAgentId = conversation.assignedAgentId;
   const payload = { conversation, message, customer };
   if (io) {
     const targets = io.to("admins").to(`conversation:${conversation.id}`);
@@ -94,7 +106,39 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     else targets.emit("message:new", payload);
   }
 
-  if (autoReply) {
+  if (restartAutomation) {
+    try {
+      const result: any = await sendRoutingMenu(inbound.channel, inbound.externalCustomerId);
+      const providerId = kalemlyExternalMessageId(result);
+      const menuMessage = await prisma.message.create({ data: {
+        conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: AUTO_REPLY_MENU_TEXT,
+        externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
+        metadata: { automation: "service-menu" }
+      } });
+      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: menuMessage.createdAt } });
+      io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: menuMessage });
+    } catch (error) {
+      console.error("Service menu delivery failed; assigning conversation to the default queue", error);
+      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false, serviceTag: "تواصل مباشر" } });
+      conversation = await assignConversation(conversation.id);
+    }
+  } else if (serviceChoice || directHandoff) {
+    conversation = await assignConversation(conversation.id, routeDepartment);
+    try {
+      const result: any = await sendToChannel({ channel: inbound.channel, recipient: inbound.externalCustomerId, text: AUTO_REPLY_HANDOFF_TEXT });
+      const providerId = kalemlyExternalMessageId(result);
+      const handoffMessage = await prisma.message.create({ data: {
+        conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: AUTO_REPLY_HANDOFF_TEXT,
+        externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
+        metadata: { automation: "agent-handoff", service: serviceChoice?.label || "تواصل مباشر" }
+      } });
+      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: handoffMessage.createdAt } });
+      io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: handoffMessage });
+      if (conversation.assignedAgentId) io?.to(`agent:${conversation.assignedAgentId}`).emit("message:new", { conversationId: conversation.id, message: handoffMessage });
+    } catch (error) {
+      console.error("Agent handoff acknowledgement failed", error);
+    }
+  } else if (autoReply) {
     try {
       const result: any = await sendToChannel({ channel: inbound.channel, recipient: inbound.externalCustomerId, text: autoReply.responseText });
       const providerId = kalemlyExternalMessageId(result);
@@ -111,32 +155,8 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     }
   }
 
-  if (isNewConversation && !autoReply) {
-    try {
-      const welcomeRule = await prisma.autoReplyRule.findFirst({ where: { isWelcome: true }, orderBy: { priority: "desc" } });
-      if (welcomeRule && !welcomeRule.isActive) {
-        conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false } });
-        conversation = await assignConversation(conversation.id);
-      } else {
-      const result: any = await sendRoutingMenu(inbound.channel, inbound.externalCustomerId, welcomeRule?.responseText);
-      const providerId = kalemlyExternalMessageId(result);
-      const menuMessage = await prisma.message.create({ data: {
-        conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT,
-        text: `${welcomeRule?.responseText || "أهلًا بك في حلواني بندق."}\nاكتب رقم الخدمة التي تحتاجها:\n1- طلب دليفري سريع\n2- حجز تورتة مناسبات\n3- المنيو والفروع\n4- شكوى أو مقترح`,
-        externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
-        metadata: { automation: "pre-routing-menu" }
-      } });
-      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: menuMessage.createdAt } });
-      }
-    } catch (error) {
-      console.error("Pre-routing menu send failed; assigning conversation to the default queue", error);
-      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false } });
-      conversation = await assignConversation(conversation.id);
-      await scheduleSla(conversation.id, message.id);
-    }
-  } else if (conversation.awaitingRouting || !conversation.assignedAgentId) {
-    if (routeChoice) conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false, routingDepartment: routeChoice } });
-    conversation = await assignConversation(conversation.id, routeChoice as Department | undefined);
+  if (!restartAutomation && !serviceChoice && !directHandoff && !autoReply && !conversation.awaitingRouting && !conversation.assignedAgentId) {
+    conversation = await assignConversation(conversation.id, routeDepartment);
   }
 
   if (io && conversation.assignedAgentId && conversation.assignedAgentId !== initiallyAssignedAgentId) {
