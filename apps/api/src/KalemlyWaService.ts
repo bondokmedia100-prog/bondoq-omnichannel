@@ -91,7 +91,7 @@ async function postMessage(input: KalemlyWaMessage) {
     to,
     type: input.file ? input.mediaType || "document" : "text",
     message: input.message,
-    ...(input.file ? { file: input.file, media: input.mediaType || "document", media_type: input.mediaType || "document", caption: input.message } : {})
+    ...(input.file ? { media_url: input.file } : {})
   };
   const response = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(45_000) });
   const raw = await response.text();
