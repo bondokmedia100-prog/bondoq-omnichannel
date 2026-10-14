@@ -21,6 +21,8 @@ const responses = [
   ["/شكوى", "متابعة شكوى", "نعتذر لك عن التجربة، ونشكرك لتنبيهنا. شاركنا رقم الطلب وتفاصيل ما حدث وسيتابع فريق خدمة العملاء الموضوع معك."]
 ];
 
+const initialCatalogImportId = "menu-bondok-editable-v1";
+
 async function main() {
   if (process.env.NODE_ENV === "production" && (!process.env.BONDOQ_ADMIN_PASSWORD || !process.env.BONDOQ_AGENT_PASSWORD)) {
     throw new Error("Set BONDOQ_ADMIN_PASSWORD and BONDOQ_AGENT_PASSWORD before seeding production accounts");
@@ -49,11 +51,23 @@ async function main() {
       price: product.price.toFixed(2),
       imageUrl: `${webOrigin}/menu/${product.imageFile}`
     }));
-  await prisma.product.deleteMany({ where: { id: { startsWith: "seed-" } } });
-  for (const product of fullCatalog) {
-    const { imageFile: _imageFile, ...record } = product as typeof product & { imageFile?: string };
-    await prisma.product.upsert({ where: { id: record.id }, update: record, create: record });
+  if (fullCatalog.length !== 76 || new Set(fullCatalog.map((product) => product.id)).size !== 76) {
+    throw new Error("Expected 76 unique products in the initial Bondoq menu import");
   }
+  const imported = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(1784354946, 1)`;
+    const priorImport = await tx.catalogImport.findUnique({ where: { id: initialCatalogImportId } });
+    if (priorImport) return false;
+
+    await tx.product.deleteMany();
+    const data = fullCatalog.map(({ imageFile: _imageFile, ...record }) => record);
+    await tx.product.createMany({ data });
+    await tx.catalogImport.create({
+      data: { id: initialCatalogImportId, source: "menu_bondok_editable_4.html", productCount: data.length }
+    });
+    return true;
+  });
+  console.info(imported ? "Initial Bondoq menu replaced the product catalog." : "Initial Bondoq menu import already completed; catalog unchanged.");
   console.info("Bondoq demo accounts, canned responses, and sample products seeded.");
 }
 

@@ -283,6 +283,13 @@ model Product {
   @@index([category, isAvailable])
 }
 
+model CatalogImport {
+  id           String   @id
+  source       String
+  productCount Int
+  importedAt   DateTime @default(now())
+}
+
 model MediaAsset {
   id          String    @id @default(cuid())
   fileName    String
