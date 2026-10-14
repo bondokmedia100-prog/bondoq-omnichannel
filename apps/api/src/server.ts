@@ -222,7 +222,7 @@ app.post("/api/auth/password-reset/request", async (req, res) => {
   res.json({ message: genericPasswordResetRequestMessage });
 });
 
-app.get("/api/admin/password-reset-requests", systemAdminGuard, async (_req, res) => {
+app.get("/api/admin/password-reset-requests", systemAdminGuard, async (_req: express.Request, res: express.Response) => {
   const requests = await prisma.passwordResetRequest.findMany({
     where: { status: { in: [PasswordResetStatus.PENDING, PasswordResetStatus.APPROVED] } },
     select: { id: true, status: true, requestedAt: true, expiresAt: true, user: { select: { id: true, name: true, email: true, username: true, role: true, isActive: true } } },
