@@ -1,4 +1,4 @@
-import { PrismaClient, ProductCategory } from "@prisma/client";
+import { Prisma, PrismaClient, ProductCategory } from "@prisma/client";
 import menuProducts from "./menu-products.json";
 
 const prisma = new PrismaClient();
@@ -19,19 +19,26 @@ async function main() {
     throw new Error("Expected 76 unique products in the initial Bondoq menu import");
   }
 
-  const importedCount = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(1784354946, 1)`;
-    if (await tx.catalogImport.findUnique({ where: { id: importId } })) return 0;
+  let importedCount: number;
+  try {
+    importedCount = await prisma.$transaction(async (tx) => {
+      if (await tx.catalogImport.findUnique({ where: { id: importId } })) return 0;
+      await tx.catalogImport.create({ data: { id: importId, source: "menu_bondok_editable_4.html", productCount: 0 } });
 
-    await tx.product.deleteMany();
-    const result = await tx.product.createMany({ data: catalog });
-    if (result.count !== catalog.length) throw new Error("Catalog import count did not match the source menu");
+      await tx.product.deleteMany();
+      const result = await tx.product.createMany({ data: catalog });
+      if (result.count !== catalog.length) throw new Error("Catalog import count did not match the source menu");
 
-    await tx.catalogImport.create({
-      data: { id: importId, source: "menu_bondok_editable_4.html", productCount: result.count }
-    });
-    return result.count;
-  });
+      await tx.catalogImport.update({ where: { id: importId }, data: { productCount: result.count } });
+      return result.count;
+    }, { maxWait: 10_000, timeout: 30_000 });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && error.meta?.modelName === "CatalogImport") {
+      importedCount = 0;
+    } else {
+      throw error;
+    }
+  }
 
   console.info(importedCount ? `Initial Bondoq menu imported (${importedCount} products).` : "Initial Bondoq menu import already completed; catalog unchanged.");
 }
