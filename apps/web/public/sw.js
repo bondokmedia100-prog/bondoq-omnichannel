@@ -1,4 +1,4 @@
-const CACHE = "bondoq-shell-v3";
+const CACHE = "bondoq-shell-v4";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -15,7 +15,13 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
-  const staticAsset = url.pathname.startsWith("/_next/static/") || ["/icon.svg", "/manifest.webmanifest"].includes(url.pathname);
+  const staticAsset = url.pathname.startsWith("/_next/static/") || [
+    "/apple-touch-icon.png",
+    "/icon-192.png",
+    "/icon-512.png",
+    "/icon-maskable-512.png",
+    "/manifest.webmanifest"
+  ].includes(url.pathname);
   if (url.origin !== self.location.origin || !staticAsset) return;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
@@ -32,8 +38,8 @@ self.addEventListener("push", (event) => {
   try { payload = event.data ? event.data.json() : {}; } catch { payload = { body: event.data?.text() || "رسالة واردة جديدة" }; }
   event.waitUntil(self.registration.showNotification(payload.title || "حلواني بندق", {
     body: payload.body || "لديك رسالة جديدة",
-    icon: "/icon.svg",
-    badge: "/icon.svg",
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
     tag: payload.tag || "bondoq-incoming",
     data: { url: payload.url || "/login" },
     renotify: true,
