@@ -120,7 +120,7 @@ export default function AdminDashboard() {
        connection.on("whisper:new", (note) => setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old));
        connection.on("conversation-note:new", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, internalNotes: [...(old.internalNotes || []).filter((note: AnyRecord) => note.id !== event.note.id), event.note].sort((a: AnyRecord, b: AnyRecord) => a.createdAt.localeCompare(b.createdAt)) } : old));
        connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
-       connection.on("whatsapp:call-ended", (event) => setIncomingCall((current: AnyRecord) => current?.callId === event.callId ? null : current));
+        connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
       for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached", "team:updated"]) connection.on(event, () => load(profile));
       const requestedConversationId = new URLSearchParams(window.location.search).get("conversation");
       if (requestedConversationId) {

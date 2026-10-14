@@ -268,7 +268,9 @@ function scheduleReconnect(delay = reconnectDelay) {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    void getWhatsAppMode().then((mode) => mode === "BAILEYS" && startBaileysWhatsApp()).catch((error) => console.warn("WhatsApp reconnect check failed", error));
+    void getWhatsAppMode().then((mode) => {
+      if (mode === "BAILEYS") return startBaileysWhatsApp();
+    }).catch((error) => console.warn("WhatsApp reconnect check failed", error));
   }, delay);
   reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
 }
@@ -359,7 +361,7 @@ export async function logoutBaileysWhatsApp() {
 }
 
 export async function initializeWhatsAppEngine() {
-  const setting = await prisma.integrationSetting.findUnique({ where: { id: settingId }, select: { whatsappMode: true, whatsappCallReplyText: true } });
+  const setting = await prisma.integrationSetting.findUnique({ where: { id: settingId }, select: { whatsappMode: true, whatsappConnectionStatus: true, whatsappPhoneNumber: true, whatsappCallReplyText: true } });
   callReplyText = setting?.whatsappCallReplyText || defaultCallReply;
   state = { ...state, mode: setting?.whatsappMode === "API" ? "API" : "BAILEYS", status: setting?.whatsappConnectionStatus as WhatsAppConnectionState["status"] || "DISCONNECTED", phoneNumber: setting?.whatsappPhoneNumber || "" };
   if (state.mode === "BAILEYS") await startBaileysWhatsApp();
