@@ -78,19 +78,20 @@ enum MessageKind {
   TEXT
   IMAGE
   AUDIO
+  VIDEO
   LOCATION
   FILE
   SYSTEM
 }
 
 model User {
-  id                       String             @id @default(cuid())
-  email                    String             @unique
-  username                 String             @unique
+  id                       String                 @id @default(cuid())
+  email                    String                 @unique
+  username                 String                 @unique
   name                     String
   passwordHash             String
-  authVersion              Int                @default(0)
-  role                     Role               @default(AGENT)
+  authVersion              Int                    @default(0)
+  role                     Role                   @default(AGENT)
   department               Department?
   branchId                 String?
   canViewAllConversations  Boolean?
@@ -98,20 +99,23 @@ model User {
   canManageCatalog         Boolean?
   canViewReports           Boolean?
   canManageTeam            Boolean?
-  presence                 Presence           @default(OFFLINE)
-  isActive                 Boolean            @default(true)
+  presence                 Presence               @default(OFFLINE)
+  isActive                 Boolean                @default(true)
   lastSeenAt               DateTime?
-  createdAt                DateTime           @default(now())
-  updatedAt                DateTime           @updatedAt
-  assignedChats            Conversation[]     @relation("AssignedAgent")
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  assignedChats            Conversation[]         @relation("AssignedAgent")
   sessions                 AgentSession[]
   auditLogs                AuditLog[]
   whisperNotes             WhisperNote[]
-  sentMessages             Message[]          @relation("MessageAuthor")
-  csatSurveys              CsatSurvey[]       @relation("CsatAgent")
-  mediaAssets              MediaAsset[]       @relation("MediaUploader")
+  conversationNotes        ConversationNote[]
+  sentMessages             Message[]              @relation("MessageAuthor")
+  csatSurveys              CsatSurvey[]           @relation("CsatAgent")
+  mediaAssets              MediaAsset[]           @relation("MediaUploader")
   pushSubscriptions        PushSubscription[]
-  branch                   Branch?            @relation("BranchUsers", fields: [branchId], references: [id], onDelete: SetNull)
+  favoriteConversations    ConversationFavorite[]
+  messageReactions         MessageReaction[]
+  branch                   Branch?                @relation("BranchUsers", fields: [branchId], references: [id], onDelete: SetNull)
 
   @@index([branchId, role, presence, isActive])
 }
@@ -139,50 +143,53 @@ model AgentSession {
 }
 
 model Customer {
-  id                 String         @id @default(cuid())
+  id                 String                  @id @default(cuid())
   name               String?
   displayName        String?
-  notes              String?        @db.Text
+  notes              String?                 @db.Text
   phone              String?
   email              String?
   avatarUrl          String?
   lastLatitude       Float?
   lastLongitude      Float?
-  channelIdentifiers Json           @default("{}")
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  channelIdentifiers Json                    @default("{}")
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
   conversations      Conversation[]
   orders             OrderDetails[]
+  tags               CustomerTagAssignment[]
 }
 
 model Conversation {
-  id                     String             @id @default(cuid())
+  id                     String                 @id @default(cuid())
   customerId             String
   channel                Channel
   externalConversationId String
   externalCustomerId     String
-  status                 ConversationStatus @default(OPEN)
+  status                 ConversationStatus     @default(OPEN)
   assignedAgentId        String?
   subject                String?
-  unreadCount            Int                @default(0)
-  lastMessageAt          DateTime           @default(now())
+  unreadCount            Int                    @default(0)
+  lastMessageAt          DateTime               @default(now())
   lastAgentResponseAt    DateTime?
   firstResponseAt        DateTime?
   slaBreachedAt          DateTime?
   lastInboundAt          DateTime?
-  awaitingRouting        Boolean            @default(false)
+  awaitingRouting        Boolean                @default(false)
   routingDepartment      Department?
   serviceTag             String?
   branchId               String?
-  isComplaint            Boolean            @default(false)
+  isComplaint            Boolean                @default(false)
   closedAt               DateTime?
-  createdAt              DateTime           @default(now())
-  updatedAt              DateTime           @updatedAt
-  customer               Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  assignedAgent          User?              @relation("AssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
-  branch                 Branch?            @relation("BranchConversations", fields: [branchId], references: [id], onDelete: SetNull)
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+  customer               Customer               @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  assignedAgent          User?                  @relation("AssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  branch                 Branch?                @relation("BranchConversations", fields: [branchId], references: [id], onDelete: SetNull)
   messages               Message[]
   whisperNotes           WhisperNote[]
+  internalNotes          ConversationNote[]
+  favorites              ConversationFavorite[]
   orderDetails           OrderDetails[]
   auditLogs              AuditLog[]
   csatSurvey             CsatSurvey?
@@ -194,27 +201,31 @@ model Conversation {
 }
 
 model Message {
-  id                  String           @id @default(cuid())
+  id                  String            @id @default(cuid())
   conversationId      String
   authorId            String?
   direction           MessageDirection
-  kind                MessageKind      @default(TEXT)
+  kind                MessageKind       @default(TEXT)
   text                String?
   mediaUrl            String?
   mediaAssetId        String?
   deliveryStatus      String?
   latitude            Float?
   longitude           Float?
-  externalId          String?          @unique
-  metadata            Json             @default("{}")
-  transcription       String?          @db.Text
+  externalId          String?           @unique
+  metadata            Json              @default("{}")
+  transcription       String?           @db.Text
   productId           String?
-  createdAt           DateTime         @default(now())
-  conversation        Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  author              User?            @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
-  product             Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
-  mediaAsset          MediaAsset?      @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
-  cakeReferenceOrders OrderDetails[]   @relation("CakeReferenceImage")
+  quotedMessageId     String?
+  createdAt           DateTime          @default(now())
+  conversation        Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author              User?             @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  product             Product?          @relation(fields: [productId], references: [id], onDelete: SetNull)
+  mediaAsset          MediaAsset?       @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
+  quotedMessage       Message?          @relation("QuotedMessage", fields: [quotedMessageId], references: [id], onDelete: SetNull)
+  replies             Message[]         @relation("QuotedMessage")
+  reactions           MessageReaction[]
+  cakeReferenceOrders OrderDetails[]    @relation("CakeReferenceImage")
 
   @@index([conversationId, createdAt])
 }
@@ -224,6 +235,18 @@ model WhisperNote {
   conversationId String
   authorId       String
   text           String
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author         User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model ConversationNote {
+  id             String       @id @default(cuid())
+  conversationId String
+  authorId       String
+  text           String       @db.Text
   createdAt      DateTime     @default(now())
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   author         User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
@@ -256,14 +279,18 @@ model OrderDetails {
 }
 
 model IntegrationSetting {
-  id                      String   @id
-  endpoint                String
-  instanceId              String?
-  apiKeyCiphertext        String?  @db.Text
-  qrCodePayloadCiphertext String?  @db.Text
-  appSecretCiphertext     String?  @db.Text
-  verifyTokenCiphertext   String?  @db.Text
-  updatedAt               DateTime @updatedAt
+  id                       String   @id
+  endpoint                 String
+  instanceId               String?
+  apiKeyCiphertext         String?  @db.Text
+  qrCodePayloadCiphertext  String?  @db.Text
+  appSecretCiphertext      String?  @db.Text
+  verifyTokenCiphertext    String?  @db.Text
+  whatsappMode             String   @default("BAILEYS")
+  whatsappConnectionStatus String   @default("DISCONNECTED")
+  whatsappPhoneNumber      String?
+  whatsappCallReplyText    String?  @db.Text
+  updatedAt                DateTime @updatedAt
 }
 
 model Product {
@@ -303,6 +330,79 @@ model MediaAsset {
   products    Product[] @relation("ProductImage")
 
   @@index([createdAt])
+}
+
+model CustomerTag {
+  id        String                  @id @default(cuid())
+  name      String                  @unique
+  color     String                  @default("#2563eb")
+  createdAt DateTime                @default(now())
+  updatedAt DateTime                @updatedAt
+  customers CustomerTagAssignment[]
+}
+
+model CustomerTagAssignment {
+  customerId String
+  tagId      String
+  createdAt  DateTime    @default(now())
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tag        CustomerTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([customerId, tagId])
+  @@index([tagId, createdAt])
+}
+
+model ConversationFavorite {
+  userId         String
+  conversationId String
+  createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@index([conversationId, createdAt])
+}
+
+model DirectoryCategory {
+  id        String           @id @default(cuid())
+  name      String           @unique
+  sortOrder Int              @default(0)
+  isActive  Boolean          @default(true)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  entries   DirectoryEntry[]
+
+  @@index([isActive, sortOrder])
+}
+
+model DirectoryEntry {
+  id             String            @id @default(cuid())
+  categoryId     String
+  name           String
+  phone          String?
+  whatsappNumber String?
+  email          String?
+  description    String?           @db.Text
+  sortOrder      Int               @default(0)
+  isActive       Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  category       DirectoryCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@index([categoryId, isActive, sortOrder])
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId, createdAt])
 }
 
 model CsatSurvey {

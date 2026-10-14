@@ -50,8 +50,10 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   const existingMessage = await prisma.message.findUnique({ where: { externalId: storedExternalId }, select: { id: true, conversationId: true } });
   if (existingMessage) return { duplicate: true, conversationId: existingMessage.conversationId };
   const metadata = (inbound.metadata || {}) as Record<string, unknown>;
-  let cachedMedia: { body: Buffer; contentType: string } | undefined;
-  if (metadata.provider === "kalemlywa" && typeof metadata.mediaId === "string" && metadata.mediaId) {
+  let cachedMedia: { body: Buffer; contentType: string } | undefined = inbound.mediaBuffer
+    ? { body: inbound.mediaBuffer, contentType: inbound.mediaContentType || String(metadata.mediaMimeType || "application/octet-stream") }
+    : undefined;
+  if (!cachedMedia && metadata.provider === "kalemlywa" && typeof metadata.mediaId === "string" && metadata.mediaId) {
     try {
       cachedMedia = await fetchInboundMedia(inbound.channel, metadata, inbound.mediaUrl);
     } catch (error) {
@@ -62,9 +64,9 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   try {
     const contentType = cachedMedia?.contentType || String(metadata.mediaMimeType || "application/octet-stream");
     const extension = contentType.split(";")[0].split("/")[1]?.replace(/[^a-zA-Z0-9.+-]/g, "") || "bin";
-    const fileName = inbound.kind === MessageKind.AUDIO
+    const fileName = inbound.mediaFileName || (inbound.kind === MessageKind.AUDIO
       ? `${metadata.voiceNote === true ? "voice-note" : "audio"}.${extension}`
-      : inbound.kind === MessageKind.IMAGE ? `image.${extension}` : `attachment.${extension}`;
+      : inbound.kind === MessageKind.IMAGE ? `image.${extension}` : inbound.kind === MessageKind.VIDEO ? `video.${extension}` : `attachment.${extension}`);
     message = await prisma.message.create({ data: {
       conversation: { connect: { id: conversation.id } }, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
       text: inbound.text, mediaUrl: cachedMedia ? undefined : inbound.mediaUrl, latitude: inbound.latitude, longitude: inbound.longitude,
@@ -208,7 +210,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
       { role: Role.SUPERVISOR, canViewAllConversations: null }
     ]
   }, select: { id: true } });
-  const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
+  const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
   const tag = `inbound-${conversation.id}`;
   void sendPushNotification(admins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
   if (conversation.assignedAgentId) void sendPushNotification([conversation.assignedAgentId], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));

@@ -5,6 +5,7 @@ import { prisma } from "./prisma";
 import { config } from "./config";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { io } from "./realtime";
+import { getWhatsAppMode, sendBaileysWhatsAppMessage } from "./BaileysWhatsAppService";
 
 const queueName = "kalemlywa-outbound";
 const redis = () => new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -16,7 +17,7 @@ export type KalemlyWaMessage = {
   to: string;
   message: string;
   file?: string;
-  mediaType?: "image" | "audio" | "document";
+  mediaType?: "image" | "audio" | "video" | "document";
 };
 
 type QueuedKalemlyWaMessage = KalemlyWaMessage & { outboundMessageId?: string };
@@ -79,6 +80,7 @@ export async function saveKalemlySettings(input: { authKey?: string; appKey?: st
 }
 
 async function postMessage(input: KalemlyWaMessage) {
+  if (await getWhatsAppMode() === "BAILEYS") return sendBaileysWhatsAppMessage(input);
   const settings = await getKalemlySettings();
   if (!settings.authKey || !settings.appKey) throw new Error("أكمل authkey وappkey في إعدادات KalemlyWA أولًا");
   const to = normalizePhoneNumber(input.to);
@@ -192,6 +194,6 @@ export function safeProviderResponse(value: unknown): unknown {
 }
 
 export function kalemlyExternalMessageId(result: any): string | undefined {
-  const id = result?.message_id || result?.id || result?.data?.id || result?.messages?.[0]?.id || result?.result?.message_id;
+  const id = result?.message_id || result?.id || result?.key?.id || result?.data?.id || result?.messages?.[0]?.id || result?.result?.message_id;
   return id ? String(id) : undefined;
 }
