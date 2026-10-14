@@ -97,7 +97,13 @@ async function postMessage(input: KalemlyWaMessage) {
   const raw = await response.text();
   let result: any;
   try { result = raw ? JSON.parse(raw) : {}; } catch { result = { responseText: raw }; }
-  if (!response.ok) throw new Error(`KalemlyWA رفض الإرسال (${response.status})`);
+  if (!response.ok) {
+    let detail = JSON.stringify(safeProviderResponse(result)) || "no response body";
+    for (const sensitive of [settings.authKey, settings.appKey, to, input.file].filter(Boolean)) {
+      detail = detail.replaceAll(sensitive!, "[redacted]");
+    }
+    throw new Error(`KalemlyWA رفض الإرسال (${response.status}): ${detail.slice(0, 1000)}`);
+  }
   if (result?.success === false || result?.status === "error") throw new Error("KalemlyWA لم يؤكد إرسال الرسالة");
   return result;
 }
