@@ -16,6 +16,13 @@ export function safeFileName(value: string) {
   return (normalized || "attachment").slice(0, 160);
 }
 
+export function imageSignatureMatches(contentType: string, bytes: Buffer) {
+  if (contentType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  if (contentType === "image/png") return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (contentType === "image/webp") return bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
+  return !contentType.startsWith("image/");
+}
+
 function signatureFor(assetId: string, expires: number) {
   return createHmac("sha256", config.mediaSigningSecret).update(`${assetId}:${expires || "permanent"}`).digest("hex");
 }

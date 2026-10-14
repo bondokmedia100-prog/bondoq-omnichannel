@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chooseLeastLoadedAgent } from "./routingSelection";
+import { chooseRoundRobinAgent } from "./routingSelection";
 
-test("round-robins ties among the least-loaded agents", () => {
+test("round-robins across every online agent in order", () => {
   const agents = [{ id: "a" }, { id: "b" }, { id: "c" }];
-  const counts = new Map([["a", 1], ["b", 1], ["c", 3]]);
-  assert.deepEqual([0, 1, 2, 3].map((turn) => chooseLeastLoadedAgent(agents, counts, turn)?.id), ["a", "b", "a", "b"]);
+  assert.deepEqual([0, 1, 2, 3, 4].map((turn) => chooseRoundRobinAgent(agents, turn)?.id), ["a", "b", "c", "a", "b"]);
+  assert.equal(chooseRoundRobinAgent(agents, -1)?.id, "c");
 });
 
 test("returns no assignee for an empty online pool", () => {
-  assert.equal(chooseLeastLoadedAgent([], new Map(), 0), undefined);
+  assert.equal(chooseRoundRobinAgent([], 0), undefined);
 });

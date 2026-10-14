@@ -1,4 +1,5 @@
 import { Channel, Department, MessageKind } from "@prisma/client";
+import { getServiceChoice } from "./autoReplies";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 
 export type NormalizedInbound = {
@@ -20,11 +21,8 @@ export type NormalizedInbound = {
 };
 
 export const routeChoice = (payload?: string): { routingDepartment: Department; isComplaint: boolean } | undefined => {
-  if (payload === "route_delivery" || payload === "1") return { routingDepartment: Department.DELIVERY, isComplaint: false };
-  if (payload === "route_cakes" || payload === "2") return { routingDepartment: Department.CAKES, isComplaint: false };
-  if (["route_menu", "route_branches", "3"].includes(payload || "")) return { routingDepartment: Department.CUSTOMER_CARE, isComplaint: false };
-  if (payload === "route_quality" || payload === "4") return { routingDepartment: Department.QUALITY, isComplaint: true };
-  return undefined;
+  const choice = getServiceChoice(payload);
+  return choice ? { routingDepartment: choice.routingDepartment as Department, isComplaint: choice.isComplaint } : undefined;
 };
 
 export function parseKalemlyWebhook(body: any): NormalizedInbound[] {
