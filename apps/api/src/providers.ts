@@ -13,7 +13,7 @@ async function postJson(url: string, payload: unknown, token: string) {
   return response.json();
 }
 
-export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; latitude?: number; longitude?: number }) {
+export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaContentType?: string; latitude?: number; longitude?: number }) {
   const kind = input.kind || MessageKind.TEXT;
   if (input.channel === Channel.WHATSAPP) {
     const message = kind === MessageKind.LOCATION
@@ -47,10 +47,13 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
   }
   const settings = await getTelegramSettings();
   if (!settings.botToken) throw new Error("Telegram bot token is not configured");
-  const method = kind === MessageKind.IMAGE ? "sendPhoto" : kind === MessageKind.AUDIO ? "sendAudio" : kind === MessageKind.FILE ? "sendDocument" : kind === MessageKind.LOCATION ? "sendLocation" : "sendMessage";
+  const audioMethod = kind !== MessageKind.AUDIO || !input.mediaContentType ? "sendAudio"
+    : input.mediaContentType === "audio/ogg" ? "sendVoice"
+      : input.mediaContentType === "audio/mpeg" || input.mediaContentType === "audio/mp4" ? "sendAudio" : "sendDocument";
+  const method = kind === MessageKind.IMAGE ? "sendPhoto" : kind === MessageKind.AUDIO ? audioMethod : kind === MessageKind.FILE ? "sendDocument" : kind === MessageKind.LOCATION ? "sendLocation" : "sendMessage";
   const payload = kind === MessageKind.LOCATION ? { chat_id: input.recipient, latitude: input.latitude, longitude: input.longitude }
     : kind === MessageKind.IMAGE ? { chat_id: input.recipient, photo: input.mediaUrl, caption: input.text }
-    : kind === MessageKind.AUDIO ? { chat_id: input.recipient, audio: input.mediaUrl, caption: input.text }
+    : kind === MessageKind.AUDIO ? { chat_id: input.recipient, [audioMethod === "sendVoice" ? "voice" : audioMethod === "sendDocument" ? "document" : "audio"]: input.mediaUrl, caption: input.text }
     : kind === MessageKind.FILE ? { chat_id: input.recipient, document: input.mediaUrl, caption: input.text }
     : { chat_id: input.recipient, text: input.text || "" };
   const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -58,8 +61,8 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
   return response.json();
 }
 
-export async function sendRoutingMenu(channel: Channel, recipient: string) {
-  const prompt = "أهلًا بك في حلواني بندق. اكتب رقم الخدمة التي تحتاجها:\n1- طلب دليفري سريع\n2- حجز تورتة مناسبات\n3- المنيو والفروع\n4- شكوى أو مقترح";
+export async function sendRoutingMenu(channel: Channel, recipient: string, welcomeText?: string) {
+  const prompt = `${welcomeText || "أهلًا بك في حلواني بندق."}\nاكتب رقم الخدمة التي تحتاجها:\n1- طلب دليفري سريع\n2- حجز تورتة مناسبات\n3- المنيو والفروع\n4- شكوى أو مقترح`;
   const choices = [
     { id: "route_delivery", title: "1- دليفري" },
     { id: "route_cakes", title: "2- تورتة" },
