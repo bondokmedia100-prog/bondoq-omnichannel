@@ -12,6 +12,9 @@ export type NormalizedInbound = {
   text?: string;
   kind: MessageKind;
   mediaUrl?: string;
+  mediaBuffer?: Buffer;
+  mediaContentType?: string;
+  mediaFileName?: string;
   latitude?: number;
   longitude?: number;
   externalId: string;

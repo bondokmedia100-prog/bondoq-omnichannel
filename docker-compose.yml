@@ -48,6 +48,7 @@ services:
       KALEMLYWA_INSTANCE_ID: ${KALEMLYWA_INSTANCE_ID:-}
       KALEMLYWA_WEBHOOK_SECRET: ${KALEMLYWA_WEBHOOK_SECRET:-}
       KALEMLYWA_CONFIG_ENCRYPTION_KEY: ${KALEMLYWA_CONFIG_ENCRYPTION_KEY:-${JWT_SECRET:-replace-with-a-long-random-secret-before-deploying}}
+      WHATSAPP_AUTH_DIR: /data/whatsapp-auth
       MEDIA_SIGNING_SECRET: ${MEDIA_SIGNING_SECRET:-}
       SLA_RESPONSE_MINUTES: ${SLA_RESPONSE_MINUTES:-5}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
@@ -61,6 +62,8 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+    volumes:
+      - whatsapp_auth:/data/whatsapp-auth
     ports:
       - "127.0.0.1:4000:4000"
 
@@ -78,3 +81,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  whatsapp_auth:

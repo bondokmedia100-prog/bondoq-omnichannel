@@ -4,7 +4,7 @@ import "./globals.css";
 import ServiceWorkerRegistration from "@/components/ServiceWorkerRegistration";
 
 export const metadata: Metadata = {
-  title: "حلواني بندق | مركز خدمة العملاء",
+  title: "مركز خدمة العملاء - CRM",
   description: "منصة خدمة عملاء حلواني بندق متعددة القنوات",
   manifest: "/manifest.webmanifest",
   icons: {

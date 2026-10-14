@@ -1,6 +1,6 @@
 {
-  "name": "حلواني بندق | مركز خدمة العملاء",
-  "short_name": "مركز بندق",
+  "name": "مركز خدمة العملاء - CRM",
+  "short_name": "بندق CRM",
   "start_url": "/login",
   "scope": "/",
   "display": "standalone",

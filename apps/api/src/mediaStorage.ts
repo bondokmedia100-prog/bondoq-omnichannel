@@ -6,6 +6,7 @@ export const uploadLimitBytes = 12 * 1024 * 1024;
 export const allowedMediaTypes = new Set([
   "image/jpeg", "image/png", "image/webp",
   "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm", "audio/aac",
+  "video/mp4", "video/3gpp", "video/quicktime",
   "application/pdf", "text/plain",
   "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

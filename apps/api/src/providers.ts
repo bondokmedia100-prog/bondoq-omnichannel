@@ -14,7 +14,7 @@ async function postJson(url: string, payload: unknown, token: string) {
   return response.json();
 }
 
-export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaContentType?: string; latitude?: number; longitude?: number; outboundMessageId?: string }) {
+export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaAssetId?: string; mediaContentType?: string; latitude?: number; longitude?: number; outboundMessageId?: string }) {
   const kind = input.kind || MessageKind.TEXT;
   if (input.channel === Channel.WHATSAPP) {
     const message = kind === MessageKind.LOCATION
@@ -22,7 +22,7 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
       : input.text || "";
     return enqueueKalemlyMessage({
       to: normalizePhoneNumber(input.recipient), message,
-      ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : "document" } : {})
+      ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : kind === MessageKind.VIDEO ? "video" : "document" } : {})
     }, input.outboundMessageId);
   }
   if (input.channel === Channel.MESSENGER) {
