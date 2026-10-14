@@ -1,0 +1,12 @@
+{
+  "name": "حلواني بندق | مركز خدمة العملاء",
+  "short_name": "مركز بندق",
+  "start_url": "/login",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#faf9f7",
+  "theme_color": "#d32f2f",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
