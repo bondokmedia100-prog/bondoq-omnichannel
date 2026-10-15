@@ -26,6 +26,7 @@ import { createPasswordResetToken, hashPasswordResetToken } from "./passwordRese
 import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
 import { processCallRecordingAi } from "./callRecordingAi";
 import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
+import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
 
 const app = express();
 const server = http.createServer(app);
@@ -72,6 +73,9 @@ function decodePageCursor(value: unknown) {
 function pageLimit(value: unknown, fallback = 50) {
   const parsed = typeof value === "string" ? Number(value) : NaN;
   return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, 100) : fallback;
+}
+function callIceServers(subject: string) {
+  return createIceServers({ stunUrls: config.webRtcStunUrls, turnUrls: config.webRtcTurnUrls, turnSharedSecret: config.webRtcTurnSharedSecret, subject });
 }
 async function ensureBranches() {
   await Promise.all(defaultBranches.map((branch) => prisma.branch.upsert({ where: { id: branch.id }, update: {}, create: branch })));
@@ -1592,11 +1596,14 @@ app.get("/api/conversations/:id/whatsapp-call/permission", agentGuard, async (re
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
   if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
   try {
-    const [permission, recordingSettings] = await Promise.all([
-      getCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId),
-      getCallRecordingSettings()
-    ]);
-    res.json({ ...permission, recordingEnabled: recordingSettings.enabled, aiProcessingEnabled: recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey) });
+    const [mode, recordingSettings] = await Promise.all([getWhatsAppMode(), getCallRecordingSettings()]);
+    const aiProcessingEnabled = recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey);
+    if (mode === "BAILEYS") return res.json({
+      status: "browser_link", transport: "INTERNAL_WEB", expiration: null, canStartCall: true, canRequestPermission: false,
+      recordingEnabled: recordingSettings.enabled, aiProcessingEnabled, iceServers: callIceServers(req.user!.id)
+    });
+    const permission = await getCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId);
+    res.json({ ...permission, transport: "WHATSAPP_CLOUD", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled, iceServers: callIceServers(req.user!.id) });
   } catch (error) {
     res.status(error instanceof WhatsAppCloudApiError ? error.status || 502 : 503).json({ error: error instanceof Error ? error.message : "تعذر فحص صلاحية الاتصال" });
   }
@@ -1610,6 +1617,7 @@ app.post("/api/conversations/:id/whatsapp-call/permission-request", agentGuard, 
   if (conversation.channel !== Channel.WHATSAPP) return res.status(409).json({ error: "طلب الإذن متاح لمحادثات WhatsApp فقط" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
   if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
+  if (await getWhatsAppMode() === "BAILEYS") return res.status(409).json({ error: "في وضع Baileys يُرسل رابط مكالمة متصفح بدل طلب إذن مكالمة WhatsApp أصلية" });
   try {
     const result = await requestCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId);
     await audit(req.user!.id, "WHATSAPP_CALL_PERMISSION_REQUESTED", conversation.id, { phoneLastFour: normalizeCloudCallTarget(conversation.customer.phone || conversation.externalCustomerId).slice(-4) });
@@ -1628,13 +1636,54 @@ app.post("/api/conversations/:id/whatsapp-call", agentGuard, async (req: AuthedR
   if (conversation.channel !== Channel.WHATSAPP) return res.status(409).json({ error: "الاتصال الصوتي متاح لمحادثات WhatsApp فقط" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
   if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
+  const whatsappMode = await getWhatsAppMode();
   const recordingSettings = await getCallRecordingSettings();
   const aiProcessingEnabled = recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey);
-  if (recordingSettings.enabled && !parsed.data.recordingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على التسجيل قبل بدء المكالمة" });
-  if (aiProcessingEnabled && !parsed.data.aiProcessingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على معالجة الصوت آليًا قبل بدء المكالمة" });
+  if (whatsappMode === "API" && recordingSettings.enabled && !parsed.data.recordingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على التسجيل قبل بدء المكالمة" });
+  if (whatsappMode === "API" && aiProcessingEnabled && !parsed.data.aiProcessingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على معالجة الصوت آليًا قبل بدء المكالمة" });
   const activeStatuses = ["INITIATING", "RINGING", "CONNECTED"];
+  const now = new Date();
+  await prisma.whatsAppCallSession.updateMany({
+    where: { agentId: req.user!.id, transport: "INTERNAL_WEB", status: "INITIATING", guestExpiresAt: { lte: now } },
+    data: { status: "FAILED", guestTokenHash: null, lastError: "انتهت صلاحية رابط الاتصال.", endedAt: now }
+  });
   const activeCall = await prisma.whatsAppCallSession.findFirst({ where: { agentId: req.user!.id, status: { in: activeStatuses }, createdAt: { gte: new Date(Date.now() - 4 * 60 * 60_000) } }, select: { id: true } });
   if (activeCall) return res.status(409).json({ error: "لديك مكالمة صوتية أخرى مفتوحة. أنهِها قبل بدء مكالمة جديدة." });
+  if (whatsappMode === "BAILEYS") {
+    const token = createWebCallToken();
+    let joinUrl: string;
+    try {
+      const webOrigin = new URL(config.webOrigin);
+      if (process.env.NODE_ENV === "production" && webOrigin.protocol !== "https:") throw new Error("WEB_ORIGIN must use HTTPS for browser calls");
+      joinUrl = new URL(`/voice-call/${token}`, webOrigin).toString();
+    } catch {
+      return res.status(503).json({ error: "اضبط WEB_ORIGIN على عنوان HTTPS الصحيح لواجهة النظام قبل إرسال رابط المكالمة" });
+    }
+    const guestExpiresAt = new Date(Date.now() + 10 * 60_000);
+    const session = await prisma.whatsAppCallSession.create({ data: {
+      conversationId: conversation.id, agentId: req.user!.id, phoneNumber: conversation.customer.phone || conversation.externalCustomerId,
+      transport: "INTERNAL_WEB", offerSdp: parsed.data.offerSdp, guestTokenHash: hashWebCallToken(token), guestExpiresAt, status: "INITIATING"
+    } });
+    try {
+      const inviteText = `يرغب فريق حلواني بندق في التحدث معك صوتيًا. افتح الرابط خلال 10 دقائق للانضمام عبر المتصفح (هذه ليست مكالمة WhatsApp أصلية): ${joinUrl}`;
+      const invite = await prisma.message.create({ data: {
+        conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND,
+        kind: MessageKind.TEXT, text: inviteText, deliveryStatus: "QUEUED"
+      }, include: { author: { select: { id: true, name: true } } } });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: invite.createdAt, status: ConversationStatus.OPEN } });
+      const delivered = await queueWhatsAppMessage(invite.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, text: inviteText });
+      if (!delivered || delivered.deliveryStatus === "FAILED") throw new Error("تعذر إرسال رابط المكالمة عبر WhatsApp");
+      await audit(req.user!.id, "INTERNAL_WEB_CALL_INVITE_SENT", conversation.id, { sessionId: session.id, expiresAt: guestExpiresAt.toISOString() });
+      return res.status(201).json({
+        sessionId: session.id, status: session.status, transport: session.transport, recordingEnabled: false,
+        aiProcessingEnabled: false, iceServers: callIceServers(session.id), inviteExpiresAt: guestExpiresAt
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "تعذر إرسال رابط المكالمة";
+      await prisma.whatsAppCallSession.update({ where: { id: session.id }, data: { status: "FAILED", guestTokenHash: null, lastError: message, endedAt: new Date() } });
+      return res.status(502).json({ error: message });
+    }
+  }
   let phoneNumber: string;
   try { phoneNumber = normalizeCloudCallTarget(conversation.customer.phone || conversation.externalCustomerId); }
   catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "رقم WhatsApp للعميل غير صالح" }); }
@@ -1647,7 +1696,7 @@ app.post("/api/conversations/:id/whatsapp-call", agentGuard, async (req: AuthedR
     const providerCallId = await startCloudCall({ phone: phoneNumber, offerSdp: parsed.data.offerSdp, callbackData: session.id });
     await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { providerCallId } });
     await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_STARTED", conversation.id, { sessionId: session.id, phoneLastFour: phoneNumber.slice(-4), recordingConsent: Boolean(session.recordingConsentAt), aiProcessingConsent: Boolean(session.aiProcessingConsentAt) });
-    res.json({ sessionId: session.id, status: "INITIATING", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled });
+     res.json({ sessionId: session.id, status: "INITIATING", transport: "WHATSAPP_CLOUD", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled, iceServers: callIceServers(session.id) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "تعذر بدء المكالمة عبر WhatsApp";
     await prisma.whatsAppCallSession.update({ where: { id: session.id }, data: { status: "FAILED", lastError: message, endedAt: new Date() } });
@@ -1655,6 +1704,81 @@ app.post("/api/conversations/:id/whatsapp-call", agentGuard, async (req: AuthedR
     await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_FAILED", conversation.id, { sessionId: session.id, errorCode: error instanceof WhatsAppCloudApiError ? error.code || null : null });
     res.status(status).json({ error: message });
   }
+});
+
+app.get("/api/public/voice-calls/:token", async (req, res) => {
+  res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+  if (!isWebCallToken(req.params.token)) return res.sendStatus(404);
+  const guestTokenHash = hashWebCallToken(req.params.token);
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash }, include: { conversation: { select: { customer: { select: { name: true, displayName: true } } } } } });
+  if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
+  if (session.status === "INITIATING" && (!session.guestExpiresAt || session.guestExpiresAt.getTime() <= Date.now())) {
+    await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { status: "FAILED", guestTokenHash: null, lastError: "انتهت صلاحية رابط الاتصال.", endedAt: new Date() } });
+    io.to(`agent:${session.agentId}`).emit("whatsapp:cloud-call-updated", { sessionId: session.id, status: "FAILED" });
+    return res.status(410).json({ error: "انتهت صلاحية رابط الاتصال. اطلب من الموظف إرسال رابط جديد." });
+  }
+  const terminal = ["REJECTED", "TERMINATED", "FAILED"].includes(session.status);
+  const recordingSettings = terminal ? null : await getCallRecordingSettings();
+  res.json({
+    status: session.status,
+    ...(session.status === "INITIATING" ? { offerSdp: session.offerSdp } : {}),
+    customerName: session.conversation.customer.displayName || session.conversation.customer.name || "",
+     recordingAvailable: Boolean(recordingSettings?.enabled),
+    aiConsentAvailable: Boolean(recordingSettings?.enabled && recordingSettings.aiProcessingEnabled && config.openaiApiKey),
+    ...(terminal ? {} : { iceServers: callIceServers(session.id) })
+  });
+});
+
+app.post("/api/public/voice-calls/:token/answer", async (req, res) => {
+  res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+  if (!isWebCallToken(req.params.token)) return res.sendStatus(404);
+  const parsed = z.object({ answerSdp: z.string().min(100).max(100_000), recordingConsent: z.boolean(), aiProcessingConsent: z.boolean() }).strict().safeParse(req.body);
+  if (!parsed.success || !parsed.data.answerSdp.includes("m=audio") || !parsed.data.answerSdp.includes("a=candidate:")) return res.status(400).json({ error: "تعذر إنشاء إجابة صوتية صالحة" });
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
+  if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
+  if (session.status !== "INITIATING" || !session.guestExpiresAt || session.guestExpiresAt.getTime() <= Date.now()) return res.status(410).json({ error: "انتهت صلاحية الدعوة أو استُخدمت بالفعل" });
+  const recordingSettings = await getCallRecordingSettings();
+  const aiProcessingAvailable = recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey);
+  if (parsed.data.aiProcessingConsent && (!aiProcessingAvailable || !parsed.data.recordingConsent)) return res.status(409).json({ error: "المعالجة الآلية تتطلب موافقة مستقلة بعد الموافقة على التسجيل" });
+  const acceptedAt = new Date();
+  const updated = await prisma.whatsAppCallSession.updateMany({
+    where: { id: session.id, status: "INITIATING", sdpAnswer: null, guestExpiresAt: { gt: acceptedAt } },
+    data: {
+      sdpAnswer: parsed.data.answerSdp, status: "RINGING",
+      ...(recordingSettings.enabled && parsed.data.recordingConsent ? { recordingConsentAt: acceptedAt } : {}),
+      ...(aiProcessingAvailable && parsed.data.recordingConsent && parsed.data.aiProcessingConsent ? { aiProcessingConsentAt: acceptedAt } : {})
+    }
+  });
+  if (updated.count !== 1) return res.status(409).json({ error: "انضم شخص آخر إلى هذه المكالمة أو انتهت الدعوة" });
+  await audit(null, "INTERNAL_WEB_CALL_ACCEPTED", session.conversationId, { sessionId: session.id, recordingConsent: Boolean(recordingSettings.enabled && parsed.data.recordingConsent), aiProcessingConsent: Boolean(aiProcessingAvailable && parsed.data.recordingConsent && parsed.data.aiProcessingConsent) });
+  io.to(`agent:${session.agentId}`).emit("whatsapp:cloud-call-updated", { sessionId: session.id, status: "RINGING" });
+  res.json({ ok: true });
+});
+
+app.post("/api/public/voice-calls/:token/decline", async (req, res) => {
+  res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+  if (!isWebCallToken(req.params.token) || !z.object({}).strict().safeParse(req.body).success) return res.sendStatus(404);
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
+  if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
+  const result = await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { status: "REJECTED", guestTokenHash: null, lastError: "رفض العميل الانضمام إلى مكالمة المتصفح.", endedAt: new Date() } });
+  if (result.count) {
+    await audit(null, "INTERNAL_WEB_CALL_DECLINED", session.conversationId, { sessionId: session.id });
+    io.to(`agent:${session.agentId}`).emit("whatsapp:cloud-call-updated", { sessionId: session.id, status: "REJECTED" });
+  }
+  res.json({ ok: true });
+});
+
+app.post("/api/public/voice-calls/:token/terminate", async (req, res) => {
+  res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+  if (!isWebCallToken(req.params.token) || !z.object({}).strict().safeParse(req.body).success) return res.sendStatus(404);
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
+  if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
+  const result = await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: { in: ["INITIATING", "RINGING", "CONNECTED"] } }, data: { status: "TERMINATED", guestTokenHash: null, endedAt: new Date() } });
+  if (result.count) {
+    await audit(null, "INTERNAL_WEB_CALL_TERMINATED", session.conversationId, { sessionId: session.id, endedBy: "customer" });
+    io.to(`agent:${session.agentId}`).emit("whatsapp:cloud-call-updated", { sessionId: session.id, status: "TERMINATED" });
+  }
+  res.json({ ok: true });
 });
 
 app.post("/api/whatsapp-calls/:id/recording", agentGuard, express.raw({ type: () => true, limit: uploadLimitBytes }), async (req: AuthedRequest, res: express.Response) => {
@@ -1696,11 +1820,15 @@ app.get("/api/whatsapp-calls/:id", agentGuard, async (req: AuthedRequest, res: e
   let session = await prisma.whatsAppCallSession.findUnique({ where: { id: req.params.id } });
   if (!session) return res.status(404).json({ error: "جلسة المكالمة غير موجودة" });
   if (session.agentId !== req.user!.id && req.user!.role !== Role.ADMIN && !(req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations"))) return res.status(403).json({ error: "لا تملك صلاحية متابعة هذه المكالمة" });
-  if (session.sdpAnswer && Date.now() - session.updatedAt.getTime() > 120_000) {
+  if (session.transport === "INTERNAL_WEB" && session.status === "INITIATING" && (!session.guestExpiresAt || session.guestExpiresAt.getTime() <= Date.now())) {
+    await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { status: "FAILED", guestTokenHash: null, lastError: "انتهت صلاحية رابط الاتصال.", endedAt: new Date() } });
+    session = { ...session, status: "FAILED", sdpAnswer: null, lastError: "انتهت صلاحية رابط الاتصال.", endedAt: new Date() };
+  }
+  if (session.transport === "WHATSAPP_CLOUD" && session.sdpAnswer && Date.now() - session.updatedAt.getTime() > 120_000) {
     await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, sdpAnswer: session.sdpAnswer }, data: { sdpAnswer: null } });
     session = { ...session, sdpAnswer: null };
   }
-  res.json({ id: session.id, status: session.status, sdpAnswer: session.sdpAnswer, error: session.lastError, updatedAt: session.updatedAt });
+  res.json({ id: session.id, transport: session.transport, status: session.status, sdpAnswer: session.sdpAnswer, recordingEnabled: Boolean(session.recordingConsentAt), aiProcessingEnabled: Boolean(session.aiProcessingConsentAt), error: session.lastError, updatedAt: session.updatedAt });
 });
 
 app.post("/api/whatsapp-calls/:id/answer-applied", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -1717,9 +1845,9 @@ app.post("/api/whatsapp-calls/:id/terminate", agentGuard, async (req: AuthedRequ
   if (session.agentId !== req.user!.id && req.user!.role !== Role.ADMIN && !(req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations"))) return res.status(403).json({ error: "لا تملك صلاحية إنهاء هذه المكالمة" });
   if (["TERMINATED", "REJECTED", "FAILED"].includes(session.status)) return res.json({ ok: true });
   try {
-    if (session.providerCallId) await terminateCloudCall(session.providerCallId);
+    if (session.transport === "WHATSAPP_CLOUD" && session.providerCallId) await terminateCloudCall(session.providerCallId);
     await prisma.whatsAppCallSession.update({ where: { id: session.id }, data: { status: "TERMINATED", sdpAnswer: null, endedAt: new Date() } });
-    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_TERMINATED", session.conversationId, { sessionId: session.id });
+    await audit(req.user!.id, session.transport === "INTERNAL_WEB" ? "INTERNAL_WEB_CALL_TERMINATED" : "WHATSAPP_CLOUD_CALL_TERMINATED", session.conversationId, { sessionId: session.id, endedBy: "agent" });
     res.json({ ok: true });
   } catch (error) {
     res.status(error instanceof WhatsAppCloudApiError ? error.status || 502 : 502).json({ error: error instanceof Error ? error.message : "تعذر إنهاء المكالمة لدى WhatsApp" });

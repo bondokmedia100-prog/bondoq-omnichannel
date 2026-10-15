@@ -13,7 +13,8 @@
 - Added Telegram/Baileys WhatsApp message reactions and Baileys read/delivery receipt synchronization.
 - Added single-choice poll creation for Telegram and Baileys WhatsApp, with poll question/options shown in the workspace.
 - Added outbound WhatsApp Business Calling API calls from the agent workspace, with WebRTC audio, customer permission checks, and call lifecycle webhooks.
-- Hardened call status polling against stale updates and duplicate SDP answer application.
+- Added a Baileys-compatible browser-call fallback: send a short-lived, single-call invitation over WhatsApp, then bridge employee and customer browsers with WebRTC. This is not a native WhatsApp voice call.
+- Hardened call status polling against stale updates and duplicate SDP answer application; customer consent to recording and AI processing is independent and optional.
 - Added configurable Cairo business hours. Outside hours, the chatbot menu is bypassed, a configurable reply is sent at most once per conversation per Cairo day, and the conversation is queued for staff.
 - Added opt-in WebRTC call recording for new WhatsApp Cloud Calling calls. The agent must attest to the customer's explicit consent before calling; both audio streams are mixed locally and stored as a protected recording after the call.
 - Added supervisor-controlled optional AI transcription and summaries for WhatsApp Cloud call recordings. The agent records separate customer consent for recording and for sending audio/transcript to OpenAI; audio stays local to the app when AI processing is off or either consent is absent.
@@ -26,6 +27,8 @@ The Prisma schema adds `CustomerFavorite`, `ConversationPin`, `WhatsAppCallSessi
 
 Outbound calling needs an activated Irish (+353) WhatsApp Cloud API number, Calling enabled, subscribed `calls` and `messages` webhooks, customer permission, and a Meta daily messaging limit of at least 2,000 unique recipients. Configure the Cloud API credentials on the API service; no live provider call was available during this update's validation.
 
+In Baileys mode, the CRM sends a 10-minute browser-call link through WhatsApp; the customer must open it and allow microphone access. This does not answer or bridge a native WhatsApp call. Configure `WEBRTC_TURN_URLS` and `WEBRTC_TURN_SHARED_SECRET` with a coturn server for reliable connections across restrictive NATs; STUN-only connections are best-effort.
+
 After deployment, re-register the Telegram webhook once from its integration settings so Telegram includes `edited_message` updates.
 
 ## Remaining channel limitations
@@ -37,8 +40,8 @@ After deployment, re-register the Telegram webhook once from its integration set
 - Native reactions synchronize in Telegram and Baileys WhatsApp. Messenger and WhatsApp API mode retain reactions in the CRM only.
 - Opening a conversation sends WhatsApp read receipts only in Baileys mode; Baileys delivery/read acknowledgements update the message status. Telegram's Bot API and the current Messenger/API integrations do not expose equivalent read receipts here.
 - Quote references remain visible in the CRM but are not sent as provider-native quoted replies.
-- Incoming WhatsApp calls can be rejected or opened as conversations; answering and routing live call audio is not implemented by the current Baileys integration.
+- Native incoming WhatsApp calls can be rejected or opened as conversations; Baileys does not support accepting/carrying native WhatsApp call audio. Browser calls use the separate invitation link described above.
 
 ## Validation
 
-- Business-hours and Cairo-day-boundary checks pass under Node's TypeScript stripping mode, and the existing web service-worker tests pass (2). Node syntax checks pass for the API's changed `.ts` files, including the new queued AI processor. This workspace has no npm/tsc executable, installed dependencies, or TSX parser, so Prisma validation and the full API/web type-check/build could not be run here. AI transcription/summary and provider behavior were not tested against live OpenAI or Meta credentials.
+- Web service-worker tests pass (2), WebRTC security tests pass (3), API server/config syntax checks pass under Node's TypeScript stripping mode, and invitation-token/coturn credential checks pass. This workspace has no npm/tsc executable or installed dependencies; the full API suite, Prisma validation, and Next.js type-check/build could not be run. End-to-end audio was not tested against live browsers/networks; production calling needs the web/API HTTPS origins and a TURN service for reliable connectivity across restrictive NATs.

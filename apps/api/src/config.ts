@@ -9,7 +9,7 @@ const required = (key: string, fallback?: string) => {
 export const config = {
   port: Number(process.env.PORT || 4000),
   apiPublicUrl: (process.env.API_PUBLIC_URL || "").replace(/\/+$/, ""),
-  webOrigin: process.env.WEB_ORIGIN || "http://localhost:3000",
+  webOrigin: (process.env.WEB_ORIGIN || "http://localhost:3000").replace(/\/+$/, ""),
   resendApiKey: process.env.RESEND_API_KEY || "",
   emailFrom: process.env.EMAIL_FROM || "",
   passwordResetRecoveryEmail: process.env.PASSWORD_RESET_RECOVERY_EMAIL || "mahmoudsalamagsm@gmail.com",
@@ -30,6 +30,9 @@ export const config = {
   whatsappCloudAppSecret: process.env.WHATSAPP_CLOUD_APP_SECRET || "",
   whatsappCloudCallPermissionTemplate: process.env.WHATSAPP_CLOUD_CALL_PERMISSION_TEMPLATE || "",
   whatsappCloudCallPermissionLanguage: process.env.WHATSAPP_CLOUD_CALL_PERMISSION_LANGUAGE || "ar",
+  webRtcStunUrls: (process.env.WEBRTC_STUN_URLS || "stun:stun.l.google.com:19302").split(",").map((value) => value.trim()).filter(Boolean),
+  webRtcTurnUrls: (process.env.WEBRTC_TURN_URLS || "").split(",").map((value) => value.trim()).filter(Boolean),
+  webRtcTurnSharedSecret: process.env.WEBRTC_TURN_SHARED_SECRET || "",
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || "",
   redisUrl: process.env.REDIS_URL || "redis://localhost:6379",
   openaiApiKey: process.env.OPENAI_API_KEY || "",

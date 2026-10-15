@@ -356,6 +356,10 @@ model WhatsAppCallSession {
   agentId        String
   phoneNumber    String
   direction      String       @default("OUTGOING")
+  transport      String       @default("WHATSAPP_CLOUD")
+  offerSdp       String?      @db.Text
+  guestTokenHash String?      @unique
+  guestExpiresAt DateTime?
   recordingConsentAt DateTime?
   aiProcessingConsentAt DateTime?
   status         String       @default("INITIATING")
