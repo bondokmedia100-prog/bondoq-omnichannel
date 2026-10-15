@@ -322,7 +322,7 @@ export default function AdminDashboard() {
       {showMessenger && <MessengerSettingsModal onClose={() => setShowMessenger(false)} />}
        {showTelegram && <TelegramSettingsModal onClose={() => setShowTelegram(false)} />}
        {showAccount && user && <AccountSettingsModal user={user} onClose={() => setShowAccount(false)} onSaved={setUser} />}
-      <footer className="mx-auto mt-8 flex w-full max-w-[1500px] flex-wrap items-center justify-between gap-2 px-4 pb-5 text-[10px] text-stone-400 sm:px-7"><span>حلواني بندق © 2026</span><span className="flex items-center gap-3"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">تواصل عبر واتساب</a></span></footer>
+       <footer className="mx-auto mt-8 flex w-full max-w-[1500px] flex-wrap items-center justify-between gap-2 px-4 pb-5 text-[10px] text-stone-400 sm:px-7"><span>حلواني بندق © 2026</span><span className="flex items-center gap-3"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامة · 01018040600</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">تواصل عبر واتساب</a></span></footer>
    </main>;
 }
 
