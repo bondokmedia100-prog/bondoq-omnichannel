@@ -358,7 +358,7 @@ model WhatsAppCallSession {
   direction      String       @default("OUTGOING")
   transport      String       @default("WHATSAPP_CLOUD")
   offerSdp       String?      @db.Text
-  guestTokenHash String?      @unique
+  guestTokenHash String?
   guestExpiresAt DateTime?
   recordingConsentAt DateTime?
   aiProcessingConsentAt DateTime?
@@ -374,6 +374,7 @@ model WhatsAppCallSession {
 
   @@index([conversationId, createdAt])
   @@index([agentId, status, createdAt])
+  @@index([guestTokenHash])
 }
 
 model Product {

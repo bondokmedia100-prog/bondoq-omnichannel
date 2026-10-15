@@ -1710,7 +1710,7 @@ app.get("/api/public/voice-calls/:token", async (req, res) => {
   res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
   if (!isWebCallToken(req.params.token)) return res.sendStatus(404);
   const guestTokenHash = hashWebCallToken(req.params.token);
-  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash }, include: { conversation: { select: { customer: { select: { name: true, displayName: true } } } } } });
+  const session = await prisma.whatsAppCallSession.findFirst({ where: { guestTokenHash }, include: { conversation: { select: { customer: { select: { name: true, displayName: true } } } } } });
   if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
   if (session.status === "INITIATING" && (!session.guestExpiresAt || session.guestExpiresAt.getTime() <= Date.now())) {
     await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { status: "FAILED", guestTokenHash: null, lastError: "انتهت صلاحية رابط الاتصال.", endedAt: new Date() } });
@@ -1734,7 +1734,7 @@ app.post("/api/public/voice-calls/:token/answer", async (req, res) => {
   if (!isWebCallToken(req.params.token)) return res.sendStatus(404);
   const parsed = z.object({ answerSdp: z.string().min(100).max(100_000), recordingConsent: z.boolean(), aiProcessingConsent: z.boolean() }).strict().safeParse(req.body);
   if (!parsed.success || !parsed.data.answerSdp.includes("m=audio") || !parsed.data.answerSdp.includes("a=candidate:")) return res.status(400).json({ error: "تعذر إنشاء إجابة صوتية صالحة" });
-  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
+  const session = await prisma.whatsAppCallSession.findFirst({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
   if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
   if (session.status !== "INITIATING" || !session.guestExpiresAt || session.guestExpiresAt.getTime() <= Date.now()) return res.status(410).json({ error: "انتهت صلاحية الدعوة أو استُخدمت بالفعل" });
   const recordingSettings = await getCallRecordingSettings();
@@ -1758,7 +1758,7 @@ app.post("/api/public/voice-calls/:token/answer", async (req, res) => {
 app.post("/api/public/voice-calls/:token/decline", async (req, res) => {
   res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
   if (!isWebCallToken(req.params.token) || !z.object({}).strict().safeParse(req.body).success) return res.sendStatus(404);
-  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
+  const session = await prisma.whatsAppCallSession.findFirst({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
   if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
   const result = await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { status: "REJECTED", guestTokenHash: null, lastError: "رفض العميل الانضمام إلى مكالمة المتصفح.", endedAt: new Date() } });
   if (result.count) {
@@ -1771,7 +1771,7 @@ app.post("/api/public/voice-calls/:token/decline", async (req, res) => {
 app.post("/api/public/voice-calls/:token/terminate", async (req, res) => {
   res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
   if (!isWebCallToken(req.params.token) || !z.object({}).strict().safeParse(req.body).success) return res.sendStatus(404);
-  const session = await prisma.whatsAppCallSession.findUnique({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
+  const session = await prisma.whatsAppCallSession.findFirst({ where: { guestTokenHash: hashWebCallToken(req.params.token) } });
   if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
   const result = await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: { in: ["INITIATING", "RINGING", "CONNECTED"] } }, data: { status: "TERMINATED", guestTokenHash: null, endedAt: new Date() } });
   if (result.count) {
