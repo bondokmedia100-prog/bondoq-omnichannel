@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, rm, chmod } from "node:fs/promises";
+import { mkdir, rm, chmod, readdir } from "node:fs/promises";
 import path from "node:path";
 import makeWASocket, { DisconnectReason, downloadMediaMessage, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
 import { Channel, MessageKind } from "@prisma/client";
@@ -10,6 +10,8 @@ import { io } from "./realtime";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { sendPushNotification } from "./pushNotifications";
 import { repacketizeOggOpusToCode3 } from "./oggOpus";
+
+process.umask(0o077);
 
 export type WhatsAppMode = "BAILEYS" | "API";
 export type WhatsAppConnectionState = {
@@ -356,9 +358,10 @@ function scheduleReconnect(delay = reconnectDelay) {
 
 async function startSocket() {
   stopRequested = false;
-  reconnectDelay = 2000;
   await mkdir(authDir, { recursive: true, mode: 0o700 });
-  await chmod(authDir, 0o700).catch(() => {});
+  await chmod(authDir, 0o700);
+  const authFiles = await readdir(authDir, { withFileTypes: true });
+  await Promise.all(authFiles.filter((entry) => entry.isFile()).map((entry) => chmod(path.join(authDir, entry.name), 0o600)));
   await saveState({ mode: "BAILEYS", status: "CONNECTING", qrDataUrl: "", lastError: "" });
   const { state: auth, saveCreds } = await useMultiFileAuthState(authDir);
   const current = makeWASocket({ auth, printQRInTerminal: false, syncFullHistory: false, markOnlineOnConnect: false, browser: ["Bondoq CRM", "Chrome", "1.0.0"] });
@@ -373,6 +376,7 @@ async function startSocket() {
       }
       if (update.connection === "connecting" && !update.qr) await saveState({ status: "CONNECTING", qrDataUrl: "" });
       if (update.connection === "open") {
+        reconnectDelay = 2000;
         const jid = current.user?.id || "";
         const phoneNumber = phoneFromJid(jid) || jid.split(":")[0].split("@")[0];
         await saveState({ mode: "BAILEYS", status: "CONNECTED", qrDataUrl: "", phoneNumber, accountName: current.user?.name || "WhatsApp", lastError: "" });
@@ -385,6 +389,7 @@ async function startSocket() {
           return;
         }
         const loggedOut = statusCode === DisconnectReason.loggedOut;
+        console.warn("Baileys WhatsApp connection closed", { statusCode, loggedOut });
         await saveState({ status: "DISCONNECTED", qrDataUrl: "", phoneNumber: loggedOut ? "" : state.phoneNumber, lastError: loggedOut ? "انتهت جلسة WhatsApp؛ جارٍ إنشاء QR جديد" : "انقطع الاتصال؛ ستتم إعادة المحاولة تلقائيًا" });
         if (loggedOut) await rm(authDir, { recursive: true, force: true }).catch(() => {});
         scheduleReconnect(loggedOut ? 500 : reconnectDelay);
