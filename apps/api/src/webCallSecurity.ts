@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createMeteredIceServers, getMeteredTurnCredential } from "./meteredTurn";
 
 export type IceServerConfig = {
   urls: string | string[];
@@ -26,6 +27,8 @@ export function createIceServers(input: {
   subject: string;
   now?: number;
 }): IceServerConfig[] {
+  const meteredCredential = getMeteredTurnCredential();
+  if (meteredCredential) return createMeteredIceServers(input.stunUrls, meteredCredential);
   const servers: IceServerConfig[] = input.stunUrls.map((urls) => ({ urls }));
   if (input.turnUrls.length && input.turnSharedSecret) {
     const username = `${Math.floor((input.now ?? Date.now()) / 1000) + 3600}:${input.subject}`;
