@@ -16,3 +16,14 @@ test("accepts an overnight work window spanning selected days", () => {
   assert.equal(isWithinBusinessHours(overnight, new Date("2026-10-12T22:30:00.000Z")), true);
   assert.equal(isWithinBusinessHours(overnight, new Date("2026-10-12T23:30:00.000Z")), false);
 });
+
+test("distinguishes morning hours from a shift that runs past midnight", () => {
+  const morning = { ...settings, businessStart: "01:15", businessEnd: "09:00" };
+  const overnight = { ...settings, businessStart: "09:00", businessEnd: "01:15" };
+  const lateMonday = new Date("2026-10-12T20:05:00.000Z");
+
+  assert.equal(isWithinBusinessHours(morning, lateMonday), false);
+  assert.equal(isWithinBusinessHours(overnight, lateMonday), true);
+  assert.equal(isWithinBusinessHours(overnight, new Date("2026-10-12T22:00:00.000Z")), true);
+  assert.equal(isWithinBusinessHours(overnight, new Date("2026-10-12T22:30:00.000Z")), false);
+});
