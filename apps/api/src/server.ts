@@ -1464,11 +1464,11 @@ app.put("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), asyn
 
 const callRecordingSettingsSchema = z.object({ enabled: z.boolean(), aiProcessingEnabled: z.boolean() }).strict()
   .refine((settings) => !settings.aiProcessingEnabled || settings.enabled, { message: "فعّل تسجيل المكالمات قبل تفعيل معالجتها آليًا" });
-app.get("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (_req, res) => {
+app.get("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => {
   const settings = await getCallRecordingSettings();
   res.json({ ...settings, aiProcessingEnabled: settings.enabled && settings.aiProcessingEnabled && Boolean(config.openaiApiKey), aiProcessingAvailable: Boolean(config.openaiApiKey) });
 });
-app.put("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (req: AuthedRequest, res) => {
+app.put("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = callRecordingSettingsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "إعداد التسجيل غير صالح" });
   if (parsed.data.aiProcessingEnabled && !config.openaiApiKey) return res.status(503).json({ error: "اضبط OPENAI_API_KEY على الخادم قبل تفعيل المعالجة الآلية" });
@@ -1477,7 +1477,7 @@ app.put("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"),
   res.json(settings);
 });
 
-app.get("/api/admin/call-recordings", permissionGuard("canViewReports"), async (req, res) => {
+app.get("/api/admin/call-recordings", permissionGuard("canViewReports"), async (req: express.Request, res: express.Response) => {
   const take = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
   const sessions = await prisma.whatsAppCallSession.findMany({
     orderBy: { createdAt: "desc" }, take,
@@ -1491,7 +1491,7 @@ app.get("/api/admin/call-recordings", permissionGuard("canViewReports"), async (
   res.json(sessions);
 });
 
-app.patch("/api/admin/call-recordings/:id", permissionGuard("canViewReports"), async (req: AuthedRequest, res) => {
+app.patch("/api/admin/call-recordings/:id", permissionGuard("canViewReports"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ transcript: z.string().trim().max(30_000).nullable(), summary: z.string().trim().max(5_000).nullable() }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "تحقق من نص التفريغ وملخص المكالمة" });
   const recording = await prisma.callRecording.findUnique({ where: { id: req.params.id }, select: { id: true, session: { select: { conversationId: true } } } });
@@ -1501,7 +1501,7 @@ app.patch("/api/admin/call-recordings/:id", permissionGuard("canViewReports"), a
   res.json({ id: saved.id, durationSeconds: saved.durationSeconds, transcript: saved.transcript, summary: saved.summary, aiProcessingStatus: saved.aiProcessingStatus, aiProcessingError: saved.aiProcessingError, aiProcessedAt: saved.aiProcessedAt, reviewedAt: saved.reviewedAt });
 });
 
-app.get("/api/admin/call-recordings/:id/audio", permissionGuard("canViewReports"), async (req: AuthedRequest, res) => {
+app.get("/api/admin/call-recordings/:id/audio", permissionGuard("canViewReports"), async (req: AuthedRequest, res: express.Response) => {
   const recording = await prisma.callRecording.findUnique({ where: { id: req.params.id }, include: { mediaAsset: true, session: { select: { conversationId: true } } } });
   if (!recording) return res.status(404).json({ error: "التسجيل الصوتي غير موجود" });
   await audit(req.user!.id, "CALL_RECORDING_LISTENED", recording.session.conversationId, { recordingId: recording.id });
