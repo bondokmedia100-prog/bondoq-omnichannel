@@ -104,7 +104,6 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
         setError(result.error || (result.status === "REJECTED" ? "رفض العميل المكالمة." : "انتهت المكالمة."));
         finishCallRecording();
         setRecordingConsent(false);
-        setAiProcessingConsent(false);
         sessionIdRef.current = "";
         stopLocalMedia();
       }
