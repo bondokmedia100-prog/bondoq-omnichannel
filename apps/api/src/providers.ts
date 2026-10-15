@@ -2,7 +2,6 @@ import { Channel, MessageKind } from "@prisma/client";
 import { enqueueKalemlyMessage, getKalemlySettings } from "./KalemlyWaService";
 import { AUTO_REPLY_MENU_TEXT } from "./autoReplies";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
-import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { routeChoice } from "./kalemlyWebhookParser";
 import type { NormalizedInbound } from "./kalemlyWebhookParser";
 export { parseKalemlyWebhook } from "./kalemlyWebhookParser";
@@ -21,7 +20,7 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
       ? `${input.text || "موقع العميل"}\nhttps://maps.google.com/?q=${input.latitude},${input.longitude}`
       : input.text || "";
     return enqueueKalemlyMessage({
-      to: normalizePhoneNumber(input.recipient), message,
+      to: input.recipient, message,
       ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : kind === MessageKind.VIDEO ? "video" : "document" } : {})
     }, input.outboundMessageId);
   }
