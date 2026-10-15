@@ -15,7 +15,11 @@ type Invitation = {
 function waitForIceGathering(peer: RTCPeerConnection) {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
   return new Promise<void>((resolve, reject) => {
-    const timeout = window.setTimeout(() => finish(new Error("تعذر تجهيز الاتصال الصوتي. أعد المحاولة أو استخدم شبكة أخرى.")), 15_000);
+    const timeout = window.setTimeout(() => {
+      const sdp = peer.localDescription?.sdp || "";
+      const hasUsableCandidate = /^a=candidate:.* typ (?:srflx|relay)\s/m.test(sdp);
+      finish(hasUsableCandidate ? undefined : new Error("تعذر الوصول إلى مسار اتصال صالح. أعد المحاولة أو استخدم شبكة أخرى."));
+    }, 30_000);
     const changed = () => { if (peer.iceGatheringState === "complete") finish(); };
     function finish(error?: Error) {
       window.clearTimeout(timeout);
@@ -23,6 +27,7 @@ function waitForIceGathering(peer: RTCPeerConnection) {
       if (error) reject(error); else resolve();
     }
     peer.addEventListener("icegatheringstatechange", changed);
+    if (peer.iceGatheringState === "complete") finish();
   });
 }
 
