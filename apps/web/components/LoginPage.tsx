@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, Eye, EyeOff, LockKeyhole, Mail, MessageCircleMore, ShieldCheck, Sparkles } from "lucide-react";
 import { API_URL } from "@/lib/api";
+import DeveloperCredit from "./DeveloperCredit";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -58,6 +59,7 @@ export default function LoginPage() {
         </form>
         <div className="mt-8 flex items-start gap-3 rounded-xl border border-[#f2e6cb] bg-[#fff9eb] p-4 text-xs leading-6 text-[#75634c]"><MessageCircleMore size={17} className="mt-1 shrink-0 text-[#d49b22]" /><p>يتم توجيه كل عضو تلقائيًا إلى مساحة العمل المناسبة حسب صلاحيات حسابه.</p></div>
         <p className="mt-8 text-center text-xs text-stone-400">مخصص لفريق حلواني بندق</p>
+        <DeveloperCredit showOnLogin className="mt-2 px-0 text-center" />
       </div>
     </section>
   </main>;

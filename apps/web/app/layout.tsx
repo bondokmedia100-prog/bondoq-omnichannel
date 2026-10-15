@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
+import DeveloperCredit from "@/components/DeveloperCredit";
 import ServiceWorkerRegistration from "@/components/ServiceWorkerRegistration";
 
 export const metadata: Metadata = {
@@ -19,5 +20,5 @@ export const metadata: Metadata = {
 export const viewport = { themeColor: "#d32f2f" };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
-  return <html lang="ar" dir="rtl"><body>{children}<ServiceWorkerRegistration /></body></html>;
+  return <html lang="ar" dir="rtl"><body>{children}<ServiceWorkerRegistration /><DeveloperCredit /></body></html>;
 }
