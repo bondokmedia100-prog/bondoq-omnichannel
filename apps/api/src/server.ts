@@ -130,7 +130,7 @@ app.get("/public-media/:id", async (req, res) => {
     "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`,
     "Cache-Control": "public, max-age=3600",
     "X-Content-Type-Options": "nosniff"
-  }).send(asset.data);
+  }).send(Buffer.from(asset.data));
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -1090,7 +1090,7 @@ app.get("/api/conversations/:id/messages/:messageId/media", agentGuard, async (r
     if (message.mediaAssetId) {
       const asset = await prisma.mediaAsset.findUnique({ where: { id: message.mediaAssetId }, select: { data: true, contentType: true, fileName: true, size: true } });
       if (!asset) return res.status(404).json({ error: "الملف غير موجود" });
-      return res.set({ "Content-Type": asset.contentType, "Content-Length": String(asset.size), "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" }).send(asset.data);
+      return res.set({ "Content-Type": asset.contentType, "Content-Length": String(asset.size), "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" }).send(Buffer.from(asset.data));
     }
     const media = await fetchInboundMedia(message.conversation.channel, (message.metadata || {}) as unknown as Record<string, unknown>, message.mediaUrl || undefined);
     res.setHeader("Content-Type", media.contentType); res.setHeader("Cache-Control", "private, max-age=300"); res.setHeader("X-Content-Type-Options", "nosniff"); res.send(media.body);
