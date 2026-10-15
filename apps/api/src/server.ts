@@ -823,7 +823,7 @@ app.post("/api/conversations/:id/messages/:messageId/forward", agentGuard, async
   const sourceMetadata = source.metadata && typeof source.metadata === "object" && !Array.isArray(source.metadata) ? source.metadata as Record<string, unknown> : {};
   const pollOptions = Array.isArray(sourceMetadata.pollOptions) ? sourceMetadata.pollOptions.filter((option): option is string => typeof option === "string") : undefined;
   if (source.kind === MessageKind.POLL && (!pollOptions || pollOptions.length < 2 || pollOptions.length > 10 || new Set(pollOptions.map((option) => option.toLocaleLowerCase())).size !== pollOptions.length || target.channel === Channel.MESSENGER || target.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS")) return res.status(409).json({ error: "لا يمكن تحويل هذا الاستطلاع إلى القناة المستهدفة" });
-  const hasMedia = [MessageKind.IMAGE, MessageKind.AUDIO, MessageKind.VIDEO, MessageKind.FILE, MessageKind.STICKER].includes(source.kind);
+  const hasMedia = [MessageKind.IMAGE, MessageKind.AUDIO, MessageKind.VIDEO, MessageKind.FILE, MessageKind.STICKER].some((kind) => kind === source.kind);
   try {
     let sourceAsset = source.mediaAsset;
     if (hasMedia && !sourceAsset) {
