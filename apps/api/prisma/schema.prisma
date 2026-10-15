@@ -375,7 +375,7 @@ model WhatsAppCallSession {
 model Product {
   id           String          @id @default(cuid())
   name         String
-  sku          String?         @unique
+  sku          String?
   category     ProductCategory
   price        Decimal         @db.Decimal(10, 2)
   imageUrl     String?
