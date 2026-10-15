@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AUTO_REPLY_HANDOFF_TEXT, AUTO_REPLY_MENU_TEXT, buildRoutingMenuText, findMatchingAutoReply, getServiceChoice } from "./autoReplies";
+import { AUTO_REPLY_MENU_TEXT, DEFAULT_CHATBOT_SETTINGS, buildBranchReplyText, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, getServiceChoice } from "./autoReplies";
 
 test("matches Arabic keywords without diacritics", () => {
   const rules = [{ keywords: ["توصيل"], responseText: "سنساعدك", routingDepartment: "DELIVERY" }];
@@ -13,24 +13,49 @@ test("does not match empty keywords or empty messages", () => {
   assert.equal(findMatchingAutoReply(rules, "  "), undefined);
 });
 
-test("maps Arabic and Western service numbers to the five screenshot queues", () => {
-  assert.equal(getServiceChoice("١")?.label, "الفروع");
-  assert.equal(getServiceChoice("2.")?.label, "خدمة العملاء");
+test("maps Arabic and Western service numbers to configured options", () => {
+  assert.equal(getServiceChoice("١")?.label, "الفروع ومواعيد العمل");
+  assert.equal(getServiceChoice("2.")?.routingDepartment, "CUSTOMER_CARE");
   assert.equal(getServiceChoice("٣")?.routingDepartment, "HEADQUARTERS");
   assert.equal(getServiceChoice("رقم ٤")?.routingDepartment, "QUALITY");
   assert.equal(getServiceChoice("route_other")?.routingDepartment, "CUSTOMER_CARE");
-  assert.equal(getServiceChoice("route_delivery")?.routingDepartment, "DELIVERY");
   assert.equal(getServiceChoice("السلام عليكم"), undefined);
   assert.equal(getServiceChoice("رقم 6"), undefined);
 });
 
-test("uses the approved customer-facing menu and handoff text", () => {
-  assert.equal(AUTO_REPLY_MENU_TEXT, "أهلاً بك في حلواني بندق، برجاء اختيار الخدمة المطلوبة بإرسال رقم الخدمة:\n1. الفروع\n2. خدمة العملاء\n3. طلبات الجملة\n4. الشكاوى والاقتراحات\n5. غير ذلك");
-  assert.equal(AUTO_REPLY_HANDOFF_TEXT, "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء.");
+test("first contact only displays the menu and remains in BOT_MENU", () => {
+  assert.deepEqual(decideBotAction({ enabled: true, state: "ASSIGNED_TO_AGENT", starting: true, text: "السلام عليكم", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "MENU", nextState: "BOT_MENU" });
 });
 
-test("uses a saved welcome message before the service choices", () => {
-  const menu = buildRoutingMenuText("مرحبًا بكم في بندق");
-  assert.equal(menu, `مرحبًا بكم في بندق\n${AUTO_REPLY_MENU_TEXT.split("\n").slice(1).join("\n")}`);
-  assert.equal(buildRoutingMenuText("  "), AUTO_REPLY_MENU_TEXT);
+test("invalid replies remain in BOT_MENU without handing off", () => {
+  assert.deepEqual(decideBotAction({ enabled: true, state: "BOT_MENU", starting: false, text: "السلام عليكم", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "INVALID", nextState: "BOT_MENU" });
+});
+
+test("branches reply keeps the customer in BOT_MENU", () => {
+  const decision = decideBotAction({ enabled: true, state: "BOT_MENU", starting: false, text: "١", settings: DEFAULT_CHATBOT_SETTINGS });
+  assert.equal(decision.action, "BRANCHES");
+  assert.equal(decision.nextState, "BOT_MENU");
+  assert.match(buildBranchReplyText(DEFAULT_CHATBOT_SETTINGS), /أرسل الرقم 2/);
+});
+
+test("choices 2 to 5 hand off with the configured department", () => {
+  const decision = decideBotAction({ enabled: true, state: "BOT_MENU", starting: false, text: "٣", settings: DEFAULT_CHATBOT_SETTINGS });
+  assert.equal(decision.action, "HANDOFF");
+  assert.equal(decision.nextState, "ASSIGNED_TO_AGENT");
+  if (decision.action === "HANDOFF") assert.equal(decision.choice.label, "طلبات الجملة");
+});
+
+test("disabled bot bypasses the menu", () => {
+  assert.deepEqual(decideBotAction({ enabled: false, state: "BOT_MENU", starting: false, text: "١", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "BYPASS", nextState: "ASSIGNED_TO_AGENT" });
+});
+
+test("disabled bot does not unassign an active agent conversation", () => {
+  assert.deepEqual(decideBotAction({ enabled: false, state: "ASSIGNED_TO_AGENT", starting: false, text: "أحتاج مساعدة", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "NONE", nextState: "ASSIGNED_TO_AGENT" });
+});
+
+test("builds the configured menu and branch response", () => {
+  assert.equal(AUTO_REPLY_MENU_TEXT, "أهلاً بك في حلواني بندق.\nيرجى اختيار رقم الخدمة المطلوبة:\n1. الفروع ومواعيد العمل\n2. خدمة العملاء\n3. طلبات الجملة\n4. الشكاوى والاقتراحات\n5. غير ذلك");
+  const settings = { ...DEFAULT_CHATBOT_SETTINGS, welcomeText: "مرحبًا", option1ReplyText: "وسط البلد: 10 ص إلى 10 م" };
+  assert.equal(buildRoutingMenuText(settings).split("\n")[0], "مرحبًا");
+  assert.equal(buildBranchReplyText(settings), "وسط البلد: 10 ص إلى 10 م\n\nللتحدث مع ممثل خدمة العملاء أرسل الرقم 2.");
 });

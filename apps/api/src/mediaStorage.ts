@@ -24,6 +24,13 @@ export function imageSignatureMatches(contentType: string, bytes: Buffer) {
   return !contentType.startsWith("image/");
 }
 
+export function detectImageContentType(bytes: Buffer) {
+  if (imageSignatureMatches("image/jpeg", bytes)) return "image/jpeg";
+  if (imageSignatureMatches("image/png", bytes)) return "image/png";
+  if (imageSignatureMatches("image/webp", bytes)) return "image/webp";
+  return undefined;
+}
+
 function signatureFor(assetId: string, expires: number) {
   return createHmac("sha256", config.mediaSigningSecret).update(`${assetId}:${expires || "permanent"}`).digest("hex");
 }

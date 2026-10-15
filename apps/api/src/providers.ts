@@ -114,14 +114,9 @@ export function parseTelegramMessageId(externalId: string) {
   return externalId.split(":").at(-1) || "";
 }
 
-export async function sendRoutingMenu(channel: Channel, recipient: string, prompt = AUTO_REPLY_MENU_TEXT) {
-  const choices = [
-    { id: "route_branches", title: "1- الفروع" },
-    { id: "route_customer_care", title: "2- خدمة العملاء" },
-    { id: "route_wholesale", title: "3- طلبات الجملة" },
-    { id: "route_quality", title: "4- الشكاوى والاقتراحات" },
-    { id: "route_other", title: "5- غير ذلك" }
-  ];
+export async function sendRoutingMenu(channel: Channel, recipient: string, prompt = AUTO_REPLY_MENU_TEXT, optionLabels = ["الفروع ومواعيد العمل", "خدمة العملاء", "طلبات الجملة", "الشكاوى والاقتراحات", "غير ذلك"]) {
+  const ids = ["route_branches", "route_customer_care", "route_wholesale", "route_quality", "route_other"];
+  const choices = optionLabels.map((title, index) => ({ id: ids[index], title: `${index + 1}- ${title}` }));
   if (channel === Channel.WHATSAPP) {
     return sendToChannel({ channel, recipient, text: prompt });
   }

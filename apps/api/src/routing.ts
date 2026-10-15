@@ -12,6 +12,10 @@ export const slaQueue = new Queue("conversation-sla", { connection });
 
 type AssignmentOptions = { allowAwaitingRouting?: boolean; reassignIfIneligible?: boolean };
 
+export function withInboundConversationLock<T>(channel: string, externalConversationId: string, work: () => Promise<T>) {
+  return withRedisLock(connection, `inbound:${channel}:${externalConversationId}`, work, { leaseMs: 120_000 });
+}
+
 export async function assignConversation(conversationId: string, department?: Department | null, options: AssignmentOptions = {}) {
   return withRedisLock(connection, `assignment:conversation:${conversationId}`, async () => {
     const currentConversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
@@ -71,11 +75,11 @@ export async function assignConversation(conversationId: string, department?: De
 
 export async function dispatchQueued() {
   while (true) {
-    const waiting = await prisma.conversation.findMany({ where: { status: ConversationStatus.QUEUED, assignedAgentId: null }, orderBy: { lastMessageAt: "asc" }, take: 50 });
+    const waiting = await prisma.conversation.findMany({ where: { status: ConversationStatus.QUEUED, assignedAgentId: null, awaitingRouting: false, botState: "ASSIGNED_TO_AGENT" }, orderBy: { lastMessageAt: "asc" }, take: 50 });
     if (!waiting.length) return;
     let progressed = false;
     for (const conversation of waiting) {
-      const assigned = await assignConversation(conversation.id, undefined, { allowAwaitingRouting: true });
+      const assigned = await assignConversation(conversation.id);
       if (assigned.status !== ConversationStatus.QUEUED) { progressed = true; break; }
     }
     if (!progressed) return;

@@ -262,7 +262,10 @@ async function handleIncomingMessage(message: any) {
   let mediaBuffer: Buffer | undefined;
   let mediaContentType = String(mediaMessage?.mimetype || "application/octet-stream").split(";")[0].toLowerCase();
   if (mediaMessage) {
-    mediaBuffer = await downloadMediaMessage(message, "buffer", {});
+    const currentSocket = socket;
+    const retrieval = currentSocket ? { reuploadRequest: (staleMessage: any) => currentSocket.updateMediaMessage(staleMessage) } : undefined;
+    mediaBuffer = Buffer.from(await downloadMediaMessage(message, "buffer", {}, retrieval));
+    if (!mediaBuffer.length) throw new Error("WhatsApp returned an empty media file");
     if (mediaBuffer.length > inboundMediaLimit) throw new Error("رسالة واتساب الواردة تتجاوز حد التخزين البالغ 12 ميجابايت");
   }
   const id = String(message.key?.id || `${remoteJid}:${Date.now()}`);

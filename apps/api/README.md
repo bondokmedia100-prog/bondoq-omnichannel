@@ -17,7 +17,8 @@ Backend-only package: Prisma schema and seed data, JWT authentication and role g
 - `POST /api/conversations/:id/products`
 - `PATCH /api/conversations/:id/customer` saves the staff display name and notes for the customer attached to an assigned conversation.
 - `GET/PUT /api/admin/integrations/kalemlywa`, `POST /api/admin/integrations/kalemlywa/test`
-- `POST /api/conversations/:id/orders` accepts `referenceImageMessageId`; `PATCH /api/conversations/:id/status` with `RESOLVED` sends CSAT.
+- `GET/PUT /api/admin/chatbot-settings` manages the service menu, welcome/invalid-choice text, and handoff replies.
+- `POST /api/conversations/:id/orders` saves order details; customer media remains in the conversation history. `PATCH /api/conversations/:id/status` with `RESOLVED` sends CSAT.
 - `POST /webhooks/kalemlywa` for KalemlyWA WhatsApp events; it accepts an HMAC-derived `token` query parameter tied to the configured webhook secret or saved app key, or a matching credential in supported headers/request fields. The admin dashboard generates the complete URL. Requests without a matching credential are rejected.
 - `GET /webhooks/meta` and `POST /webhooks/meta` for Facebook Messenger events only.
 - `POST /webhooks/telegram` for Telegram Bot API updates

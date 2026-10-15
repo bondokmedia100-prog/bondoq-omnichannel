@@ -1,16 +1,21 @@
-import { ConversationStatus, Department, MessageDirection, MessageKind, Prisma, Role } from "@prisma/client";
+import { ConversationBotState, ConversationStatus, Department, MessageDirection, MessageKind, Prisma, Role } from "@prisma/client";
 import type { NormalizedInbound } from "./providers";
 import { prisma } from "./prisma";
-import { assignConversation, scheduleSla } from "./routing";
+import { assignConversation, scheduleSla, withInboundConversationLock } from "./routing";
 import { io } from "./realtime";
 import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
-import { AUTO_REPLY_HANDOFF_TEXT, AUTO_REPLY_RESTART_MS, buildRoutingMenuText, getServiceChoice, findMatchingAutoReply } from "./autoReplies";
+import { buildBranchReplyText, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, type BotState } from "./autoReplies";
+import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
-import { safeFileName } from "./mediaStorage";
+import { detectImageContentType, publicMediaUrl, safeFileName } from "./mediaStorage";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
+  return withInboundConversationLock(inbound.channel, inbound.externalConversationId, () => ingestMessageLocked(inbound));
+}
+
+async function ingestMessageLocked(inbound: NormalizedInbound) {
   const customer = await prisma.customer.upsert({
     where: { id: `external_${inbound.channel.toLowerCase()}_${inbound.externalCustomerId}` },
     update: {
@@ -62,19 +67,29 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   }
   let message;
   try {
-    const contentType = cachedMedia?.contentType || String(metadata.mediaMimeType || "application/octet-stream");
+    const declaredType = cachedMedia?.contentType || String(metadata.mediaMimeType || "application/octet-stream");
+    const contentType = inbound.kind === MessageKind.IMAGE && cachedMedia
+      ? detectImageContentType(cachedMedia.body) || declaredType.split(";")[0].toLowerCase()
+      : declaredType.split(";")[0].toLowerCase();
     const extension = contentType.split(";")[0].split("/")[1]?.replace(/[^a-zA-Z0-9.+-]/g, "") || "bin";
     const fileName = inbound.mediaFileName || (inbound.kind === MessageKind.AUDIO
       ? `${metadata.voiceNote === true ? "voice-note" : "audio"}.${extension}`
       : inbound.kind === MessageKind.IMAGE ? `image.${extension}` : inbound.kind === MessageKind.VIDEO ? `video.${extension}` : `attachment.${extension}`);
-    message = await prisma.message.create({ data: {
-      conversation: { connect: { id: conversation.id } }, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
-      text: inbound.text, mediaUrl: cachedMedia ? undefined : inbound.mediaUrl, latitude: inbound.latitude, longitude: inbound.longitude,
-      externalId: storedExternalId, metadata: metadata as Prisma.InputJsonValue,
-      ...(cachedMedia ? { mediaAsset: { create: {
+    message = await prisma.$transaction(async (tx) => {
+      const asset = cachedMedia ? await tx.mediaAsset.create({ data: {
         fileName: safeFileName(fileName), contentType, size: cachedMedia.body.length, data: Uint8Array.from(cachedMedia.body)
-      } } } : {})
-    } });
+      }, select: { id: true } }) : null;
+      let mediaUrl = inbound.mediaUrl;
+      if (asset) {
+        try { mediaUrl = publicMediaUrl(asset.id, 0); }
+        catch (error) { console.warn("Public media URL unavailable; protected media route will be used", error); }
+      }
+      return tx.message.create({ data: {
+        conversationId: conversation.id, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
+        text: inbound.text, mediaUrl, mediaAssetId: asset?.id, latitude: inbound.latitude, longitude: inbound.longitude,
+        externalId: storedExternalId, metadata: metadata as Prisma.InputJsonValue
+      } });
+    });
   } catch (error) {
     if ((error as { code?: string }).code === "P2002") return { duplicate: true, conversationId: conversation.id };
     throw error;
@@ -87,38 +102,38 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     ? Number(ratingText.match(/[1-5]/)?.[0]) : undefined;
   const isRatingReply = Boolean(pendingSurvey && pendingSurvey.rating === null && customerRating);
   const isTerminal = conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED;
-  const isIdle = Date.now() - conversation.lastMessageAt.getTime() >= AUTO_REPLY_RESTART_MS;
-  const restartAutomation = !isRatingReply && (isNewConversation || isTerminal || isIdle);
-  const awaitingChoice = !restartAutomation && conversation.awaitingRouting;
-  const serviceChoice = awaitingChoice
-    ? getServiceChoice(inbound.text) || getServiceChoice(inbound.routingDepartment)
-    : undefined;
-  const directHandoff = awaitingChoice && !serviceChoice;
-  const autoRules = !restartAutomation && !awaitingChoice && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
+  const chatbotSettings = await getChatbotSettings();
+  const starting = !isRatingReply && (isNewConversation || isTerminal);
+  const currentBotState: BotState = conversation.awaitingRouting ? "BOT_MENU" : conversation.botState;
+  const decision = decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
+  const serviceChoice = decision.action === "BRANCHES" || decision.action === "HANDOFF" ? decision.choice : undefined;
+  const autoRules = decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
     ? await prisma.autoReplyRule.findMany({ where: { isActive: true, isWelcome: false }, orderBy: [{ priority: "desc" }, { createdAt: "asc" }] })
     : [];
   const autoReply = findMatchingAutoReply(autoRules, inbound.text);
-  const routeDepartment = serviceChoice?.routingDepartment as Department | undefined
+  const routeDepartment = (decision.action === "HANDOFF" ? serviceChoice?.routingDepartment : undefined) as Department | undefined
     || (autoReply?.routingDepartment as Department | null | undefined)
     || inbound.routingDepartment;
   const shouldPreserveResolved = isRatingReply && (conversation.status === ConversationStatus.RESOLVED || conversation.status === ConversationStatus.CLOSED);
   const previousAssignedAgentId = conversation.assignedAgentId;
-  const initiallyAssignedAgentId = restartAutomation ? null : conversation.assignedAgentId;
+  const awaitingMenu = decision.nextState === "BOT_MENU";
+  const needsAssignment = decision.action === "HANDOFF" || decision.action === "BYPASS";
   conversation = await prisma.conversation.update({
     where: { id: conversation.id },
     data: {
       lastMessageAt: message.createdAt, lastInboundAt: message.createdAt, unreadCount: { increment: 1 },
-      status: restartAutomation ? ConversationStatus.QUEUED : shouldPreserveResolved ? conversation.status : isTerminal ? ConversationStatus.OPEN : conversation.status,
-      closedAt: restartAutomation ? null : shouldPreserveResolved ? conversation.closedAt : isTerminal ? null : conversation.closedAt,
-      assignedAgentId: restartAutomation ? null : conversation.assignedAgentId,
-      awaitingRouting: restartAutomation ? true : awaitingChoice ? false : conversation.awaitingRouting,
-      routingDepartment: restartAutomation ? null : routeDepartment || (directHandoff ? null : conversation.routingDepartment),
-      serviceTag: restartAutomation ? null : serviceChoice?.label || (directHandoff ? "تواصل مباشر" : conversation.serviceTag),
-      isComplaint: restartAutomation ? false : serviceChoice?.isComplaint ?? (directHandoff ? false : inbound.isComplaint ?? conversation.isComplaint),
-      ...(restartAutomation ? { firstResponseAt: null, lastAgentResponseAt: null, slaBreachedAt: null } : {})
+      status: awaitingMenu || needsAssignment ? ConversationStatus.QUEUED : shouldPreserveResolved ? conversation.status : isTerminal ? ConversationStatus.OPEN : conversation.status,
+      closedAt: awaitingMenu || needsAssignment ? null : shouldPreserveResolved ? conversation.closedAt : isTerminal ? null : conversation.closedAt,
+      assignedAgentId: awaitingMenu || needsAssignment ? null : conversation.assignedAgentId,
+      awaitingRouting: awaitingMenu,
+      botState: decision.nextState === "BOT_MENU" ? ConversationBotState.BOT_MENU : ConversationBotState.ASSIGNED_TO_AGENT,
+      routingDepartment: awaitingMenu || decision.action === "BYPASS" ? null : routeDepartment || conversation.routingDepartment,
+      serviceTag: decision.action === "HANDOFF" ? serviceChoice?.label : decision.action === "BYPASS" ? "تواصل مباشر" : awaitingMenu ? null : conversation.serviceTag,
+      isComplaint: decision.action === "HANDOFF" ? Boolean(serviceChoice?.isComplaint) : awaitingMenu || decision.action === "BYPASS" ? false : inbound.isComplaint ?? conversation.isComplaint,
+      ...(decision.action === "MENU" || decision.action === "BYPASS" ? { firstResponseAt: null, lastAgentResponseAt: null, slaBreachedAt: null } : {})
     }
   });
-  if (restartAutomation && previousAssignedAgentId) {
+  if (awaitingMenu && previousAssignedAgentId) {
     io?.to(`agent:${previousAssignedAgentId}`).emit("conversation:unassigned", conversation);
   }
 
@@ -139,17 +154,25 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     else targets.emit("message:new", payload);
   }
 
-  if (restartAutomation) {
-    conversation = await assignConversation(conversation.id, undefined, { allowAwaitingRouting: true });
+  async function sendBotReply(text: string, automation: string, details: Record<string, unknown> = {}) {
+    const result: any = await sendToChannel({ channel: inbound.channel, recipient: channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId), text });
+    const providerId = kalemlyExternalMessageId(result);
+    const reply = await prisma.message.create({ data: {
+      conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text,
+      externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
+      metadata: { automation, ...details } as Prisma.InputJsonValue
+    } });
+    conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: reply.createdAt } });
+    io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: reply });
+    if (conversation.assignedAgentId) io?.to(`agent:${conversation.assignedAgentId}`).emit("message:new", { conversationId: conversation.id, message: reply });
+  }
+
+  if (decision.action === "MENU") {
     try {
-      const welcomeRule = await prisma.autoReplyRule.findFirst({
-        where: { isActive: true, isWelcome: true },
-        orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
-        select: { responseText: true }
-      });
-      const menuText = buildRoutingMenuText(welcomeRule?.responseText);
+      const menuText = buildRoutingMenuText(chatbotSettings);
+      const labels = [chatbotSettings.option1Label, chatbotSettings.option2Label, chatbotSettings.option3Label, chatbotSettings.option4Label, chatbotSettings.option5Label];
       const recipient = channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId);
-      const result: any = await sendRoutingMenu(inbound.channel, recipient, menuText);
+      const result: any = await sendRoutingMenu(inbound.channel, recipient, menuText, labels);
       const providerId = kalemlyExternalMessageId(result);
       const menuMessage = await prisma.message.create({ data: {
         conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: menuText,
@@ -160,47 +183,35 @@ export async function ingestMessage(inbound: NormalizedInbound) {
       io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: menuMessage });
     } catch (error) {
       console.error("Service menu delivery failed; assigning conversation to the default queue", error);
-      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false, serviceTag: "تواصل مباشر" } });
+      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false, botState: ConversationBotState.ASSIGNED_TO_AGENT, serviceTag: "تواصل مباشر" } });
       conversation = await assignConversation(conversation.id);
     }
-  } else if (serviceChoice || directHandoff) {
-    conversation = await assignConversation(conversation.id, routeDepartment, { reassignIfIneligible: Boolean(serviceChoice) });
+  } else if (decision.action === "BRANCHES") {
     try {
-      const result: any = await sendToChannel({ channel: inbound.channel, recipient: channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId), text: AUTO_REPLY_HANDOFF_TEXT });
-      const providerId = kalemlyExternalMessageId(result);
-      const handoffMessage = await prisma.message.create({ data: {
-        conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: AUTO_REPLY_HANDOFF_TEXT,
-        externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
-        metadata: { automation: "agent-handoff", service: serviceChoice?.label || "تواصل مباشر" }
-      } });
-      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: handoffMessage.createdAt } });
-      io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: handoffMessage });
-      if (conversation.assignedAgentId) io?.to(`agent:${conversation.assignedAgentId}`).emit("message:new", { conversationId: conversation.id, message: handoffMessage });
-    } catch (error) {
-      console.error("Agent handoff acknowledgement failed", error);
-    }
+      await sendBotReply(buildBranchReplyText(chatbotSettings), "branch-information", { service: serviceChoice?.label || chatbotSettings.option1Label });
+    } catch (error) { console.error("Branch information reply failed", error); }
+  } else if (decision.action === "INVALID") {
+    try {
+      await sendBotReply(chatbotSettings.invalidChoiceText, "invalid-menu-choice");
+    } catch (error) { console.error("Invalid menu reply failed", error); }
+  } else if (decision.action === "HANDOFF" && serviceChoice) {
+    conversation = await assignConversation(conversation.id, routeDepartment, { reassignIfIneligible: true });
+    try {
+      const replyText = [chatbotSettings.option1ReplyText, chatbotSettings.option2ReplyText, chatbotSettings.option3ReplyText, chatbotSettings.option4ReplyText, chatbotSettings.option5ReplyText][serviceChoice.number - 1];
+      await sendBotReply(replyText, "agent-handoff", { service: serviceChoice.label, serviceNumber: serviceChoice.number });
+    } catch (error) { console.error("Agent handoff acknowledgement failed", error); }
+  } else if (decision.action === "BYPASS") {
+    conversation = await assignConversation(conversation.id);
   } else if (autoReply) {
-    try {
-      const result: any = await sendToChannel({ channel: inbound.channel, recipient: channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId), text: autoReply.responseText });
-      const providerId = kalemlyExternalMessageId(result);
-      const reply = await prisma.message.create({ data: {
-        conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: autoReply.responseText,
-        externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
-        metadata: { automation: "auto-reply", ruleId: autoReply.id }
-      } });
-      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: reply.createdAt } });
-      io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: reply });
-      if (conversation.assignedAgentId) io?.to(`agent:${conversation.assignedAgentId}`).emit("message:new", { conversationId: conversation.id, message: reply });
-    } catch (error) {
-      console.error("Automatic reply delivery failed", error);
-    }
+    try { await sendBotReply(autoReply.responseText, "auto-reply", { ruleId: autoReply.id }); }
+    catch (error) { console.error("Automatic reply delivery failed", error); }
   }
 
-  if (!restartAutomation && !serviceChoice && !directHandoff && !autoReply && !conversation.awaitingRouting && !conversation.assignedAgentId) {
+  if (decision.action === "NONE" && !autoReply && !conversation.awaitingRouting && !conversation.assignedAgentId) {
     conversation = await assignConversation(conversation.id, routeDepartment);
   }
 
-  if (io && conversation.assignedAgentId && conversation.assignedAgentId !== initiallyAssignedAgentId) {
+  if (io && conversation.assignedAgentId && conversation.assignedAgentId !== previousAssignedAgentId) {
     io.to(`agent:${conversation.assignedAgentId}`).emit("message:new", payload);
   }
   const admins = await prisma.user.findMany({ where: {
@@ -215,7 +226,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   const tag = `inbound-${conversation.id}`;
   void sendPushNotification(admins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
   if (conversation.assignedAgentId) void sendPushNotification([conversation.assignedAgentId], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
-  await scheduleSla(conversation.id, message.id);
+  if (conversation.assignedAgentId) await scheduleSla(conversation.id, message.id);
   if (message.kind === MessageKind.AUDIO) void transcribeAudioMessage(message.id).catch((error) => console.error("Voice note transcription failed", error));
   return { conversationId: conversation.id, messageId: message.id };
 }

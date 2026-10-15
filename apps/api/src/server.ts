@@ -23,6 +23,7 @@ import { getPushConfig, sendPushNotification } from "./pushNotifications";
 import { customerProfileSchema } from "./customerProfile";
 import { sendPasswordResetApprovalEmail, sendPasswordResetEmail } from "./email";
 import { createPasswordResetToken, hashPasswordResetToken } from "./passwordResetToken";
+import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
 
 const app = express();
 const server = http.createServer(app);
@@ -1130,15 +1131,11 @@ app.delete("/api/conversations/:id/messages/:messageId/reaction", agentGuard, as
 });
 
 app.post("/api/conversations/:id/orders", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ product: z.string().optional(), size: z.string().optional(), filling: z.string().optional(), cakeMessage: z.string().optional(), deliveryAt: z.string().datetime().optional(), deliveryAddress: z.string().optional(), notes: z.string().optional(), price: z.number().nonnegative().optional(), referenceImageMessageId: z.string().nullable().optional() }).safeParse(req.body);
+  const parsed = z.object({ product: z.string().optional(), size: z.string().optional(), filling: z.string().optional(), cakeMessage: z.string().optional(), deliveryAt: z.string().datetime().optional(), deliveryAddress: z.string().optional(), notes: z.string().optional(), price: z.number().nonnegative().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "تفاصيل الطلب غير صالحة" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية لهذا الطلب" });
-  if (parsed.data.referenceImageMessageId) {
-    const reference = await prisma.message.findFirst({ where: { id: parsed.data.referenceImageMessageId, conversationId: conversation.id, direction: MessageDirection.INBOUND, kind: MessageKind.IMAGE }, select: { id: true } });
-    if (!reference) return res.status(400).json({ error: "صورة المرجع يجب أن تكون صورة واردة من محادثة العميل نفسها" });
-  }
   const { price, ...fields } = parsed.data;
   const order = await prisma.orderDetails.create({ data: { ...fields, ...(price === undefined ? {} : { price: new Prisma.Decimal(price) }), deliveryAt: parsed.data.deliveryAt ? new Date(parsed.data.deliveryAt) : undefined, customerId: conversation.customerId, conversationId: conversation.id } });
   await audit(req.user!.id, "ORDER_CREATED", conversation.id, { orderId: order.id });
@@ -1257,6 +1254,24 @@ app.delete("/api/admin/auto-replies/:id", permissionGuard("canManageCatalog"), a
   await prisma.autoReplyRule.delete({ where: { id: rule.id } });
   await audit(req.user!.id, "AUTO_REPLY_DELETED", undefined, { ruleId: rule.id });
   res.sendStatus(204);
+});
+
+const chatbotSettingsSchema = z.object({
+  enabled: z.boolean(), welcomeText: z.string().trim().min(1).max(1000), invalidChoiceText: z.string().trim().min(1).max(1000),
+  option1Label: z.string().trim().min(1).max(100), option2Label: z.string().trim().min(1).max(100), option3Label: z.string().trim().min(1).max(100), option4Label: z.string().trim().min(1).max(100), option5Label: z.string().trim().min(1).max(100),
+  option1ReplyText: z.string().trim().min(1).max(3000), option2ReplyText: z.string().trim().min(1).max(1000), option3ReplyText: z.string().trim().min(1).max(1000), option4ReplyText: z.string().trim().min(1).max(1000), option5ReplyText: z.string().trim().min(1).max(1000)
+}).strict();
+
+app.get("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), async (_req: express.Request, res: express.Response) => {
+  res.json(await getChatbotSettings());
+});
+app.put("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
+  const parsed = chatbotSettingsSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "تحقق من رسالة الترحيب وخيارات البوت وردوده" });
+  const settings = await saveChatbotSettings(parsed.data);
+  await audit(req.user!.id, "CHATBOT_SETTINGS_UPDATED", undefined, { enabled: settings.enabled });
+  io.to("admins").emit("chatbot:settings-updated");
+  res.json(settings);
 });
 
 app.get("/api/push/config", agentGuard, async (req: AuthedRequest, res: express.Response) => {

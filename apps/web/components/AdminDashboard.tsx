@@ -13,6 +13,7 @@ import InstallAppButton from "./InstallAppButton";
 import TeamManagementModal from "./TeamManagementModal";
 import AdminPasswordResetRequestsModal from "./AdminPasswordResetRequestsModal";
 import IncomingWhatsAppCallModal, { type IncomingCall } from "./IncomingWhatsAppCallModal";
+import ProtectedMedia from "./ProtectedMedia";
 import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
@@ -311,7 +312,7 @@ export default function AdminDashboard() {
       </> : <div className="grid min-h-72 flex-1 place-items-center text-sm text-stone-400">جارٍ تحميل المحادثة...</div>}
     </div></div>}
 
-        {incomingCall && <IncomingWhatsAppCallModal call={incomingCall} onReject={rejectIncomingWhatsAppCall} onOpenConversation={openIncomingCallConversation} onDismiss={() => setIncomingCall(null)} />}
+         {incomingCall && <IncomingWhatsAppCallModal call={incomingCall} onReject={rejectIncomingWhatsAppCall} onOpenConversation={openIncomingCallConversation} onDismiss={() => setIncomingCall(null)} />}
         {showStaff && <TeamManagementModal onClose={() => setShowStaff(false)} onDone={() => { void load(); }} />}
         {showPasswordResetRequests && user?.role === "ADMIN" && <AdminPasswordResetRequestsModal onClose={() => setShowPasswordResetRequests(false)} />}
        {showProducts && <ProductManagementModal onClose={() => setShowProducts(false)} />}
@@ -319,9 +320,10 @@ export default function AdminDashboard() {
        {showCannedResponses && <CannedResponsesModal onClose={() => setShowCannedResponses(false)} />}
       {showKalemly && <KalemlySettingsModal socket={socket} onClose={() => setShowKalemly(false)} />}
       {showMessenger && <MessengerSettingsModal onClose={() => setShowMessenger(false)} />}
-      {showTelegram && <TelegramSettingsModal onClose={() => setShowTelegram(false)} />}
-      {showAccount && user && <AccountSettingsModal user={user} onClose={() => setShowAccount(false)} onSaved={setUser} />}
-  </main>;
+       {showTelegram && <TelegramSettingsModal onClose={() => setShowTelegram(false)} />}
+       {showAccount && user && <AccountSettingsModal user={user} onClose={() => setShowAccount(false)} onSaved={setUser} />}
+      <footer className="mx-auto mt-8 flex w-full max-w-[1500px] flex-wrap items-center justify-between gap-2 px-4 pb-5 text-[10px] text-stone-400 sm:px-7"><span>حلواني بندق © 2026</span><span className="flex items-center gap-3"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">تواصل عبر واتساب</a></span></footer>
+   </main>;
 }
 
 function KalemlySettingsModal({ onClose, socket }: { onClose: () => void; socket: Socket | null }) {
@@ -466,20 +468,8 @@ function timeAgo(value?: string) { if (!value) return "الآن"; const minutes 
 function auditText(action: string) { const map: Record<string, string> = { MESSAGE_SENT: "تم إرسال رد للعميل", MESSAGE_QUEUED: "أُضيف رد WhatsApp لقائمة الإرسال", WHISPER_SENT: "تم إرسال توجيه سري", CONVERSATION_REASSIGNED: "تم تحويل محادثة", CONVERSATION_HANDOFF: "حوّل موظف محادثة لزميل", CONVERSATION_CLOSED: "تم إغلاق محادثة", SLA_BREACHED: "تجاوزت محادثة مهلة الرد", CONVERSATION_OPENED: "تم فتح محادثة للمراجعة", AGENT_CREATED: "تمت إضافة موظف", PRESENCE_CHANGED: "تم تحديث حالة موظف", CSAT_RECEIVED: "تم استلام تقييم خدمة", PRODUCT_SENT: "تم إرسال منتج للعميل", PASSWORD_RESET_REQUESTED: "تم تقديم طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_APPROVED: "تمت الموافقة على طلب إعادة ضبط", PASSWORD_RESET_REJECTED: "تم رفض طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_COMPLETED: "تم تغيير كلمة مرور الحساب" }; return map[action] || action.replaceAll("_", " "); }
 
 function AdminProtectedMedia({ conversationId, message }: { conversationId: string; message: AnyRecord }) {
-  const [url, setUrl] = useState("");
-  useEffect(() => {
-    let objectUrl = "";
-    let current = true;
-    fetch(`${API_URL}/api/conversations/${conversationId}/messages/${message.id}/media`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      .then((response) => response.ok ? response.blob() : Promise.reject())
-      .then((blob) => { objectUrl = URL.createObjectURL(blob); if (current) setUrl(objectUrl); else URL.revokeObjectURL(objectUrl); }).catch(() => {});
-    return () => { current = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [conversationId, message.id]);
-  if (!url) return <span className="mb-2 block text-[10px] text-stone-400">جارٍ تحميل المرفق...</span>;
-  if (message.kind === "IMAGE") return <img src={url} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" />;
-  if (message.kind === "AUDIO") return <audio controls src={url} className="mb-2 max-w-full" />;
-  if (message.kind === "VIDEO") return <video controls src={url} className="mb-2 max-h-56 max-w-full rounded-xl" />;
-  return <a href={url} download className="mb-2 block text-xs font-bold text-blue-700 underline">تنزيل المرفق</a>;
+  const [lightbox, setLightbox] = useState("");
+  return <><ProtectedMedia conversationId={conversationId} message={message} onOpenImage={setLightbox} />{lightbox && <div role="dialog" aria-modal="true" aria-label="معاينة الصورة" onClick={() => setLightbox("")} className="fixed inset-0 z-[80] grid place-items-center bg-black/90 p-4"><button type="button" aria-label="إغلاق معاينة الصورة" onClick={() => setLightbox("")} className="absolute right-4 top-4 grid h-11 w-11 place-items-center rounded-full bg-white/15 text-2xl text-white">×</button><img src={lightbox} alt="معاينة مكبرة" onClick={(event) => event.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-lg object-contain shadow-2xl" /></div>}</>;
 }
 
 function StaffManagementModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
@@ -591,33 +581,26 @@ function ProductManagementModal({ onClose }: { onClose: () => void }) {
 
 function AutoReplyRulesModal({ onClose }: { onClose: () => void }) {
   const [rules, setRules] = useState<AnyRecord[]>([]);
-  const [welcomeText, setWelcomeText] = useState("");
-  const [welcomeActive, setWelcomeActive] = useState(true);
+  const [chatbotSettings, setChatbotSettings] = useState<AnyRecord | null>(null);
   const [form, setForm] = useState({ name: "", keywords: "", responseText: "", routingDepartment: "", priority: "0" });
   const [editingId, setEditingId] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
-  const welcome = rules.find((rule) => rule.isWelcome);
-
   useEffect(() => {
-    api("/api/admin/auto-replies").then((items) => {
-      setRules(items);
-      const greeting = items.find((rule: AnyRecord) => rule.isWelcome);
-      setWelcomeText(greeting?.responseText || "أهلًا بك في حلواني بندق.");
-      setWelcomeActive(greeting?.isActive ?? true);
-    }).catch((error) => setNotice(error.message));
+    api("/api/admin/auto-replies").then(setRules).catch((error) => setNotice(error.message));
+    api("/api/admin/chatbot-settings").then(setChatbotSettings).catch((error) => setNotice(error.message));
   }, []);
 
-  async function saveWelcome() {
+  async function saveChatbotSettings(event: FormEvent) {
+    event.preventDefault();
+    if (!chatbotSettings) return;
     setSaving(true); setNotice("");
     try {
-      const body = { name: "رسالة الترحيب", keywords: [], responseText: welcomeText.trim(), routingDepartment: null, isActive: welcomeActive, isWelcome: true, priority: 100 };
-      const saved = welcome
-        ? await api(`/api/admin/auto-replies/${welcome.id}`, { method: "PATCH", body: JSON.stringify({ responseText: body.responseText, isActive: body.isActive }) })
-        : await api("/api/admin/auto-replies", { method: "POST", body: JSON.stringify(body) });
-      setRules((old) => welcome ? old.map((rule) => rule.id === saved.id ? saved : rule) : [saved, ...old]);
-      setNotice("تم حفظ رسالة الترحيب.");
-    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ رسالة الترحيب"); }
+      const settings = Object.fromEntries(Object.entries(chatbotSettings).filter(([key]) => !["id", "createdAt", "updatedAt"].includes(key)));
+      const saved = await api("/api/admin/chatbot-settings", { method: "PUT", body: JSON.stringify(settings) });
+      setChatbotSettings(saved);
+      setNotice("تم حفظ إعدادات قائمة البوت وردودها.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ إعدادات البوت"); }
     finally { setSaving(false); }
   }
 
@@ -652,9 +635,18 @@ function AutoReplyRulesModal({ onClose }: { onClose: () => void }) {
     setNotice("");
   }
 
+  const chatbotOptions = [1, 2, 3, 4, 5];
   return <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/45 p-3" onClick={onClose}><section className="panel max-h-[94vh] w-full max-w-4xl overflow-y-auto p-5 sm:p-6" onClick={(event) => event.stopPropagation()}>
     <div className="mb-5 flex items-center justify-between"><div><h2 className="text-lg font-extrabold">الردود التلقائية وقواعد التوجيه</h2><p className="text-xs text-stone-400">تُرسل القاعدة عند مطابقة إحدى الكلمات في رسالة العميل.</p></div><button onClick={onClose} className="rounded-lg p-2 text-stone-400"><X size={18} /></button></div>
-    <div className="mb-5 grid gap-3 rounded-2xl border border-amber-100 bg-amber-50/60 p-4 sm:grid-cols-[1fr_auto]"><label className="block text-xs font-bold text-amber-950">رسالة الترحيب وقائمة الاختيار<textarea value={welcomeText} onChange={(event) => setWelcomeText(event.target.value)} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label><div className="flex items-end gap-2"><label className="flex h-10 items-center gap-2 rounded-lg bg-white px-3 text-[10px] font-bold"><input type="checkbox" checked={welcomeActive} onChange={(event) => setWelcomeActive(event.target.checked)} /> مفعّلة</label><button type="button" onClick={() => void saveWelcome()} disabled={saving} className="h-10 rounded-lg bg-amber-700 px-4 text-xs font-bold text-white disabled:opacity-50">حفظ الترحيب</button></div><p className="text-[10px] leading-5 text-amber-900 sm:col-span-2">سيُضاف نص الترحيب قبل خيارات الخدمة الخمسة.</p></div>
+    <form onSubmit={saveChatbotSettings} className="mb-5 space-y-4 rounded-2xl border border-amber-100 bg-amber-50/60 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-extrabold text-amber-950">إعدادات قائمة البوت</h3><p className="mt-1 text-[10px] text-amber-900">يتوقف البوت تلقائيًا بعد تحويل المحادثة إلى موظف.</p></div><label className="flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-xs font-bold"><input type="checkbox" checked={Boolean(chatbotSettings?.enabled)} disabled={!chatbotSettings} onChange={(event) => setChatbotSettings((old) => old ? { ...old, enabled: event.target.checked } : old)} /> تفعيل البوت</label></div>
+      {chatbotSettings ? <>
+        <label className="block text-xs font-bold text-stone-700">رسالة الترحيب<textarea value={chatbotSettings.welcomeText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, welcomeText: event.target.value })} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label>
+        <label className="block text-xs font-bold text-stone-700">رسالة الاختيار غير الصحيح<textarea value={chatbotSettings.invalidChoiceText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, invalidChoiceText: event.target.value })} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label>
+        <div className="grid gap-3 md:grid-cols-2">{chatbotOptions.map((number) => <fieldset key={number} className="space-y-2 rounded-xl border border-amber-100 bg-white p-3"><legend className="px-1 text-[10px] font-extrabold text-amber-900">الخيار {number}</legend><label className="block text-[10px] font-bold text-stone-600">اسم الخيار<input value={chatbotSettings[`option${number}Label`]} onChange={(event) => setChatbotSettings({ ...chatbotSettings, [`option${number}Label`]: event.target.value })} maxLength={100} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal" /></label><label className="block text-[10px] font-bold text-stone-600">{number === 1 ? "معلومات الفروع وأوقات العمل" : "رسالة التحويل للموظف"}<textarea value={chatbotSettings[`option${number}ReplyText`]} onChange={(event) => setChatbotSettings({ ...chatbotSettings, [`option${number}ReplyText`]: event.target.value })} maxLength={number === 1 ? 3000 : 1000} rows={2} className="mt-1 w-full rounded-lg border border-stone-200 px-2 py-2 text-xs font-normal leading-5" /></label></fieldset>)}</div>
+      </> : <p className="text-xs text-stone-500">جارٍ تحميل إعدادات البوت...</p>}
+      <div className="flex justify-end"><button disabled={saving || !chatbotSettings} className="rounded-lg bg-amber-800 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{saving ? "جارٍ الحفظ..." : "حفظ إعدادات البوت"}</button></div>
+    </form>
     <div className="grid gap-5 lg:grid-cols-[.85fr_1.15fr]">
       <form onSubmit={saveRule} className="space-y-3 rounded-2xl bg-stone-50 p-4"><h3 className="text-sm font-extrabold">{editingId ? "تعديل القاعدة" : "قاعدة جديدة"}</h3><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="اسم القاعدة" className="h-10 w-full rounded-lg border border-stone-200 px-3 text-xs" /><input required value={form.keywords} onChange={(event) => setForm({ ...form, keywords: event.target.value })} placeholder="كلمات مفتاحية مفصولة بفاصلة" className="h-10 w-full rounded-lg border border-stone-200 px-3 text-xs" /><textarea required value={form.responseText} onChange={(event) => setForm({ ...form, responseText: event.target.value })} placeholder="الرد الذي سيرسله النظام" rows={4} className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs" /><select value={form.routingDepartment} onChange={(event) => setForm({ ...form, routingDepartment: event.target.value })} className="h-10 w-full rounded-lg border border-stone-200 bg-white px-3 text-xs"><option value="">من دون تحويل تلقائي</option><option value="DELIVERY">طلبات التوصيل</option><option value="CAKES">مبيعات التورتات</option><option value="CUSTOMER_CARE">خدمة العملاء</option><option value="QUALITY">الجودة والشكاوى</option></select><label className="block text-[10px] font-bold text-stone-500">الأولوية<input type="number" min="0" max="100" value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal" /></label><button disabled={saving} className="h-10 w-full rounded-lg bg-[#d32f2f] text-xs font-bold text-white disabled:opacity-50">{saving ? "جارٍ الحفظ..." : editingId ? "حفظ التعديل" : "إضافة القاعدة"}</button>{editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ name: "", keywords: "", responseText: "", routingDepartment: "", priority: "0" }); }} className="h-9 w-full rounded-lg bg-white text-xs font-bold text-stone-500">إلغاء التعديل</button>}</form>
       <div className="space-y-2"><h3 className="text-sm font-extrabold">القواعد ({rules.filter((rule) => !rule.isWelcome).length})</h3><div className="max-h-[530px] space-y-2 overflow-y-auto">{rules.filter((rule) => !rule.isWelcome).map((rule) => <article key={rule.id} className="rounded-xl border border-stone-100 p-3"><div className="flex items-center gap-2"><b className="min-w-0 flex-1 truncate text-xs">{rule.name}</b><button type="button" onClick={() => editRule(rule)} className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-[10px] font-bold text-amber-800">تعديل</button><button type="button" onClick={() => void toggleRule(rule)} className="rounded-lg bg-stone-100 px-2.5 py-1.5 text-[10px] font-bold text-stone-600">{rule.isActive ? "إيقاف" : "تفعيل"}</button><button type="button" onClick={() => void deleteRule(rule)} className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[10px] font-bold text-red-600">حذف</button></div><p className="mt-1 text-[10px] text-stone-400">عند ورود: {(rule.keywords || []).join("، ") || "—"} · {rule.routingDepartment || "دون تحويل"} · {rule.isActive ? "مفعّلة" : "متوقفة"}</p><p className="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-stone-700">{rule.responseText}</p></article>)}{!rules.some((rule) => !rule.isWelcome) && <p className="rounded-xl bg-stone-50 p-6 text-center text-xs text-stone-400">لا توجد قواعد إضافية بعد.</p>}</div></div>

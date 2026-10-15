@@ -53,6 +53,11 @@ enum ConversationStatus {
   CLOSED
 }
 
+enum ConversationBotState {
+  BOT_MENU
+  ASSIGNED_TO_AGENT
+}
+
 enum ProductCategory {
   EASTERN
   WESTERN
@@ -219,6 +224,7 @@ model Conversation {
   slaBreachedAt          DateTime?
   lastInboundAt          DateTime?
   awaitingRouting        Boolean                @default(false)
+  botState               ConversationBotState   @default(ASSIGNED_TO_AGENT)
   routingDepartment      Department?
   serviceTag             String?
   branchId               String?
@@ -524,4 +530,22 @@ model AutoReplyRule {
   updatedAt         DateTime    @updatedAt
 
   @@index([isActive, priority])
+}
+
+model ChatbotSettings {
+  id                String   @id @default("default")
+  enabled           Boolean  @default(true)
+  welcomeText       String   @default("أهلاً بك في حلواني بندق.") @db.Text
+  invalidChoiceText String   @default("عذرًا، يرجى إرسال رقم الاختيار المطلوب فقط (من 1 إلى 5) لنتمكن من توجيهك للقسم الصحيح.") @db.Text
+  option1Label      String   @default("الفروع ومواعيد العمل")
+  option2Label      String   @default("خدمة العملاء")
+  option3Label      String   @default("طلبات الجملة")
+  option4Label      String   @default("الشكاوى والاقتراحات")
+  option5Label      String   @default("غير ذلك")
+  option1ReplyText  String   @default("لم تُضف بيانات الفروع ومواعيد العمل بعد.") @db.Text
+  option2ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
+  option3ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل طلبات الجملة المختص.") @db.Text
+  option4ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل الشكاوى والاقتراحات المختص.") @db.Text
+  option5ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
+  updatedAt         DateTime @updatedAt
 }
