@@ -10,6 +10,8 @@ import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, type BotS
 import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
 import { detectImageContentType, publicMediaUrl, safeFileName } from "./mediaStorage";
+import { isWithinBusinessHours } from "./businessHours";
+import { startOfCairoDay } from "./cairoTime";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
   return withInboundConversationLock(inbound.channel, inbound.externalConversationId, () => ingestMessageLocked(inbound));
@@ -117,6 +119,12 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const isRatingReply = Boolean(pendingSurvey && pendingSurvey.rating === null && customerRating);
   const isTerminal = conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED;
   const chatbotSettings = await getChatbotSettings();
+  const outsideBusinessHours = chatbotSettings.businessHoursEnabled && !isWithinBusinessHours(chatbotSettings, message.createdAt);
+  const priorOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled ? await prisma.message.findFirst({ where: {
+    conversationId: conversation.id, direction: MessageDirection.OUTBOUND, createdAt: { gte: startOfCairoDay(message.createdAt) },
+    metadata: { path: ["automation"], equals: "off-hours-reply" }
+  }, select: { id: true } }) : null;
+  const shouldSendOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled && !priorOffHoursReply;
   const starting = !isRatingReply && (isNewConversation || isTerminal);
   const currentBotState: BotState = conversation.awaitingRouting ? "BOT_MENU" : conversation.botState;
   const decision = decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
@@ -181,7 +189,16 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     if (conversation.assignedAgentId) io?.to(`agent:${conversation.assignedAgentId}`).emit("message:new", { conversationId: conversation.id, message: reply });
   }
 
-  if (decision.action === "MENU") {
+  if (outsideBusinessHours) {
+    if (shouldSendOffHoursReply) {
+      try { await sendBotReply(chatbotSettings.offHoursReplyText, "off-hours-reply"); }
+      catch (error) { console.error("Out-of-hours reply failed", error); }
+    }
+    if (!conversation.assignedAgentId) {
+      conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false, botState: ConversationBotState.ASSIGNED_TO_AGENT, status: ConversationStatus.QUEUED } });
+      conversation = await assignConversation(conversation.id, routeDepartment);
+    }
+  } else if (decision.action === "MENU") {
     try {
       const menuText = buildRoutingMenuText(chatbotSettings);
       const labels = [chatbotSettings.option1Label, chatbotSettings.option2Label, chatbotSettings.option3Label, chatbotSettings.option4Label, chatbotSettings.option5Label];

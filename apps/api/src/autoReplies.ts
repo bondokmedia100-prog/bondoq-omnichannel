@@ -19,6 +19,12 @@ export type ChatbotSettings = {
   option3ReplyText: string;
   option4ReplyText: string;
   option5ReplyText: string;
+  businessHoursEnabled: boolean;
+  businessDays: string[];
+  businessStart: string;
+  businessEnd: string;
+  offHoursReplyEnabled: boolean;
+  offHoursReplyText: string;
 };
 
 export const DEFAULT_CHATBOT_SETTINGS: ChatbotSettings = {
@@ -34,7 +40,13 @@ export const DEFAULT_CHATBOT_SETTINGS: ChatbotSettings = {
   option2ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
   option3ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
   option4ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
-  option5ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص."
+  option5ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
+  businessHoursEnabled: false,
+  businessDays: ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY"],
+  businessStart: "09:00",
+  businessEnd: "17:00",
+  offHoursReplyEnabled: true,
+  offHoursReplyText: "شكرًا لتواصلك معنا. أوقات العمل انتهت، وسنعاود الرد عليك في أقرب وقت عمل."
 };
 
 export const AUTO_REPLY_MENU_TEXT = buildRoutingMenuText(DEFAULT_CHATBOT_SETTINGS);

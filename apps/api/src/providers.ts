@@ -76,7 +76,7 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
 export async function editProviderMessage(input: { channel: Channel; recipient: string; externalId: string; text: string; direction: "INBOUND" | "OUTBOUND" }) {
   if (input.direction !== "OUTBOUND") throw new Error("يمكن تعديل الرسائل التي أرسلها الفريق فقط");
   if (input.channel === Channel.WHATSAPP) return editBaileysWhatsAppMessage({ recipient: input.recipient, externalId: input.externalId, text: input.text });
-  if (input.channel !== Channel.TELEGRAM) throw new Error("تعديل الرسائل غير مدعوم في Messenger");
+  if (input.channel !== Channel.TELEGRAM) throw new Error("لا يتيح Messenger تعديل الرسالة بعد إرسالها؛ لم نرسل بديلًا حتى لا نفقد الرسالة الأصلية.");
   const settings = await getTelegramSettings();
   if (!settings.botToken) throw new Error("Telegram bot token is not configured");
   const messageId = input.externalId.split(":").at(-1);

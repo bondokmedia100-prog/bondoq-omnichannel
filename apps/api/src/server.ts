@@ -3,7 +3,7 @@ import http from "node:http";
 import cors from "cors";
 import express from "express";
 import bcrypt from "bcryptjs";
-import { Worker } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { z } from "zod";
 import { Channel, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
@@ -24,6 +24,7 @@ import { customerProfileSchema } from "./customerProfile";
 import { sendPasswordResetApprovalEmail, sendPasswordResetEmail } from "./email";
 import { createPasswordResetToken, hashPasswordResetToken } from "./passwordResetToken";
 import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
+import { processCallRecordingAi } from "./callRecordingAi";
 import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
 
 const app = express();
@@ -32,6 +33,7 @@ initRealtime(server);
 app.use(cors({ origin: config.webOrigin, credentials: true }));
 app.use(express.json({ limit: "15mb", verify: (req: any, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 const redis = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
+const callRecordingAiQueue = new Queue("call-recording-ai", { connection: redis });
 
 async function reservePasswordResetEmail() {
   const bucket = Math.floor(Date.now() / (60 * 60 * 1000));
@@ -43,6 +45,9 @@ async function reservePasswordResetEmail() {
 
 const audit = (actorId: string | null, action: string, conversationId?: string, details: Prisma.InputJsonValue = {}) =>
   prisma.auditLog.create({ data: { actorId, action, conversationId, details } });
+async function getCallRecordingSettings() {
+  return prisma.callRecordingSettings.upsert({ where: { id: "default" }, create: { id: "default" }, update: {} });
+}
 const MESSENGER_WINDOW_MS = 24 * 60 * 60 * 1000;
 const terminalStatuses: ConversationStatus[] = [ConversationStatus.CLOSED, ConversationStatus.RESOLVED];
 const httpsUrl = z.string().url().refine((value) => value.startsWith("https://"), "استخدم رابط HTTPS آمنًا");
@@ -448,10 +453,13 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
 app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
   const conversation = await prisma.conversation.findUnique({
     where: { id: req.params.id },
-    include: { messages: { select: { mediaAssetId: true } } }
+    include: { messages: { select: { mediaAssetId: true } }, whatsappCallSessions: { select: { recording: { select: { mediaAssetId: true } } } } }
   });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
-  const assetIds = [...new Set(conversation.messages.map((message) => message.mediaAssetId).filter((id): id is string => Boolean(id)))];
+  const assetIds = [...new Set([
+    ...conversation.messages.map((message) => message.mediaAssetId),
+    ...conversation.whatsappCallSessions.map((session) => session.recording?.mediaAssetId)
+  ].filter((id): id is string => Boolean(id)))];
   await prisma.$transaction(async (tx) => {
     await tx.auditLog.create({ data: { actorId: req.user!.id, conversationId: conversation.id, action: "CONVERSATION_PERMANENTLY_DELETED", details: { deletedConversationId: conversation.id, customerId: conversation.customerId, channel: conversation.channel } } });
     await tx.conversation.delete({ where: { id: conversation.id } });
@@ -500,6 +508,50 @@ app.patch("/api/conversations/:id/customer", agentGuard, async (req: AuthedReque
   io.to(`conversation:${conversation.id}`).emit("customer:updated", payload);
   io.to("admins").emit("customer:updated", payload);
   res.json(customer);
+});
+
+app.get("/api/contacts", agentGuard, async (req: express.Request, res: express.Response) => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
+  const contacts = await prisma.customer.findMany({
+    where: q ? { OR: [
+      { displayName: { contains: q, mode: "insensitive" } }, { name: { contains: q, mode: "insensitive" } },
+      { phone: { contains: q } }, { email: { contains: q, mode: "insensitive" } }
+    ] } : {},
+    select: { id: true, name: true, displayName: true, phone: true, email: true, avatarUrl: true },
+    orderBy: [{ displayName: "asc" }, { name: "asc" }], take: 100
+  });
+  res.json(contacts);
+});
+
+app.post("/api/contacts/:id/whatsapp-conversation", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const customer = await prisma.customer.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, displayName: true, phone: true } });
+  if (!customer) return res.status(404).json({ error: "جهة الاتصال غير موجودة" });
+  const phone = customer.phone?.replace(/[^0-9]/g, "") || "";
+  if (phone.length < 8 || phone.length > 15) return res.status(409).json({ error: "أضف رقم واتساب دوليًا صالحًا لجهة الاتصال أولًا" });
+  const existing = await prisma.conversation.findFirst({
+    where: { channel: Channel.WHATSAPP, OR: [{ customerId: customer.id }, { externalCustomerId: phone }] },
+    orderBy: { lastMessageAt: "desc" }, select: { id: true, assignedAgentId: true, branchId: true }
+  });
+  if (existing) {
+    if (!canWorkOnConversation(req.user!, existing)) return res.status(403).json({ error: "المحادثة الحالية ليست ضمن صلاحياتك" });
+    return res.json({ conversationId: existing.id, created: false });
+  }
+  const externalConversationId = await getWhatsAppMode() === "BAILEYS" ? `${phone}@s.whatsapp.net` : phone;
+  try {
+    const conversation = await prisma.conversation.create({ data: {
+      customerId: customer.id, channel: Channel.WHATSAPP, externalConversationId, externalCustomerId: phone,
+      assignedAgentId: req.user!.id, status: ConversationStatus.OPEN, awaitingRouting: false
+    } });
+    await audit(req.user!.id, "WHATSAPP_CONVERSATION_STARTED_FROM_CONTACT", conversation.id, { customerId: customer.id });
+    io.to(`agent:${req.user!.id}`).emit("conversation:updated", conversation);
+    io.to("admins").emit("conversation:updated", conversation);
+    return res.status(201).json({ conversationId: conversation.id, created: true });
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    const conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: Channel.WHATSAPP, externalConversationId } }, select: { id: true, assignedAgentId: true, branchId: true } });
+    if (!conversation || !canWorkOnConversation(req.user!, conversation)) return res.status(409).json({ error: "توجد محادثة واتساب لهذا الرقم لكنها ليست ضمن صلاحياتك" });
+    return res.json({ conversationId: conversation.id, created: false });
+  }
 });
 
 app.get("/api/customers", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -575,10 +627,13 @@ app.patch("/api/customers/:id/flags", agentGuard, async (req: AuthedRequest, res
 app.delete("/api/customers/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
   const customer = await prisma.customer.findUnique({
     where: { id: req.params.id },
-    include: { conversations: { select: { id: true, assignedAgentId: true, messages: { select: { mediaAssetId: true } } } } }
+    include: { conversations: { select: { id: true, assignedAgentId: true, messages: { select: { mediaAssetId: true } }, whatsappCallSessions: { select: { recording: { select: { mediaAssetId: true } } } } } } }
   });
   if (!customer) return res.status(404).json({ error: "العميل غير موجود" });
-  const assetIds = [...new Set(customer.conversations.flatMap((conversation) => conversation.messages.map((message) => message.mediaAssetId).filter((id): id is string => Boolean(id))))];
+  const assetIds = [...new Set(customer.conversations.flatMap((conversation) => [
+    ...conversation.messages.map((message) => message.mediaAssetId),
+    ...conversation.whatsappCallSessions.map((session) => session.recording?.mediaAssetId)
+  ]).filter((id): id is string => Boolean(id)))];
   await prisma.$transaction(async (tx) => {
     await tx.auditLog.create({ data: { actorId: req.user!.id, action: "CUSTOMER_PERMANENTLY_DELETED", details: { customerId: customer.id, conversationCount: customer.conversations.length } } });
     await tx.customer.delete({ where: { id: customer.id } });
@@ -858,7 +913,8 @@ app.patch("/api/conversations/:id/messages/:messageId", agentGuard, async (req: 
   if (message.conversation.customer.isBlocked) return res.status(409).json({ error: "لا يمكن تعديل رسائل عميل محظور داخل النظام" });
   if (message.direction !== MessageDirection.OUTBOUND || message.authorId !== req.user!.id || message.kind !== MessageKind.TEXT) return res.status(409).json({ error: "يمكن تعديل الرسائل النصية التي أرسلتها أنت فقط" });
   if (message.deliveryStatus !== "SENT" || !message.externalId) return res.status(409).json({ error: "لا يمكن تعديل رسالة لم يؤكد مزود القناة إرسالها" });
-  if (message.conversation.channel === Channel.MESSENGER || message.conversation.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "تعديل الرسائل غير متاح في وضع القناة الحالي" });
+  if (message.conversation.channel === Channel.MESSENGER) return res.status(409).json({ error: "لا يتيح Messenger تعديل الرسالة بعد إرسالها؛ لم نرسل بديلًا حتى لا نفقد الرسالة الأصلية." });
+  if (message.conversation.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "تعديل الرسائل غير متاح في وضع WhatsApp API الحالي" });
   try {
     await editProviderMessage({ channel: message.conversation.channel, recipient: channelRecipient(message.conversation.channel, message.conversation.externalConversationId, message.conversation.externalCustomerId), externalId: message.externalId, text: parsed.data.text, direction: "OUTBOUND" });
     const previous = message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata) ? message.metadata as Record<string, Prisma.JsonValue> : {};
@@ -1015,16 +1071,18 @@ app.get("/api/admin/products", permissionGuard("canManageCatalog"), async (_req:
   res.json(products.map((product) => product.imageAssetId ? { ...product, imageUrl: publicMediaUrl(product.imageAssetId, 0) } : product));
 });
 app.post("/api/admin/products", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ name: z.string().min(2).max(120), category: z.nativeEnum(ProductCategory), price: z.number().nonnegative(), imageUrl: httpsUrl.nullable().optional(), imageAssetId: z.string().nullable().optional(), description: z.string().max(800).nullable().optional(), isAvailable: z.boolean().default(true) }).safeParse(req.body);
+  const parsed = z.object({ name: z.string().min(2).max(120), sku: z.preprocess((value) => typeof value === "string" && !value.trim() ? null : value, z.string().trim().max(80).nullable().optional()), category: z.nativeEnum(ProductCategory), price: z.number().nonnegative(), imageUrl: httpsUrl.nullable().optional(), imageAssetId: z.string().nullable().optional(), description: z.string().max(800).nullable().optional(), isAvailable: z.boolean().default(true) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "راجع اسم المنتج وقسمه وسعره ورابط صورته" });
   const asset = parsed.data.imageAssetId ? await prisma.mediaAsset.findFirst({ where: { id: parsed.data.imageAssetId, contentType: { startsWith: "image/" } }, select: { id: true } }) : null;
   if (parsed.data.imageAssetId && !asset) return res.status(400).json({ error: "صورة المنتج غير موجودة أو ليست صورة" });
-  const product = await prisma.product.create({ data: { ...parsed.data, imageUrl: asset ? publicMediaUrl(asset.id, 0) : parsed.data.imageUrl, imageAssetId: asset?.id, price: new Prisma.Decimal(parsed.data.price) } });
+  let product;
+  try { product = await prisma.product.create({ data: { ...parsed.data, imageUrl: asset ? publicMediaUrl(asset.id, 0) : parsed.data.imageUrl, imageAssetId: asset?.id, price: new Prisma.Decimal(parsed.data.price) } }); }
+  catch (error) { if (isUniqueConstraintError(error)) return res.status(409).json({ error: "كود المنتج مستخدم بالفعل" }); throw error; }
   await audit(req.user!.id, "PRODUCT_CREATED", undefined, { productId: product.id });
   res.status(201).json(product);
 });
 app.patch("/api/admin/products/:id", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ name: z.string().min(2).max(120).optional(), category: z.nativeEnum(ProductCategory).optional(), price: z.number().nonnegative().optional(), imageUrl: httpsUrl.nullable().optional(), imageAssetId: z.string().nullable().optional(), description: z.string().max(800).nullable().optional(), isAvailable: z.boolean().optional() }).safeParse(req.body);
+  const parsed = z.object({ name: z.string().min(2).max(120).optional(), sku: z.preprocess((value) => typeof value === "string" && !value.trim() ? null : value, z.string().trim().max(80).nullable().optional()), category: z.nativeEnum(ProductCategory).optional(), price: z.number().nonnegative().optional(), imageUrl: httpsUrl.nullable().optional(), imageAssetId: z.string().nullable().optional(), description: z.string().max(800).nullable().optional(), isAvailable: z.boolean().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات المنتج غير صالحة" });
   const { price, imageAssetId, ...fields } = parsed.data;
   const asset = imageAssetId ? await prisma.mediaAsset.findFirst({ where: { id: imageAssetId, contentType: { startsWith: "image/" } }, select: { id: true } }) : null;
@@ -1032,7 +1090,9 @@ app.patch("/api/admin/products/:id", permissionGuard("canManageCatalog"), async 
   const imageFields = imageAssetId !== undefined
     ? { imageAssetId: asset?.id || null, ...(asset ? { imageUrl: publicMediaUrl(asset.id, 0) } : {}) }
     : fields.imageUrl !== undefined ? { imageAssetId: null } : {};
-  const product = await prisma.product.update({ where: { id: req.params.id }, data: { ...fields, ...imageFields, ...(price === undefined ? {} : { price: new Prisma.Decimal(price) }) } });
+  let product;
+  try { product = await prisma.product.update({ where: { id: req.params.id }, data: { ...fields, ...imageFields, ...(price === undefined ? {} : { price: new Prisma.Decimal(price) }) } }); }
+  catch (error) { if (isUniqueConstraintError(error)) return res.status(409).json({ error: "كود المنتج مستخدم بالفعل" }); throw error; }
   await audit(req.user!.id, "PRODUCT_UPDATED", undefined, { productId: product.id });
   res.json(product);
 });
@@ -1213,13 +1273,16 @@ app.delete("/api/conversations/:id/messages/:messageId/reaction", agentGuard, as
 });
 
 app.post("/api/conversations/:id/orders", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ product: z.string().optional(), size: z.string().optional(), filling: z.string().optional(), cakeMessage: z.string().optional(), deliveryAt: z.string().datetime().optional(), deliveryAddress: z.string().optional(), notes: z.string().optional(), price: z.number().nonnegative().optional() }).safeParse(req.body);
+  const parsed = z.object({ product: z.string().optional(), size: z.string().optional(), filling: z.string().optional(), cakeMessage: z.string().optional(), deliveryAt: z.string().datetime().optional(), deliveryAddress: z.string().optional(), notes: z.string().optional(), price: z.number().nonnegative().optional(), deposit: z.number().nonnegative().default(0) }).superRefine((value, context) => {
+    if (value.deposit > 0 && value.price === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: ["price"], message: "أدخل إجمالي السعر قبل العربون" });
+    if (value.price !== undefined && value.deposit > value.price) context.addIssue({ code: z.ZodIssueCode.custom, path: ["deposit"], message: "العربون لا يمكن أن يتجاوز إجمالي السعر" });
+  }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "تفاصيل الطلب غير صالحة" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية لهذا الطلب" });
-  const { price, ...fields } = parsed.data;
-  const order = await prisma.orderDetails.create({ data: { ...fields, ...(price === undefined ? {} : { price: new Prisma.Decimal(price) }), deliveryAt: parsed.data.deliveryAt ? new Date(parsed.data.deliveryAt) : undefined, customerId: conversation.customerId, conversationId: conversation.id } });
+  const { price, deposit, ...fields } = parsed.data;
+  const order = await prisma.orderDetails.create({ data: { ...fields, ...(price === undefined ? {} : { price: new Prisma.Decimal(price) }), deposit: new Prisma.Decimal(deposit), deliveryAt: parsed.data.deliveryAt ? new Date(parsed.data.deliveryAt) : undefined, customerId: conversation.customerId, conversationId: conversation.id } });
   await audit(req.user!.id, "ORDER_CREATED", conversation.id, { orderId: order.id });
   res.status(201).json(order);
 });
@@ -1316,6 +1379,44 @@ app.delete("/api/admin/canned-responses/:id", permissionGuard("canManageCatalog"
   res.sendStatus(204);
 });
 
+app.get("/api/agent/quick-replies", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  res.json(await prisma.agentQuickReply.findMany({ where: { userId: req.user!.id }, orderBy: { title: "asc" } }));
+});
+app.post("/api/agent/quick-replies", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ shortcut: z.string().trim().min(2).max(40).regex(/^\/[\p{L}\p{N}_-]+$/u), title: z.string().trim().min(2).max(80), content: z.string().trim().min(1).max(2000) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "راجع الاختصار والعنوان ونص الرد السريع" });
+  try {
+    const reply = await prisma.agentQuickReply.create({ data: { ...parsed.data, userId: req.user!.id } });
+    await audit(req.user!.id, "AGENT_QUICK_REPLY_CREATED", undefined, { replyId: reply.id });
+    io.to(`user:${req.user!.id}`).emit("agent:quick-replies-updated");
+    res.status(201).json(reply);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "الاختصار مستخدم في ردودك الشخصية بالفعل" });
+    throw error;
+  }
+});
+app.patch("/api/agent/quick-replies/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ shortcut: z.string().trim().min(2).max(40).regex(/^\/[\p{L}\p{N}_-]+$/u).optional(), title: z.string().trim().min(2).max(80).optional(), content: z.string().trim().min(1).max(2000).optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "بيانات الرد السريع غير صالحة" });
+  try {
+    const reply = await prisma.agentQuickReply.update({ where: { id: req.params.id, userId: req.user!.id }, data: parsed.data });
+    await audit(req.user!.id, "AGENT_QUICK_REPLY_UPDATED", undefined, { replyId: reply.id });
+    io.to(`user:${req.user!.id}`).emit("agent:quick-replies-updated");
+    res.json(reply);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "الاختصار مستخدم في ردودك الشخصية بالفعل" });
+    if ((error as { code?: string }).code === "P2025") return res.status(404).json({ error: "الرد الشخصي غير موجود" });
+    throw error;
+  }
+});
+app.delete("/api/agent/quick-replies/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const result = await prisma.agentQuickReply.deleteMany({ where: { id: req.params.id, userId: req.user!.id } });
+  if (!result.count) return res.status(404).json({ error: "الرد الشخصي غير موجود" });
+  await audit(req.user!.id, "AGENT_QUICK_REPLY_DELETED", undefined, { replyId: req.params.id });
+  io.to(`user:${req.user!.id}`).emit("agent:quick-replies-updated");
+  res.sendStatus(204);
+});
+
 app.get("/api/admin/auto-replies", permissionGuard("canManageCatalog"), async (_req: express.Request, res: express.Response) => res.json(await prisma.autoReplyRule.findMany({ orderBy: [{ isWelcome: "desc" }, { priority: "desc" }, { createdAt: "asc" }] })));
 app.post("/api/admin/auto-replies", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ name: z.string().trim().min(2).max(80), keywords: z.array(z.string().trim().min(1).max(80)).max(20), responseText: z.string().trim().min(1).max(2000), routingDepartment: z.nativeEnum(Department).nullable().optional(), isActive: z.boolean().default(true), isWelcome: z.boolean().default(false), priority: z.number().int().min(0).max(100).default(0) }).safeParse(req.body);
@@ -1343,8 +1444,11 @@ app.delete("/api/admin/auto-replies/:id", permissionGuard("canManageCatalog"), a
 const chatbotSettingsSchema = z.object({
   enabled: z.boolean(), welcomeText: z.string().trim().min(1).max(1000), invalidChoiceText: z.string().trim().min(1).max(1000),
   option1Label: z.string().trim().min(1).max(100), option2Label: z.string().trim().min(1).max(100), option3Label: z.string().trim().min(1).max(100), option4Label: z.string().trim().min(1).max(100), option5Label: z.string().trim().min(1).max(100),
-  option1ReplyText: z.string().trim().min(1).max(3000), option2ReplyText: z.string().trim().min(1).max(1000), option3ReplyText: z.string().trim().min(1).max(1000), option4ReplyText: z.string().trim().min(1).max(1000), option5ReplyText: z.string().trim().min(1).max(1000)
-}).strict();
+  option1ReplyText: z.string().trim().min(1).max(3000), option2ReplyText: z.string().trim().min(1).max(1000), option3ReplyText: z.string().trim().min(1).max(1000), option4ReplyText: z.string().trim().min(1).max(1000), option5ReplyText: z.string().trim().min(1).max(1000),
+  businessHoursEnabled: z.boolean(), businessDays: z.array(z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"])).min(1).max(7),
+  businessStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), businessEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  offHoursReplyEnabled: z.boolean(), offHoursReplyText: z.string().trim().min(1).max(1000)
+}).strict().refine((settings) => new Set(settings.businessDays).size === settings.businessDays.length, { message: "اختر كل يوم مرة واحدة فقط", path: ["businessDays"] });
 
 app.get("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), async (_req: express.Request, res: express.Response) => {
   res.json(await getChatbotSettings());
@@ -1356,6 +1460,58 @@ app.put("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), asyn
   await audit(req.user!.id, "CHATBOT_SETTINGS_UPDATED", undefined, { enabled: settings.enabled });
   io.to("admins").emit("chatbot:settings-updated");
   res.json(settings);
+});
+
+const callRecordingSettingsSchema = z.object({ enabled: z.boolean(), aiProcessingEnabled: z.boolean() }).strict()
+  .refine((settings) => !settings.aiProcessingEnabled || settings.enabled, { message: "فعّل تسجيل المكالمات قبل تفعيل معالجتها آليًا" });
+app.get("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (_req, res) => {
+  const settings = await getCallRecordingSettings();
+  res.json({ ...settings, aiProcessingEnabled: settings.enabled && settings.aiProcessingEnabled && Boolean(config.openaiApiKey), aiProcessingAvailable: Boolean(config.openaiApiKey) });
+});
+app.put("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (req: AuthedRequest, res) => {
+  const parsed = callRecordingSettingsSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "إعداد التسجيل غير صالح" });
+  if (parsed.data.aiProcessingEnabled && !config.openaiApiKey) return res.status(503).json({ error: "اضبط OPENAI_API_KEY على الخادم قبل تفعيل المعالجة الآلية" });
+  const settings = await prisma.callRecordingSettings.upsert({ where: { id: "default" }, create: { id: "default", ...parsed.data }, update: parsed.data });
+  await audit(req.user!.id, "CALL_RECORDING_SETTINGS_UPDATED", undefined, { enabled: settings.enabled, aiProcessingEnabled: settings.aiProcessingEnabled });
+  res.json(settings);
+});
+
+app.get("/api/admin/call-recordings", permissionGuard("canViewReports"), async (req, res) => {
+  const take = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  const sessions = await prisma.whatsAppCallSession.findMany({
+    orderBy: { createdAt: "desc" }, take,
+    select: {
+      id: true, direction: true, status: true, recordingConsentAt: true, aiProcessingConsentAt: true, createdAt: true, endedAt: true,
+      conversation: { select: { id: true, customer: { select: { name: true } } } },
+      agent: { select: { name: true } },
+      recording: { select: { id: true, durationSeconds: true, transcript: true, summary: true, aiProcessingStatus: true, aiProcessingError: true, aiProcessedAt: true, reviewedAt: true, createdAt: true } }
+    }
+  });
+  res.json(sessions);
+});
+
+app.patch("/api/admin/call-recordings/:id", permissionGuard("canViewReports"), async (req: AuthedRequest, res) => {
+  const parsed = z.object({ transcript: z.string().trim().max(30_000).nullable(), summary: z.string().trim().max(5_000).nullable() }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "تحقق من نص التفريغ وملخص المكالمة" });
+  const recording = await prisma.callRecording.findUnique({ where: { id: req.params.id }, select: { id: true, session: { select: { conversationId: true } } } });
+  if (!recording) return res.status(404).json({ error: "التسجيل غير موجود" });
+  const saved = await prisma.callRecording.update({ where: { id: recording.id }, data: { ...parsed.data, reviewedById: req.user!.id, reviewedAt: new Date() } });
+  await audit(req.user!.id, "CALL_RECORDING_REVIEWED", recording.session.conversationId, { recordingId: recording.id });
+  res.json({ id: saved.id, durationSeconds: saved.durationSeconds, transcript: saved.transcript, summary: saved.summary, aiProcessingStatus: saved.aiProcessingStatus, aiProcessingError: saved.aiProcessingError, aiProcessedAt: saved.aiProcessedAt, reviewedAt: saved.reviewedAt });
+});
+
+app.get("/api/admin/call-recordings/:id/audio", permissionGuard("canViewReports"), async (req: AuthedRequest, res) => {
+  const recording = await prisma.callRecording.findUnique({ where: { id: req.params.id }, include: { mediaAsset: true, session: { select: { conversationId: true } } } });
+  if (!recording) return res.status(404).json({ error: "التسجيل الصوتي غير موجود" });
+  await audit(req.user!.id, "CALL_RECORDING_LISTENED", recording.session.conversationId, { recordingId: recording.id });
+  res.set({
+    "Content-Type": recording.mediaAsset.contentType,
+    "Content-Length": String(recording.mediaAsset.size),
+    "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(recording.mediaAsset.fileName)}`,
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff"
+  }).send(Buffer.from(recording.mediaAsset.data));
 });
 
 app.get("/api/push/config", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -1436,7 +1592,11 @@ app.get("/api/conversations/:id/whatsapp-call/permission", agentGuard, async (re
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
   if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
   try {
-    res.json(await getCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId));
+    const [permission, recordingSettings] = await Promise.all([
+      getCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId),
+      getCallRecordingSettings()
+    ]);
+    res.json({ ...permission, recordingEnabled: recordingSettings.enabled, aiProcessingEnabled: recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey) });
   } catch (error) {
     res.status(error instanceof WhatsAppCloudApiError ? error.status || 502 : 503).json({ error: error instanceof Error ? error.message : "تعذر فحص صلاحية الاتصال" });
   }
@@ -1461,31 +1621,74 @@ app.post("/api/conversations/:id/whatsapp-call/permission-request", agentGuard, 
 });
 
 app.post("/api/conversations/:id/whatsapp-call", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ offerSdp: z.string().min(100).max(100_000) }).strict().safeParse(req.body);
+  const parsed = z.object({ offerSdp: z.string().min(100).max(100_000), recordingConsent: z.boolean(), aiProcessingConsent: z.boolean() }).strict().safeParse(req.body);
   if (!parsed.success || !parsed.data.offerSdp.includes("m=audio")) return res.status(400).json({ error: "تعذر إنشاء عرض صوتي صالح للمكالمة" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { phone: true, isBlocked: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (conversation.channel !== Channel.WHATSAPP) return res.status(409).json({ error: "الاتصال الصوتي متاح لمحادثات WhatsApp فقط" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
   if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
+  const recordingSettings = await getCallRecordingSettings();
+  const aiProcessingEnabled = recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey);
+  if (recordingSettings.enabled && !parsed.data.recordingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على التسجيل قبل بدء المكالمة" });
+  if (aiProcessingEnabled && !parsed.data.aiProcessingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على معالجة الصوت آليًا قبل بدء المكالمة" });
   const activeStatuses = ["INITIATING", "RINGING", "CONNECTED"];
   const activeCall = await prisma.whatsAppCallSession.findFirst({ where: { agentId: req.user!.id, status: { in: activeStatuses }, createdAt: { gte: new Date(Date.now() - 4 * 60 * 60_000) } }, select: { id: true } });
   if (activeCall) return res.status(409).json({ error: "لديك مكالمة صوتية أخرى مفتوحة. أنهِها قبل بدء مكالمة جديدة." });
   let phoneNumber: string;
   try { phoneNumber = normalizeCloudCallTarget(conversation.customer.phone || conversation.externalCustomerId); }
   catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "رقم WhatsApp للعميل غير صالح" }); }
-  const session = await prisma.whatsAppCallSession.create({ data: { conversationId: conversation.id, agentId: req.user!.id, phoneNumber, status: "INITIATING" } });
+  const session = await prisma.whatsAppCallSession.create({ data: {
+    conversationId: conversation.id, agentId: req.user!.id, phoneNumber, status: "INITIATING",
+     ...(recordingSettings.enabled ? { recordingConsentAt: new Date() } : {}),
+     ...(aiProcessingEnabled ? { aiProcessingConsentAt: new Date() } : {})
+  } });
   try {
     const providerCallId = await startCloudCall({ phone: phoneNumber, offerSdp: parsed.data.offerSdp, callbackData: session.id });
     await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { providerCallId } });
-    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_STARTED", conversation.id, { sessionId: session.id, phoneLastFour: phoneNumber.slice(-4) });
-    res.json({ sessionId: session.id, status: "INITIATING" });
+    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_STARTED", conversation.id, { sessionId: session.id, phoneLastFour: phoneNumber.slice(-4), recordingConsent: Boolean(session.recordingConsentAt), aiProcessingConsent: Boolean(session.aiProcessingConsentAt) });
+    res.json({ sessionId: session.id, status: "INITIATING", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled });
   } catch (error) {
     const message = error instanceof Error ? error.message : "تعذر بدء المكالمة عبر WhatsApp";
     await prisma.whatsAppCallSession.update({ where: { id: session.id }, data: { status: "FAILED", lastError: message, endedAt: new Date() } });
     const status = error instanceof WhatsAppCloudApiError ? error.status || 502 : 502;
     await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_FAILED", conversation.id, { sessionId: session.id, errorCode: error instanceof WhatsAppCloudApiError ? error.code || null : null });
     res.status(status).json({ error: message });
+  }
+});
+
+app.post("/api/whatsapp-calls/:id/recording", agentGuard, express.raw({ type: () => true, limit: uploadLimitBytes }), async (req: AuthedRequest, res: express.Response) => {
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { id: req.params.id }, select: { id: true, agentId: true, conversationId: true, recordingConsentAt: true, aiProcessingConsentAt: true, recording: { select: { id: true } } } });
+  if (!session) return res.status(404).json({ error: "جلسة المكالمة غير موجودة" });
+  if (session.agentId !== req.user!.id) return res.status(403).json({ error: "لا تملك صلاحية رفع تسجيل هذه المكالمة" });
+  if (!session.recordingConsentAt) return res.status(409).json({ error: "لا يوجد إثبات موافقة على تسجيل هذه المكالمة" });
+  if (session.recording) return res.status(409).json({ error: "تم حفظ تسجيل هذه المكالمة بالفعل" });
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "التسجيل الصوتي فارغ" });
+  const contentType = String(req.header("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (!["audio/webm", "audio/mp4", "audio/ogg", "audio/mpeg"].includes(contentType)) return res.status(415).json({ error: "صيغة التسجيل الصوتي غير مدعومة" });
+  const durationSeconds = Number(req.header("x-duration-seconds"));
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 4 * 60 * 60) return res.status(400).json({ error: "مدة التسجيل غير صالحة" });
+  const extension = contentType === "audio/mp4" ? "m4a" : contentType === "audio/ogg" ? "ogg" : contentType === "audio/mpeg" ? "mp3" : "webm";
+  const asset = await prisma.mediaAsset.create({ data: {
+    fileName: safeFileName(`whatsapp-call-${session.id}.${extension}`), contentType, size: req.body.length,
+    data: Uint8Array.from(req.body), createdById: req.user!.id
+  }, select: { id: true } });
+  try {
+    const recordingSettings = await getCallRecordingSettings();
+    const shouldProcess = Boolean(config.openaiApiKey && recordingSettings.enabled && recordingSettings.aiProcessingEnabled && session.aiProcessingConsentAt);
+    const recording = await prisma.callRecording.create({ data: { sessionId: session.id, mediaAssetId: asset.id, durationSeconds, aiProcessingStatus: shouldProcess ? "PENDING" : "NOT_REQUESTED" } });
+    await audit(req.user!.id, "CALL_RECORDING_SAVED", session.conversationId, { sessionId: session.id, durationSeconds });
+    res.status(201).json({ id: recording.id, durationSeconds });
+    if (shouldProcess) {
+      void callRecordingAiQueue.add("process", { recordingId: recording.id }, { jobId: `call-recording-${recording.id}`, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: 100 })
+        .catch(async (error) => {
+          console.error("Could not queue call recording AI processing", error);
+          await prisma.callRecording.update({ where: { id: recording.id }, data: { aiProcessingStatus: "FAILED", aiProcessingError: "تعذرت جدولة المعالجة الآلية؛ يمكن مراجعة التسجيل يدويًا." } }).catch(() => {});
+        });
+    }
+  } catch (error) {
+    await prisma.mediaAsset.delete({ where: { id: asset.id } }).catch(() => {});
+    throw error;
   }
 });
 
@@ -1894,6 +2097,14 @@ app.post("/webhooks/telegram", async (req, res) => {
 const kalemlyWorker = startKalemlyWaWorker();
 kalemlyWorker.on("failed", (job, error) => console.error("KalemlyWA outbound delivery failed", job?.id, error));
 void initializeWhatsAppEngine().catch((error) => console.error("Could not initialize WhatsApp engine", error));
+const callRecordingAiWorker = new Worker("call-recording-ai", async (job) => {
+  const { recordingId } = job.data as { recordingId: string };
+  await processCallRecordingAi(recordingId);
+}, { connection: redis });
+callRecordingAiWorker.on("failed", (job, error) => console.error("Call recording AI processing failed", job?.id, error));
+void prisma.callRecording.findMany({ where: { aiProcessingStatus: "PENDING" }, select: { id: true } })
+  .then((pending) => Promise.all(pending.map((recording) => callRecordingAiQueue.add("process", { recordingId: recording.id }, { jobId: `call-recording-${recording.id}`, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: 100 }))))
+  .catch((error) => console.error("Could not restore pending call recording AI jobs", error));
 new Worker("conversation-sla", async (job) => {
   const { conversationId, messageId } = job.data as { conversationId: string; messageId: string };
   const [conversation, inboundMessage] = await Promise.all([

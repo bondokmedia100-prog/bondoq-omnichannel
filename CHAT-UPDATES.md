@@ -14,10 +14,15 @@
 - Added single-choice poll creation for Telegram and Baileys WhatsApp, with poll question/options shown in the workspace.
 - Added outbound WhatsApp Business Calling API calls from the agent workspace, with WebRTC audio, customer permission checks, and call lifecycle webhooks.
 - Hardened call status polling against stale updates and duplicate SDP answer application.
+- Added configurable Cairo business hours. Outside hours, the chatbot menu is bypassed, a configurable reply is sent at most once per conversation per Cairo day, and the conversation is queued for staff.
+- Added opt-in WebRTC call recording for new WhatsApp Cloud Calling calls. The agent must attest to the customer's explicit consent before calling; both audio streams are mixed locally and stored as a protected recording after the call.
+- Added supervisor-controlled optional AI transcription and summaries for WhatsApp Cloud call recordings. The agent records separate customer consent for recording and for sending audio/transcript to OpenAI; audio stays local to the app when AI processing is off or either consent is absent.
+- Added AI processing status/error reporting to the call audit screen; supervisors can review and correct the generated transcript and summary. Recording playback, processing consent, and review actions are audited.
+- Permanent conversation/customer deletion also removes unreferenced call-recording media.
 
 ## Data and deployment
 
-The Prisma schema adds `CustomerFavorite`, `ConversationPin`, and `WhatsAppCallSession`, and extends `MessageKind` with `STICKER` and `POLL`. The existing deployment startup runs `prisma db push`, which applies the schema changes when the service starts. Railway runs separate API and web services from `/apps/api` and `/apps/web`, both connected to `main`.
+The Prisma schema adds `CustomerFavorite`, `ConversationPin`, `WhatsAppCallSession`, `CallRecording`, `CallRecordingSettings`, and chatbot business-hours fields, and extends `MessageKind` with `STICKER` and `POLL`. Recording and AI processing are both disabled by default. The existing deployment startup runs `prisma db push`, which applies the schema changes when the service starts. Railway runs separate API and web services from `/apps/api` and `/apps/web`, both connected to `main`.
 
 Outbound calling needs an activated Irish (+353) WhatsApp Cloud API number, Calling enabled, subscribed `calls` and `messages` webhooks, customer permission, and a Meta daily messaging limit of at least 2,000 unique recipients. Configure the Cloud API credentials on the API service; no live provider call was available during this update's validation.
 
@@ -25,7 +30,7 @@ After deployment, re-register the Telegram webhook once from its integration set
 
 ## Remaining channel limitations
 
-- Text edits are provider-synced only for already-delivered messages authored by the current agent in Telegram or Baileys WhatsApp. Messenger and WhatsApp API mode do not support this edit flow.
+- Text edits are provider-synced only for already-delivered messages authored by the current agent in Telegram or Baileys WhatsApp. Messenger's edit action is hidden and the API returns a clear conflict rather than attempting a risky delete-and-resend; WhatsApp API mode also does not support this edit flow.
 - Forwarding creates a copy in the destination conversation, not a native provider-attributed forward. Forwarding older media may fail if it cannot be fetched from a trusted provider host or is larger than 12 MiB.
 - Stickers require WebP and are available only in Telegram and Baileys WhatsApp. Messenger and WhatsApp API mode do not support sticker sending.
 - Poll creation is available only in Telegram and Baileys WhatsApp. Provider votes/results are not synchronized into the CRM, and sent polls cannot be edited through the available provider APIs.
@@ -36,4 +41,4 @@ After deployment, re-register the Telegram webhook once from its integration set
 
 ## Validation
 
-API source syntax checks pass under Node's TypeScript stripping mode; the WhatsApp Calling unit tests pass (3) with stubbed config/Prisma dependencies; and the existing web service-worker tests pass (2). This workspace has no npm/tsc executable or installed project dependencies, so Prisma validation and full TypeScript type-check/build could not be run here. Provider behavior was not tested against live channel credentials.
+- Business-hours and Cairo-day-boundary checks pass under Node's TypeScript stripping mode, and the existing web service-worker tests pass (2). Node syntax checks pass for the API's changed `.ts` files, including the new queued AI processor. This workspace has no npm/tsc executable, installed dependencies, or TSX parser, so Prisma validation and the full API/web type-check/build could not be run here. AI transcription/summary and provider behavior were not tested against live OpenAI or Meta credentials.

@@ -132,6 +132,7 @@ model User {
   pinnedConversations      ConversationPin[]
   favoriteCustomers        CustomerFavorite[]
   messageReactions         MessageReaction[]
+  agentQuickReplies        AgentQuickReply[]
   passwordResetRequest       PasswordResetRequest? @relation("PasswordResetSubject")
   passwordResetReviews       PasswordResetRequest[] @relation("PasswordResetReviewer")
   branch                   Branch?                @relation("BranchUsers", fields: [branchId], references: [id], onDelete: SetNull)
@@ -320,6 +321,7 @@ model OrderDetails {
   deliveryAddress         String?
   notes                   String?
   price                   Decimal?      @db.Decimal(10, 2)
+  deposit                 Decimal       @default(0) @db.Decimal(10, 2)
   currency                String        @default("EGP")
   referenceImageMessageId String?
   status                  OrderStatus   @default(DRAFT)
@@ -353,6 +355,9 @@ model WhatsAppCallSession {
   conversationId String
   agentId        String
   phoneNumber    String
+  direction      String       @default("OUTGOING")
+  recordingConsentAt DateTime?
+  aiProcessingConsentAt DateTime?
   status         String       @default("INITIATING")
   sdpAnswer      String?      @db.Text
   lastError      String?      @db.Text
@@ -361,6 +366,7 @@ model WhatsAppCallSession {
   endedAt        DateTime?
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   agent          User         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  recording      CallRecording?
 
   @@index([conversationId, createdAt])
   @@index([agentId, status, createdAt])
@@ -369,6 +375,7 @@ model WhatsAppCallSession {
 model Product {
   id           String          @id @default(cuid())
   name         String
+  sku          String?         @unique
   category     ProductCategory
   price        Decimal         @db.Decimal(10, 2)
   imageUrl     String?
@@ -401,6 +408,7 @@ model MediaAsset {
   createdBy   User?     @relation("MediaUploader", fields: [createdById], references: [id], onDelete: SetNull)
   messages    Message[]
   products    Product[] @relation("ProductImage")
+  callRecording CallRecording?
 
   @@index([createdAt])
 }
@@ -527,6 +535,47 @@ model CannedResponse {
   updatedAt DateTime @updatedAt
 }
 
+model AgentQuickReply {
+  id        String   @id @default(cuid())
+  userId    String
+  shortcut  String
+  title     String
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, shortcut])
+  @@index([userId, title])
+}
+
+model CallRecording {
+  id                String            @id @default(cuid())
+  sessionId         String            @unique
+  mediaAssetId      String            @unique
+  durationSeconds   Int
+  transcript        String?           @db.Text
+  summary           String?           @db.Text
+  aiProcessingStatus String           @default("NOT_REQUESTED")
+  aiProcessingError String?           @db.Text
+  aiProcessedAt     DateTime?
+  reviewedById      String?
+  reviewedAt        DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  session           WhatsAppCallSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  mediaAsset        MediaAsset        @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt, durationSeconds])
+}
+
+model CallRecordingSettings {
+  id                  String   @id @default("default")
+  enabled             Boolean  @default(false)
+  aiProcessingEnabled Boolean  @default(false)
+  updatedAt           DateTime @updatedAt
+}
+
 model PushSubscription {
   id        String   @id @default(cuid())
   userId    String
@@ -570,5 +619,11 @@ model ChatbotSettings {
   option3ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
   option4ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
   option5ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
+  businessHoursEnabled Boolean @default(false)
+  businessDays String[] @default(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY"])
+  businessStart String @default("09:00")
+  businessEnd String @default("17:00")
+  offHoursReplyEnabled Boolean @default(true)
+  offHoursReplyText String @default("شكرًا لتواصلك معنا. أوقات العمل انتهت، وسنعاود الرد عليك في أقرب وقت عمل.") @db.Text
   updatedAt         DateTime @updatedAt
 }

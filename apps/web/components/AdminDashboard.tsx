@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Activity, Archive, ArrowDown, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, CakeSlice, Check, CheckCircle2, Clock3, Copy, FileText, Headset, KeyRound, LogOut, MessageCircle, MoreHorizontal, QrCode, Search, Send, ShieldAlert, UserRound, Users, Volume2, VolumeX, X } from "lucide-react";
+import { Activity, Archive, ArrowDown, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, CakeSlice, Check, CheckCircle2, Clock3, Copy, FileText, Headset, KeyRound, LogOut, MessageCircle, MoreHorizontal, PhoneCall, QrCode, Search, Send, ShieldAlert, UserRound, Users, Volume2, VolumeX, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import QRCode from "qrcode";
 import AccountSettingsModal from "./AccountSettingsModal";
@@ -12,6 +12,7 @@ import PushNotificationsButton from "./PushNotificationsButton";
 import InstallAppButton from "./InstallAppButton";
 import TeamManagementModal from "./TeamManagementModal";
 import AdminPasswordResetRequestsModal from "./AdminPasswordResetRequestsModal";
+import CallRecordingsModal from "./CallRecordingsModal";
 import IncomingWhatsAppCallModal, { type IncomingCall } from "./IncomingWhatsAppCallModal";
 import ProtectedMedia from "./ProtectedMedia";
 import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
@@ -21,6 +22,7 @@ const channelLabel: Record<string, string> = { WHATSAPP: "واتساب", MESSENG
 const deptLabel: Record<string, string> = { CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "مستخدم فرع", ADMINISTRATION: "الإدارة" };
 const presenceLabel: Record<string, string> = { ONLINE: "متاح", BUSY: "مشغول", BREAK: "استراحة", OFFLINE: "غير متصل" };
 const categoryLabel: Record<string, string> = { EASTERN: "حلويات شرقية", WESTERN: "حلويات غربية", CAKES: "تورتات", BAKERY: "مخبوزات", KAHK: "كحك وبسكويت", CHOCOLATE: "شوكولاتة", MOULID: "حلاوة المولد", OCCASIONS: "مناسبات", MIX_BONDOQ: "ميكس بندق" };
+const businessDayOptions = [["SUNDAY", "الأحد"], ["MONDAY", "الاثنين"], ["TUESDAY", "الثلاثاء"], ["WEDNESDAY", "الأربعاء"], ["THURSDAY", "الخميس"], ["FRIDAY", "الجمعة"], ["SATURDAY", "السبت"]] as const;
 const customerDisplayName = (customer?: AnyRecord | null) => customer?.displayName?.trim() || customer?.name || "عميل جديد";
 const withDisplayName = (customer?: AnyRecord | null) => customer ? { ...customer, name: customerDisplayName(customer) } : customer;
 
@@ -46,6 +48,7 @@ export default function AdminDashboard() {
   const [showProducts, setShowProducts] = useState(false);
   const [showAutoReplies, setShowAutoReplies] = useState(false);
   const [showCannedResponses, setShowCannedResponses] = useState(false);
+  const [showCallRecordings, setShowCallRecordings] = useState(false);
   const [showKalemly, setShowKalemly] = useState(false);
   const [showMessenger, setShowMessenger] = useState(false);
   const [showTelegram, setShowTelegram] = useState(false);
@@ -288,9 +291,10 @@ export default function AdminDashboard() {
       <div className="flex items-center gap-3"><BrandMark /><div><div className="text-lg font-extrabold text-stone-800">مركز القيادة</div><div className="text-[11px] text-stone-400">المراقبة الحية وإدارة الفريق</div></div></div>
       <div className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 sm:flex"><span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" /> النظام متصل</div>
         <div className="flex items-center gap-1 sm:gap-2"><button type="button" aria-label="فتح إشعارات الرسائل" onClick={() => setShowNotifications((open) => !open)} className="relative grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-stone-100"><Bell size={18} />{incomingNotifications.length > 0 ? <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{incomingNotifications.length}</span> : kpis.slaBreached > 0 && <i className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500" />}</button><PushNotificationsButton /><InstallAppButton /><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-10 w-10 place-items-center rounded-xl ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><span className="hidden text-sm font-bold text-stone-700 sm:inline">{user?.name || "المدير"}</span><button onClick={() => setShowAccount(true)} title="إعدادات الحساب" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-amber-50 hover:text-amber-700"><UserRound size={18} /></button><button onClick={logout} title="تسجيل الخروج" className="grid h-10 w-10 place-items-center rounded-xl text-stone-500 hover:bg-red-50 hover:text-red-600"><LogOut size={18} /></button></div>
-      </div></header>
-      <div className="mx-auto flex max-w-[1500px] justify-end px-4 pt-3 sm:px-7"><a href="/contacts" className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2 text-xs font-bold text-stone-700 shadow-sm hover:border-amber-300 hover:text-amber-800"><Users size={15} /> جهات الاتصال ودليل الشركة</a></div>
-      {user?.role === "ADMIN" && <div className="mx-auto flex max-w-[1500px] justify-end px-4 pt-2 sm:px-7"><button type="button" onClick={() => setShowPasswordResetRequests(true)} className="flex items-center gap-2 rounded-xl border border-amber-200 bg-white px-4 py-2 text-xs font-bold text-amber-800 shadow-sm hover:bg-amber-50"><KeyRound size={15} />طلبات استعادة كلمة المرور</button></div>}
+       </div></header>
+       <div className="mx-auto flex max-w-[1500px] justify-end px-4 pt-3 sm:px-7"><a href="/contacts" className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2 text-xs font-bold text-stone-700 shadow-sm hover:border-amber-300 hover:text-amber-800"><Users size={15} /> جهات الاتصال ودليل الشركة</a></div>
+       {(allowed(user, "canViewReports") || allowed(user, "canManageTeam")) && <div className="mx-auto flex max-w-[1500px] justify-end px-4 pt-2 sm:px-7"><button type="button" onClick={() => setShowCallRecordings(true)} className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-white px-4 py-2 text-xs font-bold text-emerald-800 shadow-sm hover:bg-emerald-50"><PhoneCall size={15} /> تسجيلات ومراجعة المكالمات</button></div>}
+       {user?.role === "ADMIN" && <div className="mx-auto flex max-w-[1500px] justify-end px-4 pt-2 sm:px-7"><button type="button" onClick={() => setShowPasswordResetRequests(true)} className="flex items-center gap-2 rounded-xl border border-amber-200 bg-white px-4 py-2 text-xs font-bold text-amber-800 shadow-sm hover:bg-amber-50"><KeyRound size={15} />طلبات استعادة كلمة المرور</button></div>}
 
      {showNotifications && <><div className="fixed inset-0 z-40 bg-stone-900/20" onClick={() => setShowNotifications(false)} aria-hidden="true" /><aside dir="rtl" role="dialog" aria-label="إشعارات الرسائل الجديدة" className="fixed inset-y-0 right-0 z-50 flex w-[min(380px,100vw)] flex-col border-l border-stone-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div><h2 className="text-sm font-extrabold">رسائل جديدة</h2><p className="mt-1 text-[10px] text-stone-400">تظهر هنا آخر الرسائل الواردة مباشرة</p></div><div className="flex items-center gap-2">{incomingNotifications.length > 0 && <button type="button" onClick={() => setIncomingNotifications([])} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-stone-500 hover:bg-stone-100">مسح الكل</button>}<button type="button" onClick={() => setShowNotifications(false)} aria-label="إغلاق الإشعارات" className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={18} /></button></div></div><div className="soft-scroll flex-1 overflow-y-auto p-3">{incomingNotifications.length ? incomingNotifications.map((notification) => <button key={notification.id} type="button" onClick={() => { const item = conversations.find((chat) => chat.id === notification.conversationId) || { id: notification.conversationId, customer: { name: notification.customerName }, channel: notification.channel }; setIncomingNotifications((old) => old.filter((entry) => entry.id !== notification.id)); setShowNotifications(false); void openConversation(item); }} className="mb-2 flex w-full flex-col rounded-xl border border-stone-100 bg-[#fffdf7] p-3 text-right transition hover:border-amber-200 hover:bg-[#fff8e9]"><span className="flex w-full items-center justify-between gap-2"><b className="truncate text-xs text-stone-800">{notification.customerName}</b><span className="shrink-0 text-[9px] text-stone-400">{timeAgo(notification.createdAt)}</span></span><span className="mt-1 text-[9px] font-bold text-emerald-700">{channelLabel[notification.channel] || "قناة جديدة"}</span><span className="mt-1 line-clamp-3 w-full text-xs leading-5 text-stone-600">{notification.preview}</span></button>) : <div className="grid h-full place-items-center px-8 text-center text-xs text-stone-400"><div><Bell size={26} className="mx-auto mb-3 text-stone-300" />لا توجد رسائل جديدة الآن.</div></div>}</div></aside></>}
 
@@ -350,8 +354,9 @@ export default function AdminDashboard() {
         {showStaff && <TeamManagementModal onClose={() => setShowStaff(false)} onDone={() => { void load(); }} />}
         {showPasswordResetRequests && user?.role === "ADMIN" && <AdminPasswordResetRequestsModal onClose={() => setShowPasswordResetRequests(false)} />}
        {showProducts && <ProductManagementModal onClose={() => setShowProducts(false)} />}
-       {showAutoReplies && <AutoReplyRulesModal onClose={() => setShowAutoReplies(false)} />}
-       {showCannedResponses && <CannedResponsesModal onClose={() => setShowCannedResponses(false)} />}
+        {showAutoReplies && <AutoReplyRulesModal onClose={() => setShowAutoReplies(false)} />}
+        {showCannedResponses && <CannedResponsesModal onClose={() => setShowCannedResponses(false)} />}
+        {showCallRecordings && <CallRecordingsModal canManage={allowed(user, "canManageTeam")} canViewRecords={allowed(user, "canViewReports")} onClose={() => setShowCallRecordings(false)} />}
       {showKalemly && <KalemlySettingsModal socket={socket} onClose={() => setShowKalemly(false)} />}
       {showMessenger && <MessengerSettingsModal onClose={() => setShowMessenger(false)} />}
        {showTelegram && <TelegramSettingsModal onClose={() => setShowTelegram(false)} />}
@@ -550,7 +555,7 @@ function StaffManagementModal({ onClose, onDone }: { onClose: () => void; onDone
 
 function ProductManagementModal({ onClose }: { onClose: () => void }) {
   const [products, setProducts] = useState<AnyRecord[]>([]);
-  const [form, setForm] = useState({ name: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" });
+  const [form, setForm] = useState({ name: "", sku: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" });
   const [editingId, setEditingId] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -558,19 +563,19 @@ function ProductManagementModal({ onClose }: { onClose: () => void }) {
   async function save(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError("");
     try {
-      const body = { ...form, price: Number(form.price), imageUrl: form.imageAssetId ? null : form.imageUrl || null, imageAssetId: form.imageAssetId || null, description: form.description || null };
+      const body = { ...form, sku: form.sku || null, price: Number(form.price), imageUrl: form.imageAssetId ? null : form.imageUrl || null, imageAssetId: form.imageAssetId || null, description: form.description || null };
       const product = editingId
         ? await api(`/api/admin/products/${editingId}`, { method: "PATCH", body: JSON.stringify(body) })
         : await api("/api/admin/products", { method: "POST", body: JSON.stringify(body) });
       setProducts((old) => editingId ? old.map((item) => item.id === editingId ? product : item) : [...old, product]);
-      setEditingId(""); setForm({ name: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" });
+      setEditingId(""); setForm({ name: "", sku: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" });
     }
     catch (e) { setError(e instanceof Error ? e.message : "تعذر حفظ المنتج"); }
     finally { setSaving(false); }
   }
   function edit(product: AnyRecord) {
     setEditingId(product.id);
-    setForm({ name: product.name, category: product.category, price: String(product.price), imageUrl: product.imageUrl || "", imageAssetId: product.imageAssetId || "", description: product.description || "" });
+    setForm({ name: product.name, sku: product.sku || "", category: product.category, price: String(product.price), imageUrl: product.imageUrl || "", imageAssetId: product.imageAssetId || "", description: product.description || "" });
     setError("");
   }
   async function uploadProductImage(file?: File) {
@@ -597,14 +602,15 @@ function ProductManagementModal({ onClose }: { onClose: () => void }) {
        <div className="grid gap-5 lg:grid-cols-[.8fr_1.2fr]">
         <form onSubmit={save} className="space-y-3 rounded-2xl bg-[#faf9f7] p-4">
           <h4 className="text-sm font-extrabold">{editingId ? "تعديل المنتج" : "إضافة منتج"}</h4>
-          <input required minLength={2} placeholder="اسم المنتج" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
+           <input required minLength={2} placeholder="اسم المنتج" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
+           <input maxLength={80} placeholder="كود المنتج (اختياري)" value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" dir="ltr" />
            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs"><option value="EASTERN">حلويات شرقية</option><option value="WESTERN">حلويات غربية</option><option value="CAKES">تورتات</option><option value="BAKERY">مخبوزات</option><option value="KAHK">كحك وبسكويت</option><option value="CHOCOLATE">شوكولاتة</option><option value="MOULID">حلاوة المولد</option><option value="OCCASIONS">مناسبات</option><option value="MIX_BONDOQ">ميكس بندق</option></select>
           <input required type="number" min="0" step="0.01" placeholder="السعر بالجنيه" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
           <label className="block text-xs font-bold text-stone-600">تحميل صورة من جهازك<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { void uploadProductImage(event.target.files?.[0]); event.target.value = ""; }} className="mt-1 block w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-normal" /></label>
           <input type="url" placeholder="أو رابط صورة HTTPS" value={form.imageUrl} onChange={(e) => setForm({ ...form, imageUrl: e.target.value, imageAssetId: "" })} className="h-10 w-full rounded-xl border border-stone-200 px-3 text-xs" />
           <textarea placeholder="وصف مختصر" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="w-full rounded-xl border border-stone-200 px-3 py-2 text-xs" />
           <button disabled={saving} className="h-10 w-full rounded-xl bg-[#d32f2f] text-xs font-bold text-white">{saving ? "جارٍ الحفظ..." : editingId ? "حفظ التعديلات" : "حفظ المنتج"}</button>
-          {editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ name: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" }); }} className="h-9 w-full rounded-xl bg-stone-100 text-xs font-bold text-stone-600">إلغاء التعديل</button>}
+           {editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ name: "", sku: "", category: "CAKES", price: "", imageUrl: "", imageAssetId: "", description: "" }); }} className="h-9 w-full rounded-xl bg-stone-100 text-xs font-bold text-stone-600">إلغاء التعديل</button>}
         </form>
        <div className="space-y-2"><h4 className="mb-2 text-sm font-extrabold">المنتجات ({products.length})</h4><div className="max-h-[480px] space-y-2 overflow-y-auto">{products.map((product) => <div key={product.id} className="flex items-center gap-2 rounded-xl border border-stone-100 p-3 sm:gap-3"><div className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-lg bg-amber-50">{product.imageUrl ? <img src={product.imageUrl} alt="" className="h-full w-full object-cover" /> : <CakeSlice size={18} className="text-amber-700" />}</div><div className="min-w-0 flex-1"><b className="block truncate text-xs">{product.name}</b><span className="text-[10px] text-stone-400">{categoryLabel[product.category] || product.category} · {Number(product.price).toFixed(2)} ج.م</span></div><button onClick={() => edit(product)} className="rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-800">تعديل</button><button onClick={() => toggle(product)} className={`rounded-lg px-2 py-1.5 text-[10px] font-bold ${product.isAvailable ? "bg-emerald-50 text-emerald-700" : "bg-stone-100 text-stone-500"}`}>{product.isAvailable ? "متوفر" : "غير متوفر"}</button></div>)}</div></div>
       </div>
@@ -677,6 +683,18 @@ function AutoReplyRulesModal({ onClose }: { onClose: () => void }) {
       {chatbotSettings ? <>
         <label className="block text-xs font-bold text-stone-700">رسالة الترحيب<textarea value={chatbotSettings.welcomeText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, welcomeText: event.target.value })} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label>
         <label className="block text-xs font-bold text-stone-700">رسالة الاختيار غير الصحيح<textarea value={chatbotSettings.invalidChoiceText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, invalidChoiceText: event.target.value })} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label>
+        <fieldset className="space-y-3 rounded-xl border border-amber-100 bg-white p-3">
+          <legend className="px-1 text-xs font-extrabold text-amber-950">ساعات العمل والرد خارج الدوام</legend>
+          <label className="flex items-center gap-2 text-xs font-bold text-stone-700"><input type="checkbox" checked={Boolean(chatbotSettings.businessHoursEnabled)} onChange={(event) => setChatbotSettings({ ...chatbotSettings, businessHoursEnabled: event.target.checked })} /> تفعيل ساعات العمل (بتوقيت القاهرة)</label>
+          <div className="grid grid-cols-2 gap-3 sm:max-w-sm">
+            <label className="text-[10px] font-bold text-stone-500">من<input type="time" value={chatbotSettings.businessStart} onChange={(event) => setChatbotSettings({ ...chatbotSettings, businessStart: event.target.value })} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs" /></label>
+            <label className="text-[10px] font-bold text-stone-500">إلى<input type="time" value={chatbotSettings.businessEnd} onChange={(event) => setChatbotSettings({ ...chatbotSettings, businessEnd: event.target.value })} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs" /></label>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{businessDayOptions.map(([value, label]) => <label key={value} className="flex items-center gap-2 rounded-lg bg-stone-50 px-2 py-2 text-[10px] font-bold text-stone-600"><input type="checkbox" checked={(chatbotSettings.businessDays || []).includes(value)} onChange={(event) => setChatbotSettings({ ...chatbotSettings, businessDays: event.target.checked ? [...(chatbotSettings.businessDays || []), value] : chatbotSettings.businessDays.filter((day: string) => day !== value) })} />{label}</label>)}</div>
+          <label className="flex items-center gap-2 text-xs font-bold text-stone-700"><input type="checkbox" checked={Boolean(chatbotSettings.offHoursReplyEnabled)} onChange={(event) => setChatbotSettings({ ...chatbotSettings, offHoursReplyEnabled: event.target.checked })} /> إرسال رد آلي خارج الدوام، مرة واحدة يوميًا لكل محادثة</label>
+          <textarea aria-label="الرد خارج ساعات العمل" value={chatbotSettings.offHoursReplyText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, offHoursReplyText: event.target.value })} maxLength={1000} rows={2} className="w-full rounded-xl border border-amber-200 px-3 py-2 text-xs" />
+          <p className="text-[10px] leading-5 text-stone-400">يمكن ضبط نهاية الوردية بعد منتصف الليل، مثل 22:00 إلى 02:00. ستُحوّل المحادثة إلى قائمة الانتظار دون عرض قائمة البوت.</p>
+        </fieldset>
         <div className="grid gap-3 md:grid-cols-2">{chatbotOptions.map((number) => <fieldset key={number} className="space-y-2 rounded-xl border border-amber-100 bg-white p-3"><legend className="px-1 text-[10px] font-extrabold text-amber-900">الخيار {number}</legend><label className="block text-[10px] font-bold text-stone-600">اسم الخيار<input value={chatbotSettings[`option${number}Label`]} onChange={(event) => setChatbotSettings({ ...chatbotSettings, [`option${number}Label`]: event.target.value })} maxLength={100} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal" /></label><label className="block text-[10px] font-bold text-stone-600">{number === 1 ? "معلومات الفروع وأوقات العمل" : "رسالة التحويل للموظف"}<textarea value={chatbotSettings[`option${number}ReplyText`]} onChange={(event) => setChatbotSettings({ ...chatbotSettings, [`option${number}ReplyText`]: event.target.value })} maxLength={number === 1 ? 3000 : 1000} rows={2} className="mt-1 w-full rounded-lg border border-stone-200 px-2 py-2 text-xs font-normal leading-5" /></label></fieldset>)}</div>
       </> : <p className="text-xs text-stone-500">جارٍ تحميل إعدادات البوت...</p>}
       <div className="flex justify-end"><button disabled={saving || !chatbotSettings} className="rounded-lg bg-amber-800 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{saving ? "جارٍ الحفظ..." : "حفظ إعدادات البوت"}</button></div>

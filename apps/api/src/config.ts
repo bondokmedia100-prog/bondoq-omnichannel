@@ -34,6 +34,7 @@ export const config = {
   redisUrl: process.env.REDIS_URL || "redis://localhost:6379",
   openaiApiKey: process.env.OPENAI_API_KEY || "",
   openaiTranscriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL || "whisper-1",
+  openaiSummaryModel: process.env.OPENAI_SUMMARY_MODEL || "gpt-4o-mini",
   slaResponseMinutes: Math.max(1, Number.parseInt(process.env.SLA_RESPONSE_MINUTES || "5", 10) || 5),
   vapidPublicKey: process.env.VAPID_PUBLIC_KEY || "",
   vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || "",

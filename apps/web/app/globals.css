@@ -26,6 +26,9 @@ button { cursor: pointer; }
   .ticket-footer { text-align: center; font-size: 10pt; }
 }
 .mobile-chat-back { display: none; }
+.workspace-chat { background-color: #efeae2 !important; }
+.workspace-chat > .flex-1 { background-color: #efeae2; }
+.agent-app .message-body { font-size: var(--chat-font-size, 14px); }
 @media (max-width: 850px) {
   .agent-app { height: 100dvh !important; min-height: 0 !important; overflow: hidden !important; }
   .workspace-grid { grid-template-columns: minmax(0,1fr) !important; height: calc(100dvh - 68px) !important; min-height: 0 !important; overflow: hidden !important; }
