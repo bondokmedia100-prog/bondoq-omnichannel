@@ -15,7 +15,7 @@
 
 ## Data and deployment
 
-The Prisma schema adds `CustomerFavorite` and `ConversationPin`, and extends `MessageKind` with `STICKER` and `POLL`. The existing deployment startup runs `prisma db push`, which applies the schema changes when the service starts.
+The Prisma schema adds `CustomerFavorite` and `ConversationPin`, and extends `MessageKind` with `STICKER` and `POLL`. The existing deployment startup runs `prisma db push`, which applies the schema changes when the service starts. Railway runs separate API and web services from `/apps/api` and `/apps/web`, both connected to `main`.
 
 After deployment, re-register the Telegram webhook once from its integration settings so Telegram includes `edited_message` updates.
 
