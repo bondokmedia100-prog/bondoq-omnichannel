@@ -24,7 +24,6 @@ import { customerProfileSchema } from "./customerProfile";
 import { sendPasswordResetApprovalEmail, sendPasswordResetEmail } from "./email";
 import { createPasswordResetToken, hashPasswordResetToken } from "./passwordResetToken";
 import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
-import { processCallRecordingAi } from "./callRecordingAi";
 import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
 import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
 
@@ -34,8 +33,6 @@ initRealtime(server);
 app.use(cors({ origin: config.webOrigin, credentials: true }));
 app.use(express.json({ limit: "15mb", verify: (req: any, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 const redis = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
-const callRecordingAiQueue = new Queue("call-recording-ai", { connection: redis });
-
 async function reservePasswordResetEmail() {
   const bucket = Math.floor(Date.now() / (60 * 60 * 1000));
   const key = `password-reset-email-limit:${bucket}`;
@@ -1466,19 +1463,17 @@ app.put("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), asyn
   res.json(settings);
 });
 
-const callRecordingSettingsSchema = z.object({ enabled: z.boolean(), aiProcessingEnabled: z.boolean() }).strict()
-  .refine((settings) => !settings.aiProcessingEnabled || settings.enabled, { message: "فعّل تسجيل المكالمات قبل تفعيل معالجتها آليًا" });
+const callRecordingSettingsSchema = z.object({ enabled: z.boolean(), aiProcessingEnabled: z.boolean() }).strict();
 app.get("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => {
   const settings = await getCallRecordingSettings();
-  res.json({ ...settings, aiProcessingEnabled: settings.enabled && settings.aiProcessingEnabled && Boolean(config.openaiApiKey), aiProcessingAvailable: Boolean(config.openaiApiKey) });
+  res.json({ ...settings, aiProcessingEnabled: false, aiProcessingAvailable: false });
 });
 app.put("/api/admin/call-recordings/settings", permissionGuard("canManageTeam"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = callRecordingSettingsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "إعداد التسجيل غير صالح" });
-  if (parsed.data.aiProcessingEnabled && !config.openaiApiKey) return res.status(503).json({ error: "اضبط OPENAI_API_KEY على الخادم قبل تفعيل المعالجة الآلية" });
-  const settings = await prisma.callRecordingSettings.upsert({ where: { id: "default" }, create: { id: "default", ...parsed.data }, update: parsed.data });
-  await audit(req.user!.id, "CALL_RECORDING_SETTINGS_UPDATED", undefined, { enabled: settings.enabled, aiProcessingEnabled: settings.aiProcessingEnabled });
-  res.json(settings);
+  const settings = await prisma.callRecordingSettings.upsert({ where: { id: "default" }, create: { id: "default", enabled: parsed.data.enabled, aiProcessingEnabled: false }, update: { enabled: parsed.data.enabled, aiProcessingEnabled: false } });
+  await audit(req.user!.id, "CALL_RECORDING_SETTINGS_UPDATED", undefined, { enabled: settings.enabled, aiProcessingEnabled: false });
+  res.json({ ...settings, aiProcessingEnabled: false });
 });
 
 app.get("/api/admin/call-recordings", permissionGuard("canViewReports"), async (req: express.Request, res: express.Response) => {
@@ -1486,10 +1481,10 @@ app.get("/api/admin/call-recordings", permissionGuard("canViewReports"), async (
   const sessions = await prisma.whatsAppCallSession.findMany({
     orderBy: { createdAt: "desc" }, take,
     select: {
-      id: true, direction: true, status: true, recordingConsentAt: true, aiProcessingConsentAt: true, createdAt: true, endedAt: true,
+       id: true, direction: true, status: true, recordingConsentAt: true, recordingDeletedAt: true, createdAt: true, endedAt: true,
       conversation: { select: { id: true, customer: { select: { name: true } } } },
       agent: { select: { name: true } },
-      recording: { select: { id: true, durationSeconds: true, transcript: true, summary: true, aiProcessingStatus: true, aiProcessingError: true, aiProcessedAt: true, reviewedAt: true, createdAt: true } }
+       recording: { select: { id: true, durationSeconds: true, transcript: true, summary: true, reviewedAt: true, createdAt: true } }
     }
   });
   res.json(sessions);
@@ -1502,7 +1497,22 @@ app.patch("/api/admin/call-recordings/:id", permissionGuard("canViewReports"), a
   if (!recording) return res.status(404).json({ error: "التسجيل غير موجود" });
   const saved = await prisma.callRecording.update({ where: { id: recording.id }, data: { ...parsed.data, reviewedById: req.user!.id, reviewedAt: new Date() } });
   await audit(req.user!.id, "CALL_RECORDING_REVIEWED", recording.session.conversationId, { recordingId: recording.id });
-  res.json({ id: saved.id, durationSeconds: saved.durationSeconds, transcript: saved.transcript, summary: saved.summary, aiProcessingStatus: saved.aiProcessingStatus, aiProcessingError: saved.aiProcessingError, aiProcessedAt: saved.aiProcessedAt, reviewedAt: saved.reviewedAt });
+  res.json({ id: saved.id, durationSeconds: saved.durationSeconds, transcript: saved.transcript, summary: saved.summary, reviewedAt: saved.reviewedAt });
+});
+
+app.delete("/api/admin/call-recordings/:id", permissionGuard("canManageTeam"), async (req: AuthedRequest, res: express.Response) => {
+  const recording = await prisma.callRecording.findUnique({ where: { id: req.params.id }, select: { id: true, sessionId: true, mediaAssetId: true, session: { select: { conversationId: true } } } });
+  if (!recording) return res.status(404).json({ error: "التسجيل غير موجود" });
+  const deleted = await prisma.$transaction(async (tx) => {
+    const result = await tx.callRecording.deleteMany({ where: { id: recording.id } });
+    if (!result.count) return false;
+    await tx.mediaAsset.delete({ where: { id: recording.mediaAssetId } });
+    await tx.whatsAppCallSession.update({ where: { id: recording.sessionId }, data: { recordingDeletedAt: new Date() } });
+    return true;
+  });
+  if (!deleted) return res.status(404).json({ error: "التسجيل غير موجود" });
+  await audit(req.user!.id, "CALL_RECORDING_DELETED", recording.session.conversationId, { recordingId: recording.id });
+  res.sendStatus(204);
 });
 
 app.get("/api/admin/call-recordings/:id/audio", permissionGuard("canViewReports"), async (req: AuthedRequest, res: express.Response) => {
@@ -1597,13 +1607,12 @@ app.get("/api/conversations/:id/whatsapp-call/permission", agentGuard, async (re
   if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
   try {
     const [mode, recordingSettings] = await Promise.all([getWhatsAppMode(), getCallRecordingSettings()]);
-    const aiProcessingEnabled = recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey);
-    if (mode === "BAILEYS") return res.json({
+     if (mode === "BAILEYS") return res.json({
       status: "browser_link", transport: "INTERNAL_WEB", expiration: null, canStartCall: true, canRequestPermission: false,
-      recordingEnabled: recordingSettings.enabled, aiProcessingEnabled, iceServers: callIceServers(req.user!.id)
-    });
-    const permission = await getCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId);
-    res.json({ ...permission, transport: "WHATSAPP_CLOUD", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled, iceServers: callIceServers(req.user!.id) });
+       recordingEnabled: recordingSettings.enabled, aiProcessingEnabled: false, iceServers: callIceServers(req.user!.id)
+     });
+     const permission = await getCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId);
+     res.json({ ...permission, transport: "WHATSAPP_CLOUD", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled: false, iceServers: callIceServers(req.user!.id) });
   } catch (error) {
     res.status(error instanceof WhatsAppCloudApiError ? error.status || 502 : 503).json({ error: error instanceof Error ? error.message : "تعذر فحص صلاحية الاتصال" });
   }
@@ -1638,9 +1647,7 @@ app.post("/api/conversations/:id/whatsapp-call", agentGuard, async (req: AuthedR
   if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
   const whatsappMode = await getWhatsAppMode();
   const recordingSettings = await getCallRecordingSettings();
-  const aiProcessingEnabled = recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey);
   if (whatsappMode === "API" && recordingSettings.enabled && !parsed.data.recordingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على التسجيل قبل بدء المكالمة" });
-  if (whatsappMode === "API" && aiProcessingEnabled && !parsed.data.aiProcessingConsent) return res.status(400).json({ error: "سجّل موافقة العميل الصريحة على معالجة الصوت آليًا قبل بدء المكالمة" });
   const activeStatuses = ["INITIATING", "RINGING", "CONNECTED"];
   const now = new Date();
   await prisma.whatsAppCallSession.updateMany({
@@ -1689,14 +1696,13 @@ app.post("/api/conversations/:id/whatsapp-call", agentGuard, async (req: AuthedR
   catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "رقم WhatsApp للعميل غير صالح" }); }
   const session = await prisma.whatsAppCallSession.create({ data: {
     conversationId: conversation.id, agentId: req.user!.id, phoneNumber, status: "INITIATING",
-     ...(recordingSettings.enabled ? { recordingConsentAt: new Date() } : {}),
-     ...(aiProcessingEnabled ? { aiProcessingConsentAt: new Date() } : {})
-  } });
+    ...(recordingSettings.enabled ? { recordingConsentAt: new Date() } : {})
+    } });
   try {
     const providerCallId = await startCloudCall({ phone: phoneNumber, offerSdp: parsed.data.offerSdp, callbackData: session.id });
     await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { providerCallId } });
-    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_STARTED", conversation.id, { sessionId: session.id, phoneLastFour: phoneNumber.slice(-4), recordingConsent: Boolean(session.recordingConsentAt), aiProcessingConsent: Boolean(session.aiProcessingConsentAt) });
-     res.json({ sessionId: session.id, status: "INITIATING", transport: "WHATSAPP_CLOUD", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled, iceServers: callIceServers(session.id) });
+    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_STARTED", conversation.id, { sessionId: session.id, phoneLastFour: phoneNumber.slice(-4), recordingConsent: Boolean(session.recordingConsentAt) });
+    res.json({ sessionId: session.id, status: "INITIATING", transport: "WHATSAPP_CLOUD", recordingEnabled: recordingSettings.enabled, aiProcessingEnabled: false, iceServers: callIceServers(session.id) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "تعذر بدء المكالمة عبر WhatsApp";
     await prisma.whatsAppCallSession.update({ where: { id: session.id }, data: { status: "FAILED", lastError: message, endedAt: new Date() } });
@@ -1723,8 +1729,8 @@ app.get("/api/public/voice-calls/:token", async (req, res) => {
     status: session.status,
     ...(session.status === "INITIATING" ? { offerSdp: session.offerSdp } : {}),
     customerName: session.conversation.customer.displayName || session.conversation.customer.name || "",
-     recordingAvailable: Boolean(recordingSettings?.enabled),
-    aiConsentAvailable: Boolean(recordingSettings?.enabled && recordingSettings.aiProcessingEnabled && config.openaiApiKey),
+    recordingAvailable: Boolean(recordingSettings?.enabled),
+    aiConsentAvailable: false,
     ...(terminal ? {} : { iceServers: callIceServers(session.id) })
   });
 });
@@ -1738,19 +1744,16 @@ app.post("/api/public/voice-calls/:token/answer", async (req, res) => {
   if (!session || session.transport !== "INTERNAL_WEB") return res.sendStatus(404);
   if (session.status !== "INITIATING" || !session.guestExpiresAt || session.guestExpiresAt.getTime() <= Date.now()) return res.status(410).json({ error: "انتهت صلاحية الدعوة أو استُخدمت بالفعل" });
   const recordingSettings = await getCallRecordingSettings();
-  const aiProcessingAvailable = recordingSettings.enabled && recordingSettings.aiProcessingEnabled && Boolean(config.openaiApiKey);
-  if (parsed.data.aiProcessingConsent && (!aiProcessingAvailable || !parsed.data.recordingConsent)) return res.status(409).json({ error: "المعالجة الآلية تتطلب موافقة مستقلة بعد الموافقة على التسجيل" });
   const acceptedAt = new Date();
   const updated = await prisma.whatsAppCallSession.updateMany({
     where: { id: session.id, status: "INITIATING", sdpAnswer: null, guestExpiresAt: { gt: acceptedAt } },
     data: {
       sdpAnswer: parsed.data.answerSdp, status: "RINGING",
-      ...(recordingSettings.enabled && parsed.data.recordingConsent ? { recordingConsentAt: acceptedAt } : {}),
-      ...(aiProcessingAvailable && parsed.data.recordingConsent && parsed.data.aiProcessingConsent ? { aiProcessingConsentAt: acceptedAt } : {})
+      ...(recordingSettings.enabled && parsed.data.recordingConsent ? { recordingConsentAt: acceptedAt } : {})
     }
   });
   if (updated.count !== 1) return res.status(409).json({ error: "انضم شخص آخر إلى هذه المكالمة أو انتهت الدعوة" });
-  await audit(null, "INTERNAL_WEB_CALL_ACCEPTED", session.conversationId, { sessionId: session.id, recordingConsent: Boolean(recordingSettings.enabled && parsed.data.recordingConsent), aiProcessingConsent: Boolean(aiProcessingAvailable && parsed.data.recordingConsent && parsed.data.aiProcessingConsent) });
+  await audit(null, "INTERNAL_WEB_CALL_ACCEPTED", session.conversationId, { sessionId: session.id, recordingConsent: Boolean(recordingSettings.enabled && parsed.data.recordingConsent) });
   io.to(`agent:${session.agentId}`).emit("whatsapp:cloud-call-updated", { sessionId: session.id, status: "RINGING" });
   res.json({ ok: true });
 });
@@ -1782,9 +1785,10 @@ app.post("/api/public/voice-calls/:token/terminate", async (req, res) => {
 });
 
 app.post("/api/whatsapp-calls/:id/recording", agentGuard, express.raw({ type: () => true, limit: uploadLimitBytes }), async (req: AuthedRequest, res: express.Response) => {
-  const session = await prisma.whatsAppCallSession.findUnique({ where: { id: req.params.id }, select: { id: true, agentId: true, conversationId: true, recordingConsentAt: true, aiProcessingConsentAt: true, recording: { select: { id: true } } } });
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { id: req.params.id }, select: { id: true, agentId: true, conversationId: true, recordingConsentAt: true, recordingDeletedAt: true, recording: { select: { id: true } } } });
   if (!session) return res.status(404).json({ error: "جلسة المكالمة غير موجودة" });
   if (session.agentId !== req.user!.id) return res.status(403).json({ error: "لا تملك صلاحية رفع تسجيل هذه المكالمة" });
+  if (session.recordingDeletedAt) return res.status(409).json({ error: "حُذف تسجيل هذه المكالمة نهائيًا ولا يمكن رفعه مجددًا" });
   if (!session.recordingConsentAt) return res.status(409).json({ error: "لا يوجد إثبات موافقة على تسجيل هذه المكالمة" });
   if (session.recording) return res.status(409).json({ error: "تم حفظ تسجيل هذه المكالمة بالفعل" });
   if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "التسجيل الصوتي فارغ" });
@@ -1798,18 +1802,9 @@ app.post("/api/whatsapp-calls/:id/recording", agentGuard, express.raw({ type: ()
     data: Uint8Array.from(req.body), createdById: req.user!.id
   }, select: { id: true } });
   try {
-    const recordingSettings = await getCallRecordingSettings();
-    const shouldProcess = Boolean(config.openaiApiKey && recordingSettings.enabled && recordingSettings.aiProcessingEnabled && session.aiProcessingConsentAt);
-    const recording = await prisma.callRecording.create({ data: { sessionId: session.id, mediaAssetId: asset.id, durationSeconds, aiProcessingStatus: shouldProcess ? "PENDING" : "NOT_REQUESTED" } });
-    await audit(req.user!.id, "CALL_RECORDING_SAVED", session.conversationId, { sessionId: session.id, durationSeconds });
-    res.status(201).json({ id: recording.id, durationSeconds });
-    if (shouldProcess) {
-      void callRecordingAiQueue.add("process", { recordingId: recording.id }, { jobId: `call-recording-${recording.id}`, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: 100 })
-        .catch(async (error) => {
-          console.error("Could not queue call recording AI processing", error);
-          await prisma.callRecording.update({ where: { id: recording.id }, data: { aiProcessingStatus: "FAILED", aiProcessingError: "تعذرت جدولة المعالجة الآلية؛ يمكن مراجعة التسجيل يدويًا." } }).catch(() => {});
-        });
-    }
+     const recording = await prisma.callRecording.create({ data: { sessionId: session.id, mediaAssetId: asset.id, durationSeconds, aiProcessingStatus: "NOT_REQUESTED" } });
+     await audit(req.user!.id, "CALL_RECORDING_SAVED", session.conversationId, { sessionId: session.id, durationSeconds });
+     res.status(201).json({ id: recording.id, durationSeconds });
   } catch (error) {
     await prisma.mediaAsset.delete({ where: { id: asset.id } }).catch(() => {});
     throw error;
@@ -1828,7 +1823,7 @@ app.get("/api/whatsapp-calls/:id", agentGuard, async (req: AuthedRequest, res: e
     await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, sdpAnswer: session.sdpAnswer }, data: { sdpAnswer: null } });
     session = { ...session, sdpAnswer: null };
   }
-  res.json({ id: session.id, transport: session.transport, status: session.status, sdpAnswer: session.sdpAnswer, recordingEnabled: Boolean(session.recordingConsentAt), aiProcessingEnabled: Boolean(session.aiProcessingConsentAt), error: session.lastError, updatedAt: session.updatedAt });
+   res.json({ id: session.id, transport: session.transport, status: session.status, sdpAnswer: session.sdpAnswer, recordingEnabled: Boolean(session.recordingConsentAt), aiProcessingEnabled: false, error: session.lastError, updatedAt: session.updatedAt });
 });
 
 app.post("/api/whatsapp-calls/:id/answer-applied", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -2225,14 +2220,18 @@ app.post("/webhooks/telegram", async (req, res) => {
 const kalemlyWorker = startKalemlyWaWorker();
 kalemlyWorker.on("failed", (job, error) => console.error("KalemlyWA outbound delivery failed", job?.id, error));
 void initializeWhatsAppEngine().catch((error) => console.error("Could not initialize WhatsApp engine", error));
-const callRecordingAiWorker = new Worker("call-recording-ai", async (job) => {
-  const { recordingId } = job.data as { recordingId: string };
-  await processCallRecordingAi(recordingId);
-}, { connection: redis });
-callRecordingAiWorker.on("failed", (job, error) => console.error("Call recording AI processing failed", job?.id, error));
-void prisma.callRecording.findMany({ where: { aiProcessingStatus: "PENDING" }, select: { id: true } })
-  .then((pending) => Promise.all(pending.map((recording) => callRecordingAiQueue.add("process", { recordingId: recording.id }, { jobId: `call-recording-${recording.id}`, attempts: 3, backoff: { type: "exponential", delay: 15_000 }, removeOnComplete: true, removeOnFail: 100 }))))
-  .catch((error) => console.error("Could not restore pending call recording AI jobs", error));
+const callRecordingAiQueue = new Queue("call-recording-ai", { connection: redis });
+void (async () => {
+  try {
+    await prisma.callRecordingSettings.updateMany({ where: { aiProcessingEnabled: true }, data: { aiProcessingEnabled: false } });
+    await prisma.callRecording.updateMany({ where: { aiProcessingStatus: { in: ["PENDING", "PROCESSING"] } }, data: { aiProcessingStatus: "NOT_REQUESTED", aiProcessingError: null } });
+    await callRecordingAiQueue.obliterate({ force: true });
+  } catch (error) {
+    console.error("Could not disable call recording AI processing", error);
+  } finally {
+    await callRecordingAiQueue.close().catch((error) => console.error("Could not close retired call recording AI queue", error));
+  }
+})();
 new Worker("conversation-sla", async (job) => {
   const { conversationId, messageId } = job.data as { conversationId: string; messageId: string };
   const [conversation, inboundMessage] = await Promise.all([

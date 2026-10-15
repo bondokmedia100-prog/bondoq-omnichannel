@@ -8,7 +8,6 @@ type Invitation = {
   offerSdp?: string;
   customerName?: string;
   recordingAvailable: boolean;
-  aiConsentAvailable: boolean;
   iceServers: RTCIceServer[];
 };
 
@@ -36,7 +35,6 @@ export default function InternalWebCallPage({ token }: { token: string }) {
   const [status, setStatus] = useState("LOADING");
   const [busy, setBusy] = useState(false);
   const [recordingConsent, setRecordingConsent] = useState(false);
-  const [aiConsent, setAiConsent] = useState(false);
   const [error, setError] = useState("");
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -124,7 +122,7 @@ export default function InternalWebCallPage({ token }: { token: string }) {
       if (!answerSdp.includes("m=audio") || !answerSdp.includes("a=candidate:")) throw new Error("لم يكتمل تجهيز اتصال الصوت. تحقق من الشبكة وحاول مجددًا.");
       const response = await fetch(`${API_URL}/api/public/voice-calls/${encodeURIComponent(token)}/answer`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answerSdp, recordingConsent, aiProcessingConsent: aiConsent })
+        body: JSON.stringify({ answerSdp, recordingConsent, aiProcessingConsent: false })
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "تعذر الانضمام إلى المكالمة");
@@ -157,8 +155,7 @@ export default function InternalWebCallPage({ token }: { token: string }) {
       <p className="rounded-2xl bg-stone-50 px-4 py-4 text-sm leading-7">{title}{invitation?.customerName ? ` · ${invitation.customerName}` : ""}</p>
       <p className="mt-4 text-xs leading-6 text-stone-600">هذه مكالمة متصفح آمنة أُرسل رابطها عبر WhatsApp، وليست مكالمة WhatsApp الأصلية. اسمح بالميكروفون بعد الضغط على الرد. لا تُرسل أي بيانات إلى WhatsApp سوى رابط الدعوة.</p>
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
-      {invitation?.recordingAvailable && !active && status === "INITIATING" && <label className="mt-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-6"><input type="checkbox" checked={recordingConsent} onChange={(event) => { setRecordingConsent(event.target.checked); if (!event.target.checked) setAiConsent(false); }} className="mt-1"/><span>أوافق على تسجيل هذه المكالمة الصوتية (اختياري). يمكنك الانضمام دون التسجيل.</span></label>}
-      {invitation?.aiConsentAvailable && recordingConsent && !active && status === "INITIATING" && <label className="mt-3 flex items-start gap-3 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs leading-6"><input type="checkbox" checked={aiConsent} onChange={(event) => setAiConsent(event.target.checked)} className="mt-1"/><span>أوافق بشكل منفصل على إرسال التسجيل إلى OpenAI للتفريغ والملخص الآليين.</span></label>}
+       {invitation?.recordingAvailable && !active && status === "INITIATING" && <label className="mt-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-6"><input type="checkbox" checked={recordingConsent} onChange={(event) => setRecordingConsent(event.target.checked)} className="mt-1"/><span>أوافق على تسجيل هذه المكالمة الصوتية (اختياري). يمكنك الانضمام دون التسجيل.</span></label>}
       {error && <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-xs leading-6 text-red-800">{error}</p>}
       {active ? <div className="mt-5 grid gap-2 sm:grid-cols-2"><button type="button" onClick={() => void remoteAudioRef.current?.play().catch(() => {})} className="rounded-xl bg-stone-100 px-4 py-3 text-sm font-bold">تشغيل صوت الموظف</button><button type="button" disabled={busy} onClick={() => void finishCall("terminate")} className="rounded-xl bg-red-600 px-4 py-3 text-sm font-bold text-white disabled:opacity-50">إنهاء المكالمة</button></div>
         : status === "INITIATING" ? <div className="mt-5 grid gap-2 sm:grid-cols-2"><button type="button" disabled={busy || !invitation?.offerSdp} onClick={() => void answerCall()} className="rounded-xl bg-emerald-700 px-4 py-3 text-sm font-extrabold text-white disabled:opacity-40">{busy ? "جارٍ الاتصال..." : "الرد على المكالمة"}</button><button type="button" disabled={busy} onClick={() => void finishCall("decline")} className="rounded-xl border border-stone-200 px-4 py-3 text-sm font-bold disabled:opacity-50">رفض الدعوة</button></div>

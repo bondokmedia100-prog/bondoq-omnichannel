@@ -361,6 +361,7 @@ model WhatsAppCallSession {
   guestTokenHash String?
   guestExpiresAt DateTime?
   recordingConsentAt DateTime?
+  recordingDeletedAt DateTime?
   aiProcessingConsentAt DateTime?
   status         String       @default("INITIATING")
   sdpAnswer      String?      @db.Text

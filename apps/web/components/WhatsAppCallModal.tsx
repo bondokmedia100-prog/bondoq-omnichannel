@@ -12,7 +12,6 @@ type PermissionInfo = {
   canStartCall: boolean;
   canRequestPermission: boolean;
   recordingEnabled: boolean;
-  aiProcessingEnabled: boolean;
   iceServers?: RTCIceServer[];
 };
 
@@ -50,7 +49,6 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
   const [busy, setBusy] = useState(false);
   const [muted, setMuted] = useState(false);
   const [recordingConsent, setRecordingConsent] = useState(false);
-  const [aiProcessingConsent, setAiProcessingConsent] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState("");
   const [error, setError] = useState("");
   const peerRef = useRef<RTCPeerConnection | null>(null);
@@ -71,7 +69,6 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
       const result = await api<PermissionInfo>(`/api/conversations/${conversationId}/whatsapp-call/permission`);
       setPermission(result);
       if (!result.recordingEnabled) setRecordingConsent(false);
-      if (!result.aiProcessingEnabled) setAiProcessingConsent(false);
       if (result.canStartCall) { permissionRequestedRef.current = false; setPermissionRequested(false); }
       setError("");
     } catch (reason) {
@@ -81,7 +78,7 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
 
   async function refreshCall(id: string) {
     try {
-      const result = await api<{ status: string; transport: "WHATSAPP_CLOUD" | "INTERNAL_WEB"; sdpAnswer?: string | null; error?: string | null; recordingEnabled?: boolean; aiProcessingEnabled?: boolean }>(`/api/whatsapp-calls/${id}`);
+      const result = await api<{ status: string; transport: "WHATSAPP_CLOUD" | "INTERNAL_WEB"; sdpAnswer?: string | null; error?: string | null; recordingEnabled?: boolean }>(`/api/whatsapp-calls/${id}`);
       if (sessionIdRef.current !== id) return;
       if (result.recordingEnabled) {
         recordingSessionIdRef.current = id;
@@ -231,7 +228,6 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
       if (!currentPermission.canStartCall) throw new Error("لا يتاح إذن اتصال جديد لهذا العميل حاليًا.");
       const useCloudCalling = currentPermission.transport !== "INTERNAL_WEB";
       if (useCloudCalling && currentPermission.recordingEnabled && !recordingConsent) throw new Error("سجّل موافقة العميل على تسجيل المكالمة قبل الاتصال.");
-      if (useCloudCalling && currentPermission.aiProcessingEnabled && !aiProcessingConsent) throw new Error("سجّل موافقة العميل المنفصلة على المعالجة الآلية قبل الاتصال.");
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error("يلزم فتح النظام عبر HTTPS والسماح باستخدام الميكروفون.");
       if (currentPermission.recordingEnabled) {
         if (useCloudCalling) {
@@ -276,8 +272,8 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
       await waitForIceGathering(peer);
       const offerSdp = peer.localDescription?.sdp || "";
       if (!offerSdp.includes("m=audio") || !offerSdp.includes("a=candidate:")) throw new Error("لم يكتمل تجهيز اتصال الصوت. تحقق من اتصال الشبكة وأعد المحاولة.");
-      const result = await api<{ sessionId: string; status: string; transport: "WHATSAPP_CLOUD" | "INTERNAL_WEB"; recordingEnabled: boolean; aiProcessingEnabled: boolean }>(`/api/conversations/${conversationId}/whatsapp-call`, {
-        method: "POST", body: JSON.stringify({ offerSdp, recordingConsent, aiProcessingConsent })
+      const result = await api<{ sessionId: string; status: string; transport: "WHATSAPP_CLOUD" | "INTERNAL_WEB"; recordingEnabled: boolean }>(`/api/conversations/${conversationId}/whatsapp-call`, {
+        method: "POST", body: JSON.stringify({ offerSdp, recordingConsent, aiProcessingConsent: false })
       });
       sessionIdRef.current = result.sessionId;
       if (peer.connectionState === "failed") {
@@ -317,7 +313,6 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
       if (succeeded && sessionIdRef.current === id) {
         finishCallRecording();
         setRecordingConsent(false);
-        setAiProcessingConsent(false);
         sessionIdRef.current = "";
         stopLocalMedia();
       }
@@ -354,11 +349,10 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
         </> : <>
            <div className="flex items-start gap-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4"><ShieldCheck size={18} className="mt-0.5 shrink-0 text-emerald-700"/><div><p className="text-xs font-extrabold text-emerald-950">{usesInternalWebCall ? "مكالمة صوتية عبر المتصفح" : "موافقة العميل مطلوبة من WhatsApp"}</p><p className="mt-1 text-[10px] leading-5 text-emerald-900">{usesInternalWebCall ? "سيصل للعميل رابط مؤقت عبر WhatsApp؛ يفتح الرابط ويوافق على الميكروفون للانضمام. هذه ليست مكالمة WhatsApp أصلية." : `${permissionLabel}. يظل الميكروفون مغلقًا حتى تبدأ الاتصال.`}</p></div></div>
            {permission?.recordingEnabled && !usesInternalWebCall && <label className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-[10px] leading-5 text-amber-950"><input type="checkbox" checked={recordingConsent} onChange={(event) => setRecordingConsent(event.target.checked)} className="mt-1 shrink-0"/><span><b className="block text-xs">موافقة العميل على تسجيل المكالمة</b>اطلب موافقة العميل بوضوح على التسجيل، ثم أكد ذلك هنا قبل الاتصال. يبدأ التسجيل بعد اتصال الطرفين.</span></label>}
-           {permission?.aiProcessingEnabled && !usesInternalWebCall && <label className="flex items-start gap-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-[10px] leading-5 text-blue-950"><input type="checkbox" checked={aiProcessingConsent} onChange={(event) => setAiProcessingConsent(event.target.checked)} className="mt-1 shrink-0"/><span><b className="block text-xs">موافقة منفصلة على التفريغ والملخص الآليين</b>أكّد أن العميل وافق صراحةً على إرسال التسجيل والنص الناتج إلى OpenAI لإنشاء تفريغ وملخص.</span></label>}
           {error && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-[10px] leading-5 text-amber-950">{error}</p>}
           {permissionRequested && <p role="status" className="rounded-xl bg-blue-50 px-3 py-2.5 text-[10px] leading-5 text-blue-900">أُرسل طلب الإذن. ستتحدث الحالة تلقائيًا بعد رد العميل في WhatsApp.</p>}
           <div className="grid gap-2 sm:grid-cols-2">
-             <button type="button" disabled={busy || loadingPermission || !permission?.canStartCall || Boolean(permission?.transport !== "INTERNAL_WEB" && permission?.recordingEnabled && !recordingConsent) || Boolean(permission?.transport !== "INTERNAL_WEB" && permission?.aiProcessingEnabled && !aiProcessingConsent)} onClick={() => void startCall()} className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 py-3 text-xs font-extrabold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16}/>{busy ? "جارٍ تجهيز الميكروفون..." : usesInternalWebCall ? "إرسال رابط مكالمة" : "بدء مكالمة WhatsApp"}</button>
+              <button type="button" disabled={busy || loadingPermission || !permission?.canStartCall || Boolean(permission?.transport !== "INTERNAL_WEB" && permission?.recordingEnabled && !recordingConsent)} onClick={() => void startCall()} className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 py-3 text-xs font-extrabold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16}/>{busy ? "جارٍ تجهيز الميكروفون..." : usesInternalWebCall ? "إرسال رابط مكالمة" : "بدء مكالمة WhatsApp"}</button>
              {!usesInternalWebCall && <button type="button" disabled={busy || loadingPermission || !permission?.canRequestPermission || permission?.canStartCall} onClick={() => void requestPermission()} className="flex min-h-12 items-center justify-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-3 text-xs font-bold text-stone-700 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-40">{busy || loadingPermission ? <LoaderCircle size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}طلب إذن الاتصال</button>}
           </div>
           {!loadingPermission && !error && permission && !permission.canStartCall && !permission.canRequestPermission && <p className="text-center text-[10px] leading-5 text-stone-500">لا يسمح WhatsApp بطلب اتصال جديد حاليًا. تحقق من حدود الإذن أو حاول لاحقًا.</p>}
