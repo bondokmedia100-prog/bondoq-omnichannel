@@ -14,7 +14,7 @@ export function mergeMessages(messages: Message[] = [], incoming: Message[] | Me
 export function messageNotificationPreview(message?: { text?: string | null; kind?: string } | null) {
   const text = message?.text?.trim();
   if (text) return text;
-  return ({ IMAGE: "صورة جديدة", AUDIO: "رسالة صوتية جديدة", FILE: "ملف مرفق جديد", LOCATION: "موقع جديد" } as Record<string, string>)[message?.kind || ""] || "رسالة جديدة";
+  return ({ IMAGE: "صورة جديدة", STICKER: "ملصق جديد", AUDIO: "رسالة صوتية جديدة", FILE: "ملف مرفق جديد", LOCATION: "موقع جديد" } as Record<string, string>)[message?.kind || ""] || "رسالة جديدة";
 }
 
 let audioContext: AudioContext | null = null;

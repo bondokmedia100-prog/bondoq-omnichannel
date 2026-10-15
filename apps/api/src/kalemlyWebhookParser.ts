@@ -21,6 +21,7 @@ export type NormalizedInbound = {
   metadata?: Record<string, unknown>;
   routingDepartment?: Department;
   isComplaint?: boolean;
+  isEdit?: boolean;
 };
 
 export const routeChoice = (payload?: string): { routingDepartment: Department; isComplaint: boolean } | undefined => {
@@ -72,13 +73,14 @@ export function parseKalemlyWebhook(body: any): NormalizedInbound[] {
     const image = content.imageMessage || envelope.image || record.image || (isImage ? media : undefined);
     const audio = content.audioMessage || content.pttMessage || envelope.audio || envelope.voice || record.audio || (isAudio ? media : undefined);
     const document = content.documentMessage || envelope.document || record.document || record.file || (isDocument ? media : undefined);
+    const sticker = content.stickerMessage || envelope.sticker || record.sticker;
     const location = content.locationMessage || envelope.location || record.location;
     const extendedText = content.extendedTextMessage?.text || content.buttonsResponseMessage?.selectedDisplayText || content.templateButtonReplyMessage?.selectedDisplayText;
     const text = typeof rawMessage === "string" ? rawMessage
       : content.conversation || extendedText || image?.caption || audio?.caption || document?.caption || media?.caption || envelope.text || envelope.body || envelope.message_text || record.text || record.body || record.message_text || record.caption || record.buttonReply?.id || record.buttonReply?.title;
     const route = routeChoice(String(record.buttonReply?.id || record.buttonReply?.title || envelope.selectedButtonId || text || "").trim());
-    const file = image || audio || document || media;
-    const kind = location ? MessageKind.LOCATION : image || isImage ? MessageKind.IMAGE : audio || isAudio ? MessageKind.AUDIO : document || isDocument || media ? MessageKind.FILE : MessageKind.TEXT;
+    const file = image || audio || document || sticker || media;
+    const kind = location ? MessageKind.LOCATION : sticker ? MessageKind.STICKER : image || isImage ? MessageKind.IMAGE : audio || isAudio ? MessageKind.AUDIO : document || isDocument || media ? MessageKind.FILE : MessageKind.TEXT;
     const externalId = key.id || envelope.messageId || envelope.message_id || envelope.id || record.messageId || record.message_id || record.id || media?.id || `${phone}:${envelope.messageTimestamp || record.timestamp || Date.now()}`;
     const avatarUrl = envelope.profilePictureUrl || envelope.profilePicUrl || envelope.avatarUrl || record.profilePictureUrl || record.avatarUrl;
     const mediaUrl = file?.url || file?.link || file?.mediaUrl || envelope.mediaUrl || record.mediaUrl;

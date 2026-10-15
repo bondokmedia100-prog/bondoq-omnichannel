@@ -108,6 +108,60 @@ function normalizeJid(value: string) {
   return `${normalizePhoneNumber(input)}@s.whatsapp.net`;
 }
 
+function baileysMessageKey(input: { recipient: string; externalId: string; direction: "INBOUND" | "OUTBOUND" }) {
+  const raw = input.externalId.replace(/^WHATSAPP:/, "");
+  if (raw.startsWith("baileys:")) {
+    const value = raw.slice("baileys:".length);
+    const split = value.lastIndexOf(":");
+    if (split > 0 && split < value.length - 1) return { remoteJid: value.slice(0, split), id: value.slice(split + 1), fromMe: input.direction === "OUTBOUND" };
+  }
+  return { remoteJid: normalizeJid(input.recipient), id: raw, fromMe: input.direction === "OUTBOUND" };
+}
+
+export async function editBaileysWhatsAppMessage(input: { recipient: string; externalId: string; text: string }) {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("تعديل الرسائل متاح فقط عند اتصال WhatsApp بوضع Baileys");
+  const key = baileysMessageKey({ ...input, direction: "OUTBOUND" });
+  if (!key.id || key.id === input.externalId) throw new Error("معرّف رسالة WhatsApp غير صالح");
+  return socket.sendMessage(key.remoteJid, { text: input.text, edit: key as any });
+}
+
+export async function reactToBaileysWhatsAppMessage(input: { recipient: string; externalId: string; direction: "INBOUND" | "OUTBOUND"; emoji: string }) {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("تفاعلات WhatsApp متاحة فقط عند اتصال WhatsApp بوضع Baileys");
+  const key = baileysMessageKey(input);
+  if (!key.id) throw new Error("معرّف رسالة WhatsApp غير صالح");
+  return socket.sendMessage(key.remoteJid, { react: { text: input.emoji, key: key as any } });
+}
+
+export async function markBaileysMessagesRead(externalIds: string[]) {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") return;
+  const keys = externalIds.flatMap((externalId) => {
+    if (!externalId.startsWith("WHATSAPP:baileys:")) return [];
+    const value = externalId.slice("WHATSAPP:baileys:".length);
+    const split = value.lastIndexOf(":");
+    return split > 0 && split < value.length - 1 ? [{ remoteJid: value.slice(0, split), id: value.slice(split + 1), fromMe: false }] : [];
+  });
+  if (keys.length) await socket.readMessages(keys as any);
+}
+
+async function persistBaileysReceipt(update: any) {
+  const key = update?.key;
+  const id = String(key?.id || "");
+  const remoteJid = String(key?.remoteJid || "");
+  if (!id || !remoteJid) return;
+  const receipt = update.receipt || update.update || {};
+  const statusValue = update.update?.status ?? update.status;
+  const statusText = String(statusValue || "").toUpperCase();
+  const statusNumber = Number(statusValue);
+  const deliveryStatus = receipt.readTimestamp || statusNumber >= 4 || statusText.includes("READ") ? "READ"
+    : receipt.receiptTimestamp || statusNumber >= 3 || statusText.includes("DELIVERY_ACK") || statusText.includes("DELIVERED") ? "DELIVERED" : null;
+  if (!deliveryStatus) return;
+  const storedIds = [`WHATSAPP:${id}`, `WHATSAPP:baileys:${remoteJid}:${id}`];
+  const message = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, direction: "OUTBOUND" }, select: { id: true, conversationId: true, deliveryStatus: true } });
+  if (!message || message.deliveryStatus === "READ" || message.deliveryStatus === deliveryStatus) return;
+  const saved = await prisma.message.update({ where: { id: message.id }, data: { deliveryStatus } });
+  io?.to(`conversation:${message.conversationId}`).to("admins").emit("message:status", { conversationId: message.conversationId, message: saved });
+}
+
 function phoneFromJid(value?: string) {
   if (!value) return "";
   const match = value.match(/^([1-9]\d{6,14})@s\.whatsapp\.net$/i);
@@ -159,11 +213,19 @@ async function readMediaFile(url: string) {
   return { buffer, contentType: (response.headers.get("content-type") || "application/octet-stream").split(";")[0].toLowerCase() };
 }
 
-export async function sendBaileysWhatsAppMessage(input: { to: string; message: string; file?: string; mediaType?: "image" | "audio" | "video" | "document" }) {
+export async function sendBaileysWhatsAppMessage(input: { to: string; message: string; file?: string; mediaType?: "image" | "audio" | "video" | "document" | "sticker"; pollOptions?: string[] }) {
   if (!socket || state.status !== "CONNECTED") throw new Error("محرك WhatsApp الداخلي غير متصل. افتح إعدادات واتساب وأعد الاتصال.");
   const jid = normalizeJid(input.to);
+  if (input.pollOptions?.length) {
+    if (input.pollOptions.length < 2 || input.pollOptions.length > 10) throw new Error("يجب أن يحتوي الاستطلاع على خيارين إلى عشرة خيارات");
+    return socket.sendMessage(jid, { poll: { name: input.message, values: input.pollOptions, selectableCount: 1 } });
+  }
   if (!input.file) return socket.sendMessage(jid, { text: input.message || " " });
   const media = await readMediaFile(input.file);
+  if (input.mediaType === "sticker") {
+    if (media.contentType !== "image/webp") throw new Error("يجب أن يكون الملصق بصيغة WebP");
+    return socket.sendMessage(jid, { sticker: media.buffer });
+  }
   if (input.mediaType === "image" || media.contentType.startsWith("image/")) {
     return socket.sendMessage(jid, { image: media.buffer, caption: input.message || undefined, mimetype: media.contentType });
   }
@@ -190,11 +252,13 @@ async function handleIncomingMessage(message: any) {
   const image = content.imageMessage;
   const video = content.videoMessage;
   const document = content.documentMessage;
+  const sticker = content.stickerMessage;
+  const poll = content.pollCreationMessageV3 || content.pollCreationMessageV2 || content.pollCreationMessage;
   const location = content.locationMessage;
   const extended = content.extendedTextMessage?.text || content.buttonsResponseMessage?.selectedDisplayText || content.templateButtonReplyMessage?.selectedDisplayText;
-  const text = content.conversation || extended || image?.caption || video?.caption || document?.caption || audio?.caption || "";
-  const kind = location ? MessageKind.LOCATION : image ? MessageKind.IMAGE : video ? MessageKind.VIDEO : audio ? MessageKind.AUDIO : document ? MessageKind.FILE : MessageKind.TEXT;
-  const mediaMessage = image || video || audio || document;
+  const text = content.conversation || extended || poll?.name || image?.caption || video?.caption || document?.caption || audio?.caption || "";
+  const kind = location ? MessageKind.LOCATION : poll ? MessageKind.POLL : sticker ? MessageKind.STICKER : image ? MessageKind.IMAGE : video ? MessageKind.VIDEO : audio ? MessageKind.AUDIO : document ? MessageKind.FILE : MessageKind.TEXT;
+  const mediaMessage = image || video || audio || document || sticker;
   let mediaBuffer: Buffer | undefined;
   let mediaContentType = String(mediaMessage?.mimetype || "application/octet-stream").split(";")[0].toLowerCase();
   if (mediaMessage) {
@@ -219,6 +283,7 @@ async function handleIncomingMessage(message: any) {
       remoteJid,
       voiceNote: Boolean(audio?.ptt),
       mediaMimeType: mediaContentType,
+      pollOptions: Array.isArray(poll?.options) ? poll.options.map((option: any) => String(option.optionName || option.name || "")).filter(Boolean) : undefined,
       messageTimestamp: Number(message.messageTimestamp || 0)
     }
   };
@@ -315,6 +380,12 @@ async function startSocket() {
   current.ev.on("messages.upsert", ({ messages, type }) => {
     if (type !== "notify") return;
     for (const message of messages) void handleIncomingMessage(message).catch((error) => console.warn("Baileys inbound message could not be stored", error));
+  });
+  current.ev.on("messages.update", (updates) => {
+    for (const update of updates) void persistBaileysReceipt(update).catch((error) => console.warn("Baileys delivery update could not be stored", error));
+  });
+  current.ev.on("message-receipt.update", (updates) => {
+    for (const update of updates) void persistBaileysReceipt(update).catch((error) => console.warn("Baileys receipt could not be stored", error));
   });
   current.ev.on("call", (calls) => {
     for (const call of calls) void handleIncomingCall(current, call).catch((error) => console.warn("WhatsApp call notification failed", error));

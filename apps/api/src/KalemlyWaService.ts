@@ -17,7 +17,8 @@ export type KalemlyWaMessage = {
   to: string;
   message: string;
   file?: string;
-  mediaType?: "image" | "audio" | "video" | "document";
+  mediaType?: "image" | "audio" | "video" | "document" | "sticker";
+  pollOptions?: string[];
 };
 
 type QueuedKalemlyWaMessage = KalemlyWaMessage & { outboundMessageId?: string };
@@ -81,6 +82,8 @@ export async function saveKalemlySettings(input: { authKey?: string; appKey?: st
 
 async function postMessage(input: KalemlyWaMessage) {
   if (await getWhatsAppMode() === "BAILEYS") return sendBaileysWhatsAppMessage(input);
+  if (input.pollOptions?.length) throw new Error("استطلاعات WhatsApp غير مدعومة عبر تكامل API الحالي");
+  if (input.mediaType === "sticker") throw new Error("ملصقات WhatsApp غير مدعومة عبر تكامل API الحالي");
   const settings = await getKalemlySettings();
   if (!settings.authKey || !settings.appKey) throw new Error("أكمل authkey وappkey في إعدادات KalemlyWA أولًا");
   const to = normalizePhoneNumber(input.to);

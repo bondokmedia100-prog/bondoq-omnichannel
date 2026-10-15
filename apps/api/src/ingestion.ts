@@ -3,7 +3,7 @@ import type { NormalizedInbound } from "./providers";
 import { prisma } from "./prisma";
 import { assignConversation, scheduleSla } from "./routing";
 import { io } from "./realtime";
-import { fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
+import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
 import { AUTO_REPLY_HANDOFF_TEXT, AUTO_REPLY_RESTART_MS, buildRoutingMenuText, getServiceChoice, findMatchingAutoReply } from "./autoReplies";
@@ -148,7 +148,8 @@ export async function ingestMessage(inbound: NormalizedInbound) {
         select: { responseText: true }
       });
       const menuText = buildRoutingMenuText(welcomeRule?.responseText);
-      const result: any = await sendRoutingMenu(inbound.channel, inbound.externalCustomerId, menuText);
+      const recipient = channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId);
+      const result: any = await sendRoutingMenu(inbound.channel, recipient, menuText);
       const providerId = kalemlyExternalMessageId(result);
       const menuMessage = await prisma.message.create({ data: {
         conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: menuText,
@@ -165,7 +166,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
   } else if (serviceChoice || directHandoff) {
     conversation = await assignConversation(conversation.id, routeDepartment, { reassignIfIneligible: Boolean(serviceChoice) });
     try {
-      const result: any = await sendToChannel({ channel: inbound.channel, recipient: inbound.externalCustomerId, text: AUTO_REPLY_HANDOFF_TEXT });
+      const result: any = await sendToChannel({ channel: inbound.channel, recipient: channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId), text: AUTO_REPLY_HANDOFF_TEXT });
       const providerId = kalemlyExternalMessageId(result);
       const handoffMessage = await prisma.message.create({ data: {
         conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: AUTO_REPLY_HANDOFF_TEXT,
@@ -180,7 +181,7 @@ export async function ingestMessage(inbound: NormalizedInbound) {
     }
   } else if (autoReply) {
     try {
-      const result: any = await sendToChannel({ channel: inbound.channel, recipient: inbound.externalCustomerId, text: autoReply.responseText });
+      const result: any = await sendToChannel({ channel: inbound.channel, recipient: channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId), text: autoReply.responseText });
       const providerId = kalemlyExternalMessageId(result);
       const reply = await prisma.message.create({ data: {
         conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text: autoReply.responseText,
@@ -210,11 +211,26 @@ export async function ingestMessage(inbound: NormalizedInbound) {
       { role: Role.SUPERVISOR, canViewAllConversations: null }
     ]
   }, select: { id: true } });
-  const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
+  const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.STICKER ? "ملصق" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
   const tag = `inbound-${conversation.id}`;
   void sendPushNotification(admins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
   if (conversation.assignedAgentId) void sendPushNotification([conversation.assignedAgentId], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
   await scheduleSla(conversation.id, message.id);
   if (message.kind === MessageKind.AUDIO) void transcribeAudioMessage(message.id).catch((error) => console.error("Voice note transcription failed", error));
   return { conversationId: conversation.id, messageId: message.id };
+}
+
+export async function updateEditedInboundMessage(inbound: NormalizedInbound) {
+  if (!inbound.isEdit) return false;
+  const externalId = `${inbound.channel}:${inbound.externalId}`;
+  const existing = await prisma.message.findUnique({ where: { externalId }, select: { id: true, conversationId: true, direction: true, metadata: true } });
+  if (!existing || existing.direction !== "INBOUND") return false;
+  const previous = existing.metadata && typeof existing.metadata === "object" && !Array.isArray(existing.metadata)
+    ? existing.metadata as Record<string, Prisma.JsonValue> : {};
+  const message = await prisma.message.update({ where: { id: existing.id }, data: {
+    text: inbound.text || null,
+    metadata: { ...previous, editedAt: new Date().toISOString() } as Prisma.InputJsonValue
+  }, include: { author: { select: { id: true, name: true } }, reactions: { include: { user: { select: { id: true, name: true } } } } } });
+  io.to(`conversation:${existing.conversationId}`).to("admins").emit("message:updated", { conversationId: existing.conversationId, message });
+  return true;
 }

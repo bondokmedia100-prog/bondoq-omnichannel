@@ -88,6 +88,8 @@ enum MessageKind {
   VIDEO
   LOCATION
   FILE
+  STICKER
+  POLL
   SYSTEM
 }
 
@@ -121,6 +123,8 @@ model User {
   mediaAssets              MediaAsset[]           @relation("MediaUploader")
   pushSubscriptions        PushSubscription[]
   favoriteConversations    ConversationFavorite[]
+  pinnedConversations      ConversationPin[]
+  favoriteCustomers        CustomerFavorite[]
   messageReactions         MessageReaction[]
   passwordResetRequest       PasswordResetRequest? @relation("PasswordResetSubject")
   passwordResetReviews       PasswordResetRequest[] @relation("PasswordResetReviewer")
@@ -185,6 +189,18 @@ model Customer {
   conversations      Conversation[]
   orders             OrderDetails[]
   tags               CustomerTagAssignment[]
+  favorites          CustomerFavorite[]
+}
+
+model CustomerFavorite {
+  userId     String
+  customerId String
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@id([userId, customerId])
+  @@index([customerId, createdAt])
 }
 
 model Conversation {
@@ -217,6 +233,7 @@ model Conversation {
   whisperNotes           WhisperNote[]
   internalNotes          ConversationNote[]
   favorites              ConversationFavorite[]
+  pins                   ConversationPin[]
   orderDetails           OrderDetails[]
   auditLogs              AuditLog[]
   csatSurvey             CsatSurvey?
@@ -380,6 +397,17 @@ model CustomerTagAssignment {
 }
 
 model ConversationFavorite {
+  userId         String
+  conversationId String
+  createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@index([conversationId, createdAt])
+}
+
+model ConversationPin {
   userId         String
   conversationId String
   createdAt      DateTime     @default(now())

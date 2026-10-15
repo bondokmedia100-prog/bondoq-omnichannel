@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, BookUser, Mail, Pencil, Phone, Plus, Save, Search, Tag, Trash2, Users, X } from "lucide-react";
+import { ArrowRight, BookUser, Mail, Pencil, Phone, Plus, Save, Search, Star, Tag, Trash2, Users, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { parseContactsCsv } from "@/lib/contactsCsv";
 
@@ -15,6 +15,8 @@ export default function CrmContactsPage() {
   const [tab, setTab] = useState<"customers" | "directory">("customers");
   const [customers, setCustomers] = useState<Row[]>([]);
   const [customerCount, setCustomerCount] = useState(0);
+  const [favoriteCustomerIds, setFavoriteCustomerIds] = useState<string[]>([]);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [tags, setTags] = useState<Row[]>([]);
   const [directory, setDirectory] = useState<Row[]>([]);
   const [selected, setSelected] = useState<Row | null>(null);
@@ -37,9 +39,10 @@ export default function CrmContactsPage() {
   const canManageCatalog = profile?.role === "ADMIN" || profile?.role === "SUPERVISOR" && profile.canManageCatalog !== false;
   const canManageTeam = profile?.role === "ADMIN" || profile?.role === "SUPERVISOR" && profile.canManageTeam !== false;
 
-  async function loadCustomers(search = query) {
+  async function loadCustomers(search = query, onlyFavorites = favoritesOnly) {
     const params = new URLSearchParams();
     if (search.trim()) params.set("q", search.trim());
+    if (onlyFavorites) params.set("favoritesOnly", "true");
     const result = await api<{ customers: Row[]; total: number }>(`/api/customers?${params}`);
     setCustomers(result.customers); setCustomerCount(result.total);
   }
@@ -48,10 +51,10 @@ export default function CrmContactsPage() {
     const user = await api<Profile>("/api/auth/me");
     setProfile(user);
     const manageCatalog = user.role === "ADMIN" || user.role === "SUPERVISOR" && user.canManageCatalog !== false;
-    const [customerResult, tagResult, directoryResult] = await Promise.all([
-      api<{ customers: Row[]; total: number }>("/api/customers"), api<Row[]>(manageCatalog ? "/api/admin/customer-tags" : "/api/customer-tags"), api<Row[]>(manageCatalog ? "/api/admin/directory" : "/api/directory")
+    const [customerResult, tagResult, directoryResult, favorites] = await Promise.all([
+      api<{ customers: Row[]; total: number }>("/api/customers"), api<Row[]>(manageCatalog ? "/api/admin/customer-tags" : "/api/customer-tags"), api<Row[]>(manageCatalog ? "/api/admin/directory" : "/api/directory"), api<{ ids: string[] }>("/api/customers/favorites")
     ]);
-    setCustomers(customerResult.customers); setCustomerCount(customerResult.total); setTags(tagResult); setDirectory(directoryResult);
+    setCustomers(customerResult.customers); setCustomerCount(customerResult.total); setFavoriteCustomerIds(favorites.ids || []); setTags(tagResult); setDirectory(directoryResult);
   }
 
   useEffect(() => {
@@ -73,6 +76,17 @@ export default function CrmContactsPage() {
       setForm({ displayName: detail.displayName || detail.name || "", phone: detail.phone || "", email: detail.email || "", notes: detail.notes || "" });
       setSelectedTagIds((detail.tags || []).map((item: Row) => item.tagId));
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر فتح ملف العميل"); }
+  }
+
+  async function toggleCustomerFavorite() {
+    if (!selected || busy) return;
+    const favorite = !favoriteCustomerIds.includes(selected.id);
+    try {
+      await api(`/api/customers/${selected.id}/favorite`, { method: "PUT", body: JSON.stringify({ favorite }) });
+      setFavoriteCustomerIds((current) => favorite ? [...new Set([...current, selected.id])] : current.filter((id) => id !== selected.id));
+      if (favoritesOnly && !favorite) await loadCustomers(query, true);
+      setNotice(favorite ? "تم حفظ العميل في المفضلة." : "تمت إزالة العميل من المفضلة.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث مفضلة العميل"); }
   }
 
   async function saveCustomer(event: FormEvent) {
@@ -175,8 +189,10 @@ export default function CrmContactsPage() {
       {notice && <div role="status" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{notice}</div>}
       <nav className="mb-4 flex gap-2"><button onClick={() => setTab("customers")} className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-bold ${tab === "customers" ? "bg-[#d32f2f] text-white" : "bg-white text-stone-500"}`}><Users size={16} /> العملاء <span className="rounded-full bg-black/10 px-2 py-0.5 text-xs">{customerCount}</span></button><button onClick={() => setTab("directory")} className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-bold ${tab === "directory" ? "bg-[#d32f2f] text-white" : "bg-white text-stone-500"}`}><BookUser size={16} /> دليل الشركة</button></nav>
       {tab === "customers" ? <section className="grid min-h-[70vh] gap-4 lg:grid-cols-[minmax(0,1fr)_390px]">
+        <div className="flex justify-start lg:col-span-2"><button type="button" aria-pressed={favoritesOnly} onClick={() => { const next = !favoritesOnly; setFavoritesOnly(next); void loadCustomers(query, next); }} className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold ${favoritesOnly ? "bg-amber-500 text-white" : "bg-white text-stone-600"}`}><Star size={15} fill={favoritesOnly ? "currentColor" : "none"} />{favoritesOnly ? "عرض كل العملاء" : `العملاء المفضلون (${favoriteCustomerIds.length})`}</button></div>
         <div className="panel min-h-0 overflow-hidden"><form onSubmit={(event) => { event.preventDefault(); void loadCustomers(); }} className="flex gap-2 border-b border-stone-100 p-4"><label className="flex h-11 flex-1 items-center gap-2 rounded-xl bg-stone-50 px-3"><Search size={16} className="text-stone-400" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="ابحث بالاسم أو الهاتف أو البريد" className="w-full bg-transparent text-sm outline-none" /></label><button className="rounded-xl bg-stone-800 px-4 text-xs font-bold text-white">بحث</button></form>{canManageTeam && <div className="flex flex-wrap items-center justify-end gap-2 border-b border-stone-100 px-4 py-2"><input ref={importInput} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void importCustomers(event.target.files?.[0])} /><button disabled={busy} onClick={() => importInput.current?.click()} className="rounded-lg border border-stone-200 px-3 py-2 text-[10px] font-bold text-stone-600 disabled:opacity-50">استيراد CSV</button><button onClick={() => void exportCustomers()} className="rounded-lg bg-[#fff8e9] px-3 py-2 text-[10px] font-bold text-[#8c650a]">تصدير CSV</button><span className="w-full text-left text-[9px] text-stone-400">الأعمدة: displayName, phone, email, notes</span></div>}<div className="max-h-[66vh] divide-y divide-stone-100 overflow-y-auto">{customers.map((customer) => <button key={customer.id} onClick={() => void selectCustomer(customer)} className={`flex w-full items-center gap-3 px-4 py-3 text-right hover:bg-[#fffaf2] ${selected?.id === customer.id ? "bg-[#fff6e4]" : "bg-white"}`}><span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#fff0d1] font-bold text-[#9c6920]">{(customer.displayName || customer.name || "ع")[0]}</span><span className="min-w-0 flex-1"><b className="block truncate text-sm">{customer.displayName || customer.name || "عميل جديد"}</b><span className="mt-1 block truncate text-xs text-stone-400">{customer.phone || customer.email || "لا توجد بيانات اتصال"}</span><span className="mt-1 flex flex-wrap gap-1">{customer.tags?.map((item: Row) => <i key={item.tagId} className="rounded-full px-2 py-0.5 text-[9px] not-italic" style={{ backgroundColor: `${item.tag.color}20`, color: item.tag.color }}>{item.tag.name}</i>)}</span></span></button>)}{!customers.length && <p className="p-10 text-center text-sm text-stone-400">لا توجد جهات اتصال مطابقة.</p>}</div></div>
         <aside className="panel soft-scroll max-h-[78vh] overflow-y-auto p-4">
+          {selected && <div className="mb-3 flex justify-end"><button type="button" onClick={() => void toggleCustomerFavorite()} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold ${favoriteCustomerIds.includes(selected.id) ? "bg-amber-50 text-amber-700" : "bg-stone-50 text-stone-500"}`}><Star size={14} fill={favoriteCustomerIds.includes(selected.id) ? "currentColor" : "none"} />{favoriteCustomerIds.includes(selected.id) ? "إزالة من المفضلة" : "حفظ في المفضلة"}</button></div>}
           {selected ? <form onSubmit={saveCustomer} className="space-y-3"><div className="mb-2 flex items-center justify-between"><h2 className="font-extrabold">ملف العميل</h2><span className="text-[10px] text-stone-400">{selected.conversations?.length || 0} محادثة</span></div><label className="block text-xs font-bold text-stone-500">الاسم<input className={`${inputClass} mt-1`} value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} maxLength={120} /></label><label className="block text-xs font-bold text-stone-500">الهاتف<input className={`${inputClass} mt-1`} value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} dir="ltr" maxLength={32} /></label><label className="block text-xs font-bold text-stone-500">البريد الإلكتروني<input className={`${inputClass} mt-1`} type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} maxLength={254} dir="ltr" /></label><label className="block text-xs font-bold text-stone-500">ملاحظات داخلية<textarea className="mt-1 w-full rounded-xl border border-stone-200 p-3 text-sm outline-none focus:border-amber-400" rows={4} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} maxLength={4000} /></label>
             {!!tags.length && <fieldset><legend className="mb-2 text-xs font-bold text-stone-500">وسوم العميل</legend><div className="flex flex-wrap gap-2">{tags.map((tag) => <label key={tag.id} className="flex items-center gap-1.5 rounded-full border border-stone-100 px-2.5 py-1.5 text-xs"><input type="checkbox" checked={selectedTagIds.includes(tag.id)} onChange={(event) => setSelectedTagIds((old) => event.target.checked ? [...old, tag.id] : old.filter((id) => id !== tag.id))} />{tag.name}</label>)}</div></fieldset>}
             <button disabled={busy} className="h-11 w-full rounded-xl bg-[#d32f2f] text-sm font-bold text-white disabled:opacity-50">{busy ? "جارٍ الحفظ..." : "حفظ التعديلات"}</button></form> : <div className="grid min-h-64 place-items-center text-center text-sm text-stone-400"><div><Tag size={25} className="mx-auto mb-2" />اختر عميلًا لعرض بياناته ووسومه.</div></div>}

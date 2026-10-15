@@ -18,5 +18,6 @@ test("uses message content or a useful media label for notifications", () => {
   assert.equal(messageNotificationPreview({ text: "  هل لديكم توصيل؟  " }), "هل لديكم توصيل؟");
   assert.equal(messageNotificationPreview({ kind: "AUDIO" }), "رسالة صوتية جديدة");
   assert.equal(messageNotificationPreview({ kind: "IMAGE" }), "صورة جديدة");
+  assert.equal(messageNotificationPreview({ kind: "STICKER" }), "ملصق جديد");
   assert.equal(messageNotificationPreview(), "رسالة جديدة");
 });

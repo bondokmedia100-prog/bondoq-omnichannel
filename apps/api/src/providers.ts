@@ -2,10 +2,15 @@ import { Channel, MessageKind } from "@prisma/client";
 import { enqueueKalemlyMessage, getKalemlySettings } from "./KalemlyWaService";
 import { AUTO_REPLY_MENU_TEXT } from "./autoReplies";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
+import { editBaileysWhatsAppMessage, getWhatsAppMode, reactToBaileysWhatsAppMessage } from "./BaileysWhatsAppService";
 import { routeChoice } from "./kalemlyWebhookParser";
 import type { NormalizedInbound } from "./kalemlyWebhookParser";
 export { parseKalemlyWebhook } from "./kalemlyWebhookParser";
 export type { NormalizedInbound } from "./kalemlyWebhookParser";
+
+export function channelRecipient(channel: Channel, conversationId: string, customerId: string) {
+  return channel === Channel.TELEGRAM ? conversationId : customerId;
+}
 
 async function postJson(url: string, payload: unknown, token: string) {
   const response = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -13,18 +18,22 @@ async function postJson(url: string, payload: unknown, token: string) {
   return response.json();
 }
 
-export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaAssetId?: string; mediaContentType?: string; latitude?: number; longitude?: number; outboundMessageId?: string }) {
+export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaAssetId?: string; mediaContentType?: string; latitude?: number; longitude?: number; pollOptions?: string[]; outboundMessageId?: string }) {
   const kind = input.kind || MessageKind.TEXT;
   if (input.channel === Channel.WHATSAPP) {
+    if (kind === MessageKind.STICKER && await getWhatsAppMode() !== "BAILEYS") throw new Error("ملصقات WhatsApp غير مدعومة عبر وضع API الحالي؛ استخدم وضع Baileys");
+    if (kind === MessageKind.POLL && await getWhatsAppMode() !== "BAILEYS") throw new Error("استطلاعات WhatsApp غير مدعومة عبر وضع API الحالي؛ استخدم وضع Baileys");
     const message = kind === MessageKind.LOCATION
       ? `${input.text || "موقع العميل"}\nhttps://maps.google.com/?q=${input.latitude},${input.longitude}`
       : input.text || "";
     return enqueueKalemlyMessage({
       to: input.recipient, message,
-      ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : kind === MessageKind.VIDEO ? "video" : "document" } : {})
+      ...(input.pollOptions ? { pollOptions: input.pollOptions } : {}),
+      ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.STICKER ? "sticker" : kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : kind === MessageKind.VIDEO ? "video" : "document" } : {})
     }, input.outboundMessageId);
   }
   if (input.channel === Channel.MESSENGER) {
+    if (kind === MessageKind.POLL || kind === MessageKind.STICKER) throw new Error("الاستطلاعات والملصقات غير مدعومة في Messenger");
     const settings = await getMessengerSettings();
     if (!settings.pageAccessToken) throw new Error("Meta Page access token is not configured");
     const attachmentType = kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : "file";
@@ -50,15 +59,59 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
   const audioMethod = kind !== MessageKind.AUDIO || !input.mediaContentType ? "sendAudio"
     : input.mediaContentType === "audio/ogg" ? "sendVoice"
       : input.mediaContentType === "audio/mpeg" || input.mediaContentType === "audio/mp4" ? "sendAudio" : "sendDocument";
-  const method = kind === MessageKind.IMAGE ? "sendPhoto" : kind === MessageKind.AUDIO ? audioMethod : kind === MessageKind.FILE ? "sendDocument" : kind === MessageKind.LOCATION ? "sendLocation" : "sendMessage";
+  const method = kind === MessageKind.POLL ? "sendPoll" : kind === MessageKind.STICKER ? "sendSticker" : kind === MessageKind.IMAGE ? "sendPhoto" : kind === MessageKind.AUDIO ? audioMethod : kind === MessageKind.FILE ? "sendDocument" : kind === MessageKind.LOCATION ? "sendLocation" : "sendMessage";
   const payload = kind === MessageKind.LOCATION ? { chat_id: input.recipient, latitude: input.latitude, longitude: input.longitude }
+    : kind === MessageKind.POLL ? { chat_id: input.recipient, question: input.text || "", options: input.pollOptions || [], is_anonymous: true, allows_multiple_answers: false }
+    : kind === MessageKind.STICKER ? { chat_id: input.recipient, sticker: input.mediaUrl }
     : kind === MessageKind.IMAGE ? { chat_id: input.recipient, photo: input.mediaUrl, caption: input.text }
     : kind === MessageKind.AUDIO ? { chat_id: input.recipient, [audioMethod === "sendVoice" ? "voice" : audioMethod === "sendDocument" ? "document" : "audio"]: input.mediaUrl, caption: input.text }
     : kind === MessageKind.FILE ? { chat_id: input.recipient, document: input.mediaUrl, caption: input.text }
     : { chat_id: input.recipient, text: input.text || "" };
   const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-  if (!response.ok) throw new Error(`Telegram send failed (${response.status}): ${await response.text()}`);
-  return response.json();
+  const result = await response.json() as { ok?: boolean; description?: string };
+  if (!response.ok || result.ok === false) throw new Error(`Telegram send failed (${response.status}): ${result.description || "provider rejected the request"}`);
+  return result;
+}
+
+export async function editProviderMessage(input: { channel: Channel; recipient: string; externalId: string; text: string; direction: "INBOUND" | "OUTBOUND" }) {
+  if (input.direction !== "OUTBOUND") throw new Error("يمكن تعديل الرسائل التي أرسلها الفريق فقط");
+  if (input.channel === Channel.WHATSAPP) return editBaileysWhatsAppMessage({ recipient: input.recipient, externalId: input.externalId, text: input.text });
+  if (input.channel !== Channel.TELEGRAM) throw new Error("تعديل الرسائل غير مدعوم في Messenger");
+  const settings = await getTelegramSettings();
+  if (!settings.botToken) throw new Error("Telegram bot token is not configured");
+  const messageId = input.externalId.split(":").at(-1);
+  if (!messageId || !/^\d+$/.test(messageId)) throw new Error("معرّف رسالة Telegram غير صالح");
+  const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/editMessageText`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: input.recipient, message_id: Number(messageId), text: input.text })
+  });
+  const result = await response.json() as { ok?: boolean; description?: string };
+  if (!response.ok || !result.ok) throw new Error(result.description || "تعذر تعديل رسالة Telegram");
+  return result;
+}
+
+export async function reactToProviderMessage(input: { channel: Channel; recipient: string; externalId: string; direction: "INBOUND" | "OUTBOUND"; emoji: string }) {
+  if (input.channel === Channel.WHATSAPP) {
+    if (await getWhatsAppMode() !== "BAILEYS") return false;
+    await reactToBaileysWhatsAppMessage({ recipient: input.recipient, externalId: input.externalId, direction: input.direction, emoji: input.emoji });
+    return true;
+  }
+  if (input.channel !== Channel.TELEGRAM) return false;
+  const settings = await getTelegramSettings();
+  if (!settings.botToken) throw new Error("Telegram bot token is not configured");
+  const messageId = input.externalId.split(":").at(-1);
+  if (!messageId || !/^\d+$/.test(messageId)) return false;
+  const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/setMessageReaction`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: input.recipient, message_id: Number(messageId), reaction: input.emoji ? [{ type: "emoji", emoji: input.emoji }] : [] })
+  });
+  const result = await response.json() as { ok?: boolean; description?: string };
+  if (!response.ok || !result.ok) throw new Error(result.description || "تعذر مزامنة التفاعل مع Telegram");
+  return true;
+}
+
+export function parseTelegramMessageId(externalId: string) {
+  return externalId.split(":").at(-1) || "";
 }
 
 export async function sendRoutingMenu(channel: Channel, recipient: string, prompt = AUTO_REPLY_MENU_TEXT) {
@@ -145,13 +198,15 @@ export function parseTelegramWebhook(body: any): NormalizedInbound[] {
   const photo = message.photo?.at(-1);
   const document = message.document;
   const audio = message.voice || message.audio;
+  const sticker = message.sticker;
+  const poll = message.poll;
   const location = message.location;
-  const fileId = photo?.file_id || document?.file_id || audio?.file_id;
+  const fileId = photo?.file_id || document?.file_id || audio?.file_id || sticker?.file_id;
   return [{
     channel: Channel.TELEGRAM, externalConversationId: String(message.chat.id), externalCustomerId: String(message.from?.id || message.chat.id),
-    customerName: [message.from?.first_name, message.from?.last_name].filter(Boolean).join(" "), text: message.text || message.caption,
-    kind: location ? MessageKind.LOCATION : photo ? MessageKind.IMAGE : audio ? MessageKind.AUDIO : document ? MessageKind.FILE : MessageKind.TEXT,
-    latitude: location?.latitude, longitude: location?.longitude, externalId: `${message.chat.id}:${message.message_id}`, metadata: { fileId, chatId: message.chat.id }
+    customerName: [message.from?.first_name, message.from?.last_name].filter(Boolean).join(" "), text: message.text || message.caption || poll?.question,
+     kind: location ? MessageKind.LOCATION : poll ? MessageKind.POLL : sticker ? MessageKind.STICKER : photo ? MessageKind.IMAGE : audio ? MessageKind.AUDIO : document ? MessageKind.FILE : MessageKind.TEXT,
+     latitude: location?.latitude, longitude: location?.longitude, externalId: `${message.chat.id}:${message.message_id}`, isEdit: Boolean(body.edited_message), metadata: { fileId, chatId: message.chat.id, pollId: poll?.id, pollOptions: poll?.options?.map((option: any) => option.text) }
   }];
 }
 
@@ -195,5 +250,10 @@ export async function fetchInboundMedia(channel: Channel, metadata: Record<strin
   if (!trustedMediaHost) throw new Error("Media host is not trusted");
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Media download failed (${response.status})`);
-  return { body: Buffer.from(await response.arrayBuffer()), contentType: response.headers.get("content-type") || "application/octet-stream" };
+  const maxBytes = 12 * 1024 * 1024;
+  const contentLength = Number(response.headers.get("content-length") || 0);
+  if (contentLength > maxBytes) throw new Error("Inbound media exceeds the 12 MiB forwarding limit");
+  const body = Buffer.from(await response.arrayBuffer());
+  if (body.length > maxBytes) throw new Error("Inbound media exceeds the 12 MiB forwarding limit");
+  return { body, contentType: response.headers.get("content-type") || "application/octet-stream" };
 }
