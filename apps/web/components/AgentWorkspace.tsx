@@ -87,6 +87,7 @@ export default function AgentWorkspace() {
   const [showAccount, setShowAccount] = useState(false);
   const [showMobileProfile, setShowMobileProfile] = useState(false);
   const [showWhatsAppCall, setShowWhatsAppCall] = useState(false);
+  const [showHeaderOptions, setShowHeaderOptions] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
   const [handoffColleagues, setHandoffColleagues] = useState<AnyRecord[]>([]);
   const [handoffBusyId, setHandoffBusyId] = useState("");
@@ -102,6 +103,7 @@ export default function AgentWorkspace() {
   const activeIdRef = useRef("");
   const messageListRef = useRef<HTMLDivElement>(null);
   const messageEndRef = useRef<HTMLDivElement>(null);
+  const headerOptionsRef = useRef<HTMLDivElement>(null);
   const replyInputRef = useRef<HTMLTextAreaElement>(null);
   const stickToBottom = useRef(true);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -141,7 +143,7 @@ export default function AgentWorkspace() {
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" }); setSelectedProductIds([]); }
     const request = ++detailRequest.current;
-    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setShowMobileProfile(false); setActiveId(id); setDetail(null); setNotice("");
+    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setShowMobileProfile(false); setShowHeaderOptions(false); setActiveId(id); setDetail(null); setNotice("");
     socketRef.current?.emit("conversation:join", id);
     try {
       const conversation = await api(`/api/conversations/${id}?messageLimit=50`);
@@ -481,6 +483,34 @@ export default function AgentWorkspace() {
   }, [lightboxImage]);
 
   useEffect(() => {
+    if (!showHeaderOptions) return;
+    const closeIfOutside = (event: Event) => {
+      if (event.target instanceof Node && !headerOptionsRef.current?.contains(event.target)) setShowHeaderOptions(false);
+    };
+    const handleMenuKeys = (event: KeyboardEvent) => {
+      const items = Array.from(headerOptionsRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') || []);
+      if (event.key === "Escape") {
+        setShowHeaderOptions(false);
+        headerOptionsRef.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus();
+        return;
+      }
+      if (!items.length || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : event.key === "ArrowDown" ? (current + 1) % items.length : (current <= 0 ? items.length : current) - 1;
+      items[next]?.focus();
+    };
+    document.addEventListener("mousedown", closeIfOutside);
+    document.addEventListener("touchstart", closeIfOutside);
+    document.addEventListener("keydown", handleMenuKeys);
+    return () => {
+      document.removeEventListener("mousedown", closeIfOutside);
+      document.removeEventListener("touchstart", closeIfOutside);
+      document.removeEventListener("keydown", handleMenuKeys);
+    };
+  }, [showHeaderOptions]);
+
+  useEffect(() => {
     if (!recording) return;
     const timer = window.setInterval(() => setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000)), 250);
     return () => window.clearInterval(timer);
@@ -740,7 +770,7 @@ export default function AgentWorkspace() {
         {isDraggingFile && detail && <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-emerald-500 bg-emerald-50/90 text-lg font-extrabold text-emerald-800">أفلت الصورة أو ملصق WebP أو الصوت أو الفيديو أو الملف لإرساله</div>}
         {detail ? <>
             <button type="button" onClick={() => { ++detailRequest.current; detailLoadingIdRef.current = ""; loadingMessagesRef.current.delete(activeId); socketRef.current?.emit("conversation:leave", activeId); activeIdRef.current = ""; setActiveId(""); setDetail(null); setIncomingNotice(null); }} className="mobile-chat-back"><ArrowLeft size={16} /> رجوع للمحادثات</button>
-            <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-stone-100 bg-white px-4"><div className="flex min-w-0 items-center gap-3"><Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} /><div className="min-w-0"><h2 className="truncate text-sm font-extrabold">{customerDisplayName(detail.customer)} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</h2><div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</div></div></div><div className="flex items-center gap-1"><button type="button" onClick={() => void toggleFavorite()} title={favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"} aria-label={favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"} className={`grid h-9 w-9 place-items-center rounded-lg ${favoriteIds.includes(activeId) ? "text-amber-500 hover:bg-amber-50" : "text-stone-400 hover:bg-stone-100"}`}><Star size={17} fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /></button><button onClick={() => api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "PENDING" }) }).then(() => setNotice("تم تأجيل المحادثة للمتابعة لاحقًا."))} title="تأجيل" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><Clock3 size={17} /></button><button onClick={resolveConversation} title="تم الحل وإرسال استبيان الرضا" className="grid h-9 w-9 place-items-center rounded-lg text-emerald-600 hover:bg-emerald-50"><CheckCircle2 size={17} /></button><button onClick={closeConversation} title="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-emerald-50 hover:text-emerald-700"><Archive size={17} /></button><button title="خيارات" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><MoreHorizontal size={18} /></button></div></div>
+            <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-stone-100 bg-white px-4"><div className="flex min-w-0 items-center gap-3"><Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} /><div className="min-w-0"><h2 className="truncate text-sm font-extrabold">{customerDisplayName(detail.customer)} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</h2><div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</div></div></div><div className="flex items-center gap-1"><button type="button" onClick={() => void toggleFavorite()} title={favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"} aria-label={favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"} className={`grid h-9 w-9 place-items-center rounded-lg ${favoriteIds.includes(activeId) ? "text-amber-500 hover:bg-amber-50" : "text-stone-400 hover:bg-stone-100"}`}><Star size={17} fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /></button><button onClick={() => api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "PENDING" }) }).then(() => setNotice("تم تأجيل المحادثة للمتابعة لاحقًا."))} title="تأجيل" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><Clock3 size={17} /></button><button onClick={resolveConversation} title="تم الحل وإرسال استبيان الرضا" className="grid h-9 w-9 place-items-center rounded-lg text-emerald-600 hover:bg-emerald-50"><CheckCircle2 size={17} /></button><button onClick={closeConversation} title="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-emerald-50 hover:text-emerald-700"><Archive size={17} /></button><div ref={headerOptionsRef} className="relative"><button type="button" title="خيارات" aria-label="خيارات المحادثة" aria-haspopup="menu" aria-expanded={showHeaderOptions} onClick={() => setShowHeaderOptions((open) => !open)} className={`grid h-9 w-9 place-items-center rounded-lg ${showHeaderOptions ? "bg-stone-100 text-stone-700" : "text-stone-400 hover:bg-stone-100"}`}><MoreHorizontal size={18} /></button>{showHeaderOptions && <div role="menu" aria-label="خيارات المحادثة" className="absolute left-0 top-full z-50 mt-2 w-60 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">{detail.channel === "WHATSAPP" && <button type="button" role="menuitem" disabled={!callTarget || detail.customer?.isBlocked} title={!callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : undefined} onClick={() => { setShowHeaderOptions(false); setShowWhatsAppCall(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><PhoneCall size={16} className="shrink-0" /><span className="min-w-0"><span className="block text-xs font-extrabold">مكالمة WhatsApp داخل النظام</span><span className="mt-0.5 block text-[10px] text-stone-500">{detail.customer?.isBlocked ? "العميل محظور داخل النظام" : callTarget ? "بدء مكالمة من شاشة المحادثة" : "أضف رقمًا إلى ملف العميل أولًا"}</span></span></button>}<button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); setShowMobileProfile(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><BookUser size={16} className="shrink-0 text-stone-400" /><span className="text-xs font-bold">ملف العميل وبياناته</span></button><button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void toggleFavorite(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Star size={16} className="shrink-0 text-amber-500" fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /><span className="text-xs font-bold">{favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"}</span></button></div>}</div></div></div>
              {user?.role === "AGENT" && user.department === "CUSTOMER_CARE" && <div className="flex justify-end border-b border-stone-100 bg-white px-4 py-2"><button type="button" onClick={() => void openHandoffDialog()} className="flex items-center gap-1.5 rounded-lg bg-[#fff8e9] px-3 py-2 text-[10px] font-bold text-[#9b7219] hover:bg-amber-100"><Users size={14} /> تحويل لزميل متاح</button></div>}
              {detail.customer?.isBlocked && <div role="status" className="flex shrink-0 items-center gap-2 border-b border-red-100 bg-red-50 px-4 py-2 text-[10px] font-bold text-red-800"><Ban size={14} /> العميل محظور داخل النظام؛ لا يمكن إرسال ردود أو منتجات إليه.</div>}
              <div className="flex shrink-0 justify-end border-b border-stone-100 bg-white px-4 py-1.5"><button type="button" onClick={() => setShowMobileProfile(true)} className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-[10px] font-bold text-[#9b7219] hover:bg-amber-50"><CakeSlice size={13} /> ملف العميل وطلب سريع</button></div>
