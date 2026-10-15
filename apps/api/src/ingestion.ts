@@ -6,7 +6,7 @@ import { io } from "./realtime";
 import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
-import { buildBranchReplyText, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, type BotState } from "./autoReplies";
+import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, type BotState } from "./autoReplies";
 import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
 import { detectImageContentType, publicMediaUrl, safeFileName } from "./mediaStorage";
@@ -95,6 +95,19 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     if ((error as { code?: string }).code === "P2002") return { duplicate: true, conversationId: conversation.id };
     throw error;
   }
+  if (customer.isBlocked) {
+    const previousAssignedAgentId = conversation.assignedAgentId;
+    conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: {
+      lastMessageAt: message.createdAt, lastInboundAt: message.createdAt, unreadCount: { increment: 1 },
+      assignedAgentId: null, status: ConversationStatus.CLOSED, closedAt: new Date(), awaitingRouting: false,
+      botState: ConversationBotState.ASSIGNED_TO_AGENT
+    } });
+    await prisma.auditLog.create({ data: { action: "BLOCKED_CUSTOMER_MESSAGE_IGNORED", conversationId: conversation.id, details: { customerId: customer.id, messageId: message.id } } });
+    if (previousAssignedAgentId) io?.to(`agent:${previousAssignedAgentId}`).emit("conversation:unassigned", conversation);
+    io?.to("admins").emit("conversation:updated", conversation);
+    io?.to("admins").emit("message:new", { conversation, message, customer });
+    return { conversationId: conversation.id, messageId: message.id, blocked: true };
+  }
   const pendingSurvey = await prisma.csatSurvey.findUnique({ where: { conversationId: conversation.id } });
   const ratingText = (inbound.text || "").trim()
     .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
@@ -107,7 +120,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const starting = !isRatingReply && (isNewConversation || isTerminal);
   const currentBotState: BotState = conversation.awaitingRouting ? "BOT_MENU" : conversation.botState;
   const decision = decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
-  const serviceChoice = decision.action === "BRANCHES" || decision.action === "HANDOFF" ? decision.choice : undefined;
+  const serviceChoice = decision.action === "HANDOFF" ? decision.choice : undefined;
   const autoRules = decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
     ? await prisma.autoReplyRule.findMany({ where: { isActive: true, isWelcome: false }, orderBy: [{ priority: "desc" }, { createdAt: "asc" }] })
     : [];
@@ -187,10 +200,6 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false, botState: ConversationBotState.ASSIGNED_TO_AGENT, serviceTag: "تواصل مباشر" } });
       conversation = await assignConversation(conversation.id);
     }
-  } else if (decision.action === "BRANCHES") {
-    try {
-      await sendBotReply(buildBranchReplyText(chatbotSettings), "branch-information", { service: serviceChoice?.label || chatbotSettings.option1Label });
-    } catch (error) { console.error("Branch information reply failed", error); }
   } else if (decision.action === "INVALID") {
     try {
       await sendBotReply(chatbotSettings.invalidChoiceText, "invalid-menu-choice");

@@ -2,7 +2,7 @@ import { Channel, MessageKind } from "@prisma/client";
 import { enqueueKalemlyMessage, getKalemlySettings } from "./KalemlyWaService";
 import { AUTO_REPLY_MENU_TEXT } from "./autoReplies";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
-import { editBaileysWhatsAppMessage, getWhatsAppMode, reactToBaileysWhatsAppMessage } from "./BaileysWhatsAppService";
+import { deleteBaileysWhatsAppMessage, editBaileysWhatsAppMessage, getWhatsAppMode, reactToBaileysWhatsAppMessage } from "./BaileysWhatsAppService";
 import { routeChoice } from "./kalemlyWebhookParser";
 import type { NormalizedInbound } from "./kalemlyWebhookParser";
 export { parseKalemlyWebhook } from "./kalemlyWebhookParser";
@@ -87,6 +87,36 @@ export async function editProviderMessage(input: { channel: Channel; recipient: 
   });
   const result = await response.json() as { ok?: boolean; description?: string };
   if (!response.ok || !result.ok) throw new Error(result.description || "تعذر تعديل رسالة Telegram");
+  return result;
+}
+
+export async function deleteProviderMessage(input: { channel: Channel; recipient: string; externalId: string }) {
+  const providerId = input.externalId.replace(/^(?:WHATSAPP|MESSENGER|TELEGRAM):/, "");
+  if (!providerId) throw new Error("معرّف رسالة القناة غير صالح");
+  if (input.channel === Channel.WHATSAPP) {
+    if (await getWhatsAppMode() !== "BAILEYS") throw new Error("حذف رسائل WhatsApp غير مدعوم في وضع API الحالي");
+    return deleteBaileysWhatsAppMessage({ recipient: input.recipient, externalId: providerId });
+  }
+  if (input.channel === Channel.MESSENGER) {
+    const settings = await getMessengerSettings();
+    if (!settings.pageAccessToken) throw new Error("Meta Page access token is not configured");
+    const response = await fetch(`https://graph.facebook.com/v21.0/${encodeURIComponent(providerId)}`, {
+      method: "DELETE", headers: { Authorization: `Bearer ${settings.pageAccessToken}` }
+    });
+    const result = await response.json() as { error?: { message?: string } };
+    if (!response.ok || result.error) throw new Error(result.error?.message || `Messenger delete failed (${response.status})`);
+    return result;
+  }
+  const settings = await getTelegramSettings();
+  if (!settings.botToken) throw new Error("Telegram bot token is not configured");
+  const messageId = providerId.split(":").at(-1);
+  if (!messageId || !/^\d+$/.test(messageId)) throw new Error("معرّف رسالة Telegram غير صالح");
+  const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/deleteMessage`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: input.recipient, message_id: Number(messageId) })
+  });
+  const result = await response.json() as { ok?: boolean; description?: string };
+  if (!response.ok || !result.ok) throw new Error(result.description || "تعذر حذف رسالة Telegram");
   return result;
 }
 

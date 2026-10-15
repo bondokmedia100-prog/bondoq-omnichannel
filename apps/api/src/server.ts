@@ -12,7 +12,7 @@ import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversatio
 import { prisma } from "./prisma";
 import { broadcastPresence, initRealtime, io } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations } from "./routing";
-import { answerTelegramCallback, channelRecipient, editProviderMessage, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, reactToProviderMessage, sendCsatPrompt, sendToChannel } from "./providers";
+import { answerTelegramCallback, channelRecipient, deleteProviderMessage, editProviderMessage, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, reactToProviderMessage, sendCsatPrompt, sendToChannel } from "./providers";
 import { ingestMessage, updateEditedInboundMessage } from "./ingestion";
 import { getKalemlySettings, safeProviderResponse, saveKalemlySettings, sendKalemlyTest, startKalemlyWaWorker, kalemlyExternalMessageId } from "./KalemlyWaService";
 import { defaultCallReply, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, logoutBaileysWhatsApp, markBaileysMessagesRead, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, type WhatsAppMode } from "./BaileysWhatsAppService";
@@ -24,6 +24,7 @@ import { customerProfileSchema } from "./customerProfile";
 import { sendPasswordResetApprovalEmail, sendPasswordResetEmail } from "./email";
 import { createPasswordResetToken, hashPasswordResetToken } from "./passwordResetToken";
 import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
+import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
 
 const app = express();
 const server = http.createServer(app);
@@ -444,6 +445,24 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   res.json(messageLimit ? { ...conversation, hasMoreMessages } : conversation);
 });
 
+app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: req.params.id },
+    include: { messages: { select: { mediaAssetId: true } } }
+  });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  const assetIds = [...new Set(conversation.messages.map((message) => message.mediaAssetId).filter((id): id is string => Boolean(id)))];
+  await prisma.$transaction(async (tx) => {
+    await tx.auditLog.create({ data: { actorId: req.user!.id, conversationId: conversation.id, action: "CONVERSATION_PERMANENTLY_DELETED", details: { deletedConversationId: conversation.id, customerId: conversation.customerId, channel: conversation.channel } } });
+    await tx.conversation.delete({ where: { id: conversation.id } });
+    for (const assetId of assetIds) await tx.mediaAsset.deleteMany({ where: { id: assetId, messages: { none: {} }, products: { none: {} } } });
+  });
+  const event = { conversationId: conversation.id, customerId: conversation.customerId };
+  io.to(`conversation:${conversation.id}`).to("admins").emit("conversation:deleted", event);
+  if (conversation.assignedAgentId) io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:deleted", event);
+  res.json({ conversationId: conversation.id, deleted: true });
+});
+
 app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
@@ -534,6 +553,43 @@ app.put("/api/customers/:id/favorite", agentGuard, async (req: AuthedRequest, re
   }
   await audit(req.user!.id, parsed.data.favorite ? "CUSTOMER_FAVORITED" : "CUSTOMER_UNFAVORITED", undefined, { customerId: customer.id });
   res.json({ customerId: customer.id, favorite: parsed.data.favorite });
+});
+
+app.patch("/api/customers/:id/flags", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ isVip: z.boolean().optional(), isBlocked: z.boolean().optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "حالة العميل غير صالحة" });
+  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
+  const customer = await prisma.customer.findFirst({
+    where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) },
+    select: { id: true }
+  });
+  if (!customer) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
+  const updated = await prisma.customer.update({ where: { id: customer.id }, data: parsed.data });
+  const conversations = await prisma.conversation.findMany({ where: { customerId: customer.id }, select: { id: true } });
+  await audit(req.user!.id, parsed.data.isBlocked === undefined ? "CUSTOMER_VIP_UPDATED" : "CUSTOMER_BLOCK_UPDATED", undefined, { customerId: customer.id, ...parsed.data });
+  for (const conversation of conversations) io.to(`conversation:${conversation.id}`).emit("customer:updated", { conversationId: conversation.id, customer: updated });
+  io.to("admins").emit("customer:updated", { customer: updated });
+  res.json(updated);
+});
+
+app.delete("/api/customers/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
+  const customer = await prisma.customer.findUnique({
+    where: { id: req.params.id },
+    include: { conversations: { select: { id: true, assignedAgentId: true, messages: { select: { mediaAssetId: true } } } } }
+  });
+  if (!customer) return res.status(404).json({ error: "العميل غير موجود" });
+  const assetIds = [...new Set(customer.conversations.flatMap((conversation) => conversation.messages.map((message) => message.mediaAssetId).filter((id): id is string => Boolean(id))))];
+  await prisma.$transaction(async (tx) => {
+    await tx.auditLog.create({ data: { actorId: req.user!.id, action: "CUSTOMER_PERMANENTLY_DELETED", details: { customerId: customer.id, conversationCount: customer.conversations.length } } });
+    await tx.customer.delete({ where: { id: customer.id } });
+    for (const assetId of assetIds) await tx.mediaAsset.deleteMany({ where: { id: assetId, messages: { none: {} }, products: { none: {} } } });
+  });
+  for (const conversation of customer.conversations) {
+    const event = { conversationId: conversation.id, customerId: customer.id };
+    io.to(`conversation:${conversation.id}`).to("admins").emit("conversation:deleted", event);
+    if (conversation.assignedAgentId) io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:deleted", event);
+  }
+  res.json({ customerId: customer.id, deleted: true, conversationsDeleted: customer.conversations.length });
 });
 
 app.get("/api/admin/customers/export.csv", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => {
@@ -720,9 +776,10 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
    const mediaKind = parsed.data.kind === MessageKind.IMAGE || parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.VIDEO || parsed.data.kind === MessageKind.FILE || parsed.data.kind === MessageKind.STICKER;
   if (mediaKind && !parsed.data.mediaUrl && !parsed.data.mediaAssetId || parsed.data.kind === MessageKind.LOCATION && (parsed.data.latitude === undefined || parsed.data.longitude === undefined)) return res.status(400).json({ error: "يلزم إرفاق ملف أو رابط وسيط أو إحداثيات الموقع" });
   if (!mediaKind && (parsed.data.mediaAssetId || parsed.data.mediaUrl)) return res.status(400).json({ error: "نوع الملف لا يطابق نوع الرسالة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
-  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
-  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية الرد على هذه المحادثة" });
+   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { isBlocked: true } } } });
+   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية الرد على هذه المحادثة" });
+   if (conversation.customer.isBlocked) return res.status(409).json({ error: "هذا العميل محظور داخل النظام؛ ألغِ الحظر قبل إرسال رسالة" });
   if (parsed.data.kind === MessageKind.STICKER && (conversation.channel === Channel.MESSENGER || conversation.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS")) return res.status(409).json({ error: "إرسال الملصقات غير مدعوم في وضع القناة الحالي" });
   if (parsed.data.quotedMessageId && !await prisma.message.findFirst({ where: { id: parsed.data.quotedMessageId, conversationId: conversation.id }, select: { id: true } })) return res.status(400).json({ error: "الرسالة المقتبسة لا تنتمي إلى هذه المحادثة" });
   const { quotedMessageId, ...replyInput } = parsed.data;
@@ -766,9 +823,10 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
 app.post("/api/conversations/:id/poll", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ question: z.string().trim().min(1).max(300), options: z.array(z.string().trim().min(1).max(100)).min(2).max(10) }).strict().safeParse(req.body);
   if (!parsed.success || new Set(parsed.data?.options.map((option) => option.toLocaleLowerCase())).size !== parsed.data?.options.length) return res.status(400).json({ error: "اكتب سؤالًا واختر من خيارين إلى عشرة خيارات مختلفة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { isBlocked: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية الرد على هذه المحادثة" });
+  if (conversation.customer.isBlocked) return res.status(409).json({ error: "هذا العميل محظور داخل النظام؛ ألغِ الحظر قبل إرسال رسالة" });
   if (conversation.channel === Channel.MESSENGER || conversation.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "إنشاء الاستطلاعات متاح في Telegram ووضع Baileys لـ WhatsApp فقط" });
   const receivedAt = await lastInboundAt(conversation.id, conversation.lastInboundAt);
   if (!messengerWindowOpen(conversation.channel, receivedAt)) return res.status(409).json({ code: "META_WINDOW_EXPIRED", error: "انتهت نافذة الرد في Messenger" });
@@ -794,9 +852,10 @@ app.post("/api/conversations/:id/poll", agentGuard, async (req: AuthedRequest, r
 app.patch("/api/conversations/:id/messages/:messageId", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ text: z.string().trim().min(1).max(4000) }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اكتب نصًا صالحًا للتعديل" });
-  const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
+  const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: { include: { customer: { select: { isBlocked: true } } } } } });
   if (!message) return res.status(404).json({ error: "الرسالة غير موجودة" });
   if (!canWorkOnConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل هذه المحادثة" });
+  if (message.conversation.customer.isBlocked) return res.status(409).json({ error: "لا يمكن تعديل رسائل عميل محظور داخل النظام" });
   if (message.direction !== MessageDirection.OUTBOUND || message.authorId !== req.user!.id || message.kind !== MessageKind.TEXT) return res.status(409).json({ error: "يمكن تعديل الرسائل النصية التي أرسلتها أنت فقط" });
   if (message.deliveryStatus !== "SENT" || !message.externalId) return res.status(409).json({ error: "لا يمكن تعديل رسالة لم يؤكد مزود القناة إرسالها" });
   if (message.conversation.channel === Channel.MESSENGER || message.conversation.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "تعديل الرسائل غير متاح في وضع القناة الحالي" });
@@ -810,13 +869,34 @@ app.patch("/api/conversations/:id/messages/:messageId", agentGuard, async (req: 
   } catch (error) { res.status(502).json({ error: error instanceof Error ? error.message : "تعذر تعديل الرسالة لدى القناة" }); }
 });
 
+app.delete("/api/conversations/:id/messages/:messageId", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
+  if (!message) return res.status(404).json({ error: "الرسالة غير موجودة" });
+  if (!canWorkOnConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل هذه المحادثة" });
+  if (message.direction !== MessageDirection.OUTBOUND || message.authorId !== req.user!.id) return res.status(409).json({ error: "يمكن حذف الرسائل التي أرسلتها أنت فقط" });
+  if (!message.externalId || !["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus || "")) return res.status(409).json({ error: "لا يمكن حذف رسالة لم يؤكد مزود القناة إرسالها" });
+  try {
+    await deleteProviderMessage({ channel: message.conversation.channel, recipient: channelRecipient(message.conversation.channel, message.conversation.externalConversationId, message.conversation.externalCustomerId), externalId: message.externalId });
+    await prisma.$transaction(async (tx) => {
+      await tx.auditLog.create({ data: { actorId: req.user!.id, conversationId: message.conversationId, action: "MESSAGE_DELETED", details: { messageId: message.id, providerDeleted: true } } });
+      await tx.message.delete({ where: { id: message.id } });
+      if (message.mediaAssetId) await tx.mediaAsset.deleteMany({ where: { id: message.mediaAssetId, messages: { none: {} }, products: { none: {} } } });
+    });
+    io.to(`conversation:${message.conversationId}`).to("admins").emit("message:deleted", { conversationId: message.conversationId, messageId: message.id });
+    res.json({ messageId: message.id, deleted: true, providerDeleted: true });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : "تعذر حذف الرسالة لدى القناة" });
+  }
+});
+
 app.post("/api/conversations/:id/messages/:messageId/forward", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ targetConversationId: z.string().min(1) }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اختر محادثة مستهدفة" });
   const source = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true, mediaAsset: { select: { id: true, contentType: true } } } });
-  const target = await prisma.conversation.findUnique({ where: { id: parsed.data.targetConversationId } });
+  const target = await prisma.conversation.findUnique({ where: { id: parsed.data.targetConversationId }, include: { customer: { select: { isBlocked: true } } } });
   if (!source || !target) return res.status(404).json({ error: "الرسالة أو المحادثة المستهدفة غير موجودة" });
   if (!canReadConversation(req.user!, source.conversation) || !canWorkOnConversation(req.user!, target)) return res.status(403).json({ error: "لا تملك صلاحية تحويل هذه الرسالة بين المحادثتين" });
+  if (target.customer.isBlocked) return res.status(409).json({ error: "لا يمكن إرسال رسالة إلى عميل محظور داخل النظام" });
   if (source.direction === MessageDirection.INTERNAL || source.kind === MessageKind.SYSTEM || source.kind === MessageKind.LOCATION && (source.latitude === null || source.longitude === null)) return res.status(409).json({ error: "لا يمكن تحويل هذا النوع من الرسائل" });
   const receivedAt = await lastInboundAt(target.id, target.lastInboundAt);
   if (!messengerWindowOpen(target.channel, receivedAt)) return res.status(409).json({ code: "META_WINDOW_EXPIRED", error: "انتهت نافذة الرد في المحادثة المستهدفة" });
@@ -866,11 +946,12 @@ app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedReques
   if (!parsed.success) return res.status(400).json({ error: "اختر منتجًا من الكتالوج" });
   const productIds = "productIds" in parsed.data ? [...new Set(parsed.data.productIds)] : [parsed.data.productId];
   const [conversation, products] = await Promise.all([
-    prisma.conversation.findUnique({ where: { id: req.params.id } }),
+    prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { isBlocked: true } } } }),
     prisma.product.findMany({ where: { id: { in: productIds }, isAvailable: true } })
   ]);
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية على هذه المحادثة" });
+  if (conversation.customer.isBlocked) return res.status(409).json({ error: "لا يمكن إرسال منتجات إلى عميل محظور داخل النظام" });
   if (products.length !== productIds.length) return res.status(404).json({ error: "أحد المنتجات المحددة غير متوفر" });
   if (products.some((product) => !product.imageUrl && !product.imageAssetId)) return res.status(409).json({ error: "أضف صور المنتجات المحددة قبل إرسالها للعميل" });
   const receivedAt = await lastInboundAt(conversation.id, conversation.lastInboundAt);
@@ -1000,11 +1081,12 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
     const branch = await prisma.branch.findFirst({ where: { id: branchId, isActive: true }, select: { id: true } });
     if (!branch) return res.status(400).json({ error: "الفرع المحدد غير موجود أو متوقف" });
   }
-  const updated = await prisma.conversation.update({ where: { id: conversation.id }, data: { assignedAgentId: parsed.data.agentId, branchId, routingDepartment: branchId ? Department.BRANCH : conversation.routingDepartment === Department.BRANCH ? null : conversation.routingDepartment, status: parsed.data.agentId ? ConversationStatus.OPEN : ConversationStatus.QUEUED, awaitingRouting: false } });
+  let updated = await prisma.conversation.update({ where: { id: conversation.id }, data: { assignedAgentId: parsed.data.agentId, branchId, routingDepartment: branchId ? Department.BRANCH : conversation.routingDepartment === Department.BRANCH ? null : conversation.routingDepartment, status: parsed.data.agentId ? ConversationStatus.OPEN : ConversationStatus.QUEUED, awaitingRouting: false } });
   await audit(req.user!.id, "CONVERSATION_REASSIGNED", conversation.id, { from: conversation.assignedAgentId, to: parsed.data.agentId });
   if (conversation.assignedAgentId && conversation.assignedAgentId !== parsed.data.agentId) io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:unassigned", updated);
+  if (!parsed.data.agentId) updated = await assignConversation(conversation.id, branchId ? Department.BRANCH : undefined);
+  updated = await prisma.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } } } });
   if (parsed.data.agentId) io.to(`agent:${parsed.data.agentId}`).emit("conversation:assigned", updated);
-  else await assignConversation(conversation.id, branchId ? Department.BRANCH : undefined);
   io.to("admins").emit("conversation:updated", updated);
   res.json(updated);
 });
@@ -1049,14 +1131,14 @@ app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest
 app.patch("/api/conversations/:id/status", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ status: z.nativeEnum(ConversationStatus) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "الحالة غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { isBlocked: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل المحادثة" });
   const updated = await prisma.conversation.update({ where: { id: conversation.id }, data: { status: parsed.data.status, closedAt: terminalStatuses.includes(parsed.data.status) ? new Date() : null } });
   await audit(req.user!.id, parsed.data.status === ConversationStatus.CLOSED ? "CONVERSATION_CLOSED" : "CONVERSATION_STATUS_CHANGED", conversation.id, { status: parsed.data.status });
   io.to("admins").emit("conversation:updated", updated);
   let csatDelivery: "sent" | "already-requested" | "failed" | "not-requested" = "not-requested";
-  if (parsed.data.status === ConversationStatus.RESOLVED) {
+  if (parsed.data.status === ConversationStatus.RESOLVED && !conversation.customer.isBlocked) {
     const existingSurvey = await prisma.csatSurvey.findUnique({ where: { conversationId: conversation.id } });
     if (existingSurvey) csatDelivery = "already-requested";
     else {
@@ -1145,13 +1227,15 @@ app.post("/api/conversations/:id/orders", agentGuard, async (req: AuthedRequest,
 app.patch("/api/orders/:id/status", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ status: z.nativeEnum(OrderStatus) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة الطلب غير صالحة" });
-  const existing = await prisma.orderDetails.findUnique({ where: { id: req.params.id }, include: { conversation: true } });
+  const existing = await prisma.orderDetails.findUnique({ where: { id: req.params.id }, include: { conversation: { include: { customer: { select: { isBlocked: true } } } } } });
   if (!existing) return res.status(404).json({ error: "الطلب غير موجود" });
   if (existing.conversation && !canWorkOnConversation(req.user!, existing.conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل هذا الطلب" });
   const order = await prisma.orderDetails.update({ where: { id: existing.id }, data: { status: parsed.data.status } });
   await audit(req.user!.id, "ORDER_STATUS_CHANGED", existing.conversationId || undefined, { orderId: order.id, status: order.status });
   let notificationDelivery: "sent" | "not-sent" | "not-applicable" = "not-applicable";
-  if (existing.status !== order.status && existing.conversation) {
+  if (existing.status !== order.status && existing.conversation?.customer.isBlocked) {
+    notificationDelivery = "not-sent";
+  } else if (existing.status !== order.status && existing.conversation) {
     const receivedAt = await lastInboundAt(existing.conversation.id, existing.conversation.lastInboundAt);
     if (messengerWindowOpen(existing.conversation.channel, receivedAt)) {
       const statusText: Record<OrderStatus, string> = {
@@ -1343,6 +1427,100 @@ app.put("/api/admin/integrations/whatsapp/call-reply", adminGuard, async (req: A
   const text = await saveWhatsAppCallReply(parsed.data.text);
   await audit(req.user!.id, "WHATSAPP_CALL_REPLY_UPDATED");
   res.json({ text });
+});
+
+app.get("/api/conversations/:id/whatsapp-call/permission", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { phone: true, isBlocked: true } } } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (conversation.channel !== Channel.WHATSAPP) return res.status(409).json({ error: "الاتصال الصوتي متاح لمحادثات WhatsApp فقط" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
+  if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
+  try {
+    res.json(await getCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId));
+  } catch (error) {
+    res.status(error instanceof WhatsAppCloudApiError ? error.status || 502 : 503).json({ error: error instanceof Error ? error.message : "تعذر فحص صلاحية الاتصال" });
+  }
+});
+
+app.post("/api/conversations/:id/whatsapp-call/permission-request", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({}).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "طلب الإذن غير صالح" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { phone: true, isBlocked: true } } } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (conversation.channel !== Channel.WHATSAPP) return res.status(409).json({ error: "طلب الإذن متاح لمحادثات WhatsApp فقط" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
+  if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
+  try {
+    const result = await requestCloudCallPermission(conversation.customer.phone || conversation.externalCustomerId);
+    await audit(req.user!.id, "WHATSAPP_CALL_PERMISSION_REQUESTED", conversation.id, { phoneLastFour: normalizeCloudCallTarget(conversation.customer.phone || conversation.externalCustomerId).slice(-4) });
+    res.json({ ok: true, messageId: result.messages?.[0]?.id || null });
+  } catch (error) {
+    const status = error instanceof WhatsAppCloudApiError ? error.status || 502 : 502;
+    res.status(status).json({ error: error instanceof Error ? error.message : "تعذر إرسال طلب إذن الاتصال" });
+  }
+});
+
+app.post("/api/conversations/:id/whatsapp-call", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ offerSdp: z.string().min(100).max(100_000) }).strict().safeParse(req.body);
+  if (!parsed.success || !parsed.data.offerSdp.includes("m=audio")) return res.status(400).json({ error: "تعذر إنشاء عرض صوتي صالح للمكالمة" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { phone: true, isBlocked: true } } } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (conversation.channel !== Channel.WHATSAPP) return res.status(409).json({ error: "الاتصال الصوتي متاح لمحادثات WhatsApp فقط" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن صلاحياتك" });
+  if (conversation.customer.isBlocked) return res.status(409).json({ error: "العميل محظور داخل النظام؛ ألغِ الحظر قبل الاتصال" });
+  const activeStatuses = ["INITIATING", "RINGING", "CONNECTED"];
+  const activeCall = await prisma.whatsAppCallSession.findFirst({ where: { agentId: req.user!.id, status: { in: activeStatuses }, createdAt: { gte: new Date(Date.now() - 4 * 60 * 60_000) } }, select: { id: true } });
+  if (activeCall) return res.status(409).json({ error: "لديك مكالمة صوتية أخرى مفتوحة. أنهِها قبل بدء مكالمة جديدة." });
+  let phoneNumber: string;
+  try { phoneNumber = normalizeCloudCallTarget(conversation.customer.phone || conversation.externalCustomerId); }
+  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "رقم WhatsApp للعميل غير صالح" }); }
+  const session = await prisma.whatsAppCallSession.create({ data: { conversationId: conversation.id, agentId: req.user!.id, phoneNumber, status: "INITIATING" } });
+  try {
+    const providerCallId = await startCloudCall({ phone: phoneNumber, offerSdp: parsed.data.offerSdp, callbackData: session.id });
+    await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, status: "INITIATING" }, data: { providerCallId } });
+    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_STARTED", conversation.id, { sessionId: session.id, phoneLastFour: phoneNumber.slice(-4) });
+    res.json({ sessionId: session.id, status: "INITIATING" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "تعذر بدء المكالمة عبر WhatsApp";
+    await prisma.whatsAppCallSession.update({ where: { id: session.id }, data: { status: "FAILED", lastError: message, endedAt: new Date() } });
+    const status = error instanceof WhatsAppCloudApiError ? error.status || 502 : 502;
+    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_FAILED", conversation.id, { sessionId: session.id, errorCode: error instanceof WhatsAppCloudApiError ? error.code || null : null });
+    res.status(status).json({ error: message });
+  }
+});
+
+app.get("/api/whatsapp-calls/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  let session = await prisma.whatsAppCallSession.findUnique({ where: { id: req.params.id } });
+  if (!session) return res.status(404).json({ error: "جلسة المكالمة غير موجودة" });
+  if (session.agentId !== req.user!.id && req.user!.role !== Role.ADMIN && !(req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations"))) return res.status(403).json({ error: "لا تملك صلاحية متابعة هذه المكالمة" });
+  if (session.sdpAnswer && Date.now() - session.updatedAt.getTime() > 120_000) {
+    await prisma.whatsAppCallSession.updateMany({ where: { id: session.id, sdpAnswer: session.sdpAnswer }, data: { sdpAnswer: null } });
+    session = { ...session, sdpAnswer: null };
+  }
+  res.json({ id: session.id, status: session.status, sdpAnswer: session.sdpAnswer, error: session.lastError, updatedAt: session.updatedAt });
+});
+
+app.post("/api/whatsapp-calls/:id/answer-applied", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { id: req.params.id } });
+  if (!session) return res.status(404).json({ error: "جلسة المكالمة غير موجودة" });
+  if (session.agentId !== req.user!.id) return res.status(403).json({ error: "لا تملك صلاحية متابعة هذه المكالمة" });
+  await prisma.whatsAppCallSession.updateMany({ where: { id: session.id }, data: { sdpAnswer: null } });
+  res.json({ ok: true });
+});
+
+app.post("/api/whatsapp-calls/:id/terminate", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const session = await prisma.whatsAppCallSession.findUnique({ where: { id: req.params.id } });
+  if (!session) return res.status(404).json({ error: "جلسة المكالمة غير موجودة" });
+  if (session.agentId !== req.user!.id && req.user!.role !== Role.ADMIN && !(req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations"))) return res.status(403).json({ error: "لا تملك صلاحية إنهاء هذه المكالمة" });
+  if (["TERMINATED", "REJECTED", "FAILED"].includes(session.status)) return res.json({ ok: true });
+  try {
+    if (session.providerCallId) await terminateCloudCall(session.providerCallId);
+    await prisma.whatsAppCallSession.update({ where: { id: session.id }, data: { status: "TERMINATED", sdpAnswer: null, endedAt: new Date() } });
+    await audit(req.user!.id, "WHATSAPP_CLOUD_CALL_TERMINATED", session.conversationId, { sessionId: session.id });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(error instanceof WhatsAppCloudApiError ? error.status || 502 : 502).json({ error: error instanceof Error ? error.message : "تعذر إنهاء المكالمة لدى WhatsApp" });
+  }
 });
 
 app.post("/api/integrations/whatsapp/calls/reject", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -1613,8 +1791,10 @@ app.get("/api/admin/audit", adminGuard, async (req: AuthedRequest, res: express.
 
 app.get("/webhooks/meta", async (req, res) => {
   const settings = await getMessengerSettings();
-  if (!settings.verifyToken) return res.status(503).send("Meta verify token is not configured");
-  const valid = req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === settings.verifyToken;
+  const verifyTokens = [settings.verifyToken, cloudCallWebhookVerifyToken()].filter(Boolean);
+  if (!verifyTokens.length) return res.status(503).send("Meta verify token is not configured");
+  const supplied = String(req.query["hub.verify_token"] || "");
+  const valid = req.query["hub.mode"] === "subscribe" && verifyTokens.some((token) => secretMatches(token, supplied));
   if (valid) return res.status(200).send(req.query["hub.challenge"]);
   res.sendStatus(403);
 });
@@ -1630,11 +1810,26 @@ function verifyMetaSignature(req: express.Request, appSecret: string) {
 
 app.post("/webhooks/meta", async (req, res) => {
   const settings = await getMessengerSettings();
-  if (!verifyMetaSignature(req, settings.appSecret)) return res.sendStatus(401);
-  if (req.body.object !== "page") return res.sendStatus(404);
-  res.sendStatus(200);
-  try { for (const message of parseMetaWebhook(req.body)) await ingestMessage(message); }
-  catch (error) { console.error("Meta webhook ingestion failed", error); }
+  const secret = req.body?.object === "whatsapp_business_account" ? cloudCallWebhookSecret() || settings.appSecret : settings.appSecret;
+  if (!verifyMetaSignature(req, secret)) return res.sendStatus(401);
+  if (req.body.object === "page") {
+    res.sendStatus(200);
+    try { for (const message of parseMetaWebhook(req.body)) await ingestMessage(message); }
+    catch (error) { console.error("Meta webhook ingestion failed", error); }
+    return;
+  }
+  if (req.body.object === "whatsapp_business_account") {
+    try {
+      const updates = await processCloudCallWebhooks(req.body);
+      res.sendStatus(200);
+      for (const update of updates) io.to(`agent:${update.agentId}`).emit("whatsapp:cloud-call-updated", { sessionId: update.sessionId, status: update.status });
+    } catch (error) {
+      console.error("WhatsApp Cloud Calling webhook processing failed", error);
+      res.sendStatus(500);
+    }
+    return;
+  }
+  res.sendStatus(404);
 });
 
 function secretMatches(expected: string, supplied: string) {

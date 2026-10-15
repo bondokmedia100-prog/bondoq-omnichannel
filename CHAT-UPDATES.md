@@ -12,10 +12,14 @@
 - Added WebP sticker send/receive support for Telegram and Baileys WhatsApp.
 - Added Telegram/Baileys WhatsApp message reactions and Baileys read/delivery receipt synchronization.
 - Added single-choice poll creation for Telegram and Baileys WhatsApp, with poll question/options shown in the workspace.
+- Added outbound WhatsApp Business Calling API calls from the agent workspace, with WebRTC audio, customer permission checks, and call lifecycle webhooks.
+- Hardened call status polling against stale updates and duplicate SDP answer application.
 
 ## Data and deployment
 
-The Prisma schema adds `CustomerFavorite` and `ConversationPin`, and extends `MessageKind` with `STICKER` and `POLL`. The existing deployment startup runs `prisma db push`, which applies the schema changes when the service starts. Railway runs separate API and web services from `/apps/api` and `/apps/web`, both connected to `main`.
+The Prisma schema adds `CustomerFavorite`, `ConversationPin`, and `WhatsAppCallSession`, and extends `MessageKind` with `STICKER` and `POLL`. The existing deployment startup runs `prisma db push`, which applies the schema changes when the service starts. Railway runs separate API and web services from `/apps/api` and `/apps/web`, both connected to `main`.
+
+Outbound calling needs an activated Irish (+353) WhatsApp Cloud API number, Calling enabled, subscribed `calls` and `messages` webhooks, customer permission, and a Meta daily messaging limit of at least 2,000 unique recipients. Configure the Cloud API credentials on the API service; no live provider call was available during this update's validation.
 
 After deployment, re-register the Telegram webhook once from its integration settings so Telegram includes `edited_message` updates.
 
@@ -32,4 +36,4 @@ After deployment, re-register the Telegram webhook once from its integration set
 
 ## Validation
 
-API source syntax checks pass under Node's TypeScript stripping mode, and the existing web service-worker tests pass (2). This workspace has no npm/tsc executable or installed project dependencies, so Prisma validation, full TypeScript type-check/build, and the API test suite could not be run here. Provider behavior was not tested against live channel credentials.
+API source syntax checks pass under Node's TypeScript stripping mode; the WhatsApp Calling unit tests pass (3) with stubbed config/Prisma dependencies; and the existing web service-worker tests pass (2). This workspace has no npm/tsc executable or installed project dependencies, so Prisma validation and full TypeScript type-check/build could not be run here. Provider behavior was not tested against live channel credentials.

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AUTO_REPLY_MENU_TEXT, DEFAULT_CHATBOT_SETTINGS, buildBranchReplyText, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, getServiceChoice } from "./autoReplies";
+import { AUTO_REPLY_MENU_TEXT, DEFAULT_CHATBOT_SETTINGS, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, getServiceChoice } from "./autoReplies";
 
 test("matches Arabic keywords without diacritics", () => {
   const rules = [{ keywords: ["توصيل"], responseText: "سنساعدك", routingDepartment: "DELIVERY" }];
@@ -16,8 +16,10 @@ test("does not match empty keywords or empty messages", () => {
 test("maps Arabic and Western service numbers to configured options", () => {
   assert.equal(getServiceChoice("١")?.label, "الفروع ومواعيد العمل");
   assert.equal(getServiceChoice("2.")?.routingDepartment, "CUSTOMER_CARE");
-  assert.equal(getServiceChoice("٣")?.routingDepartment, "HEADQUARTERS");
-  assert.equal(getServiceChoice("رقم ٤")?.routingDepartment, "QUALITY");
+  assert.equal(getServiceChoice("٣")?.routingDepartment, "CUSTOMER_CARE");
+  assert.equal(getServiceChoice("رقم ٤")?.routingDepartment, "CUSTOMER_CARE");
+  assert.equal(getServiceChoice("5")?.routingDepartment, "CUSTOMER_CARE");
+  assert.equal(getServiceChoice("رقم ٤")?.isComplaint, true);
   assert.equal(getServiceChoice("route_other")?.routingDepartment, "CUSTOMER_CARE");
   assert.equal(getServiceChoice("السلام عليكم"), undefined);
   assert.equal(getServiceChoice("رقم 6"), undefined);
@@ -31,18 +33,22 @@ test("invalid replies remain in BOT_MENU without handing off", () => {
   assert.deepEqual(decideBotAction({ enabled: true, state: "BOT_MENU", starting: false, text: "السلام عليكم", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "INVALID", nextState: "BOT_MENU" });
 });
 
-test("branches reply keeps the customer in BOT_MENU", () => {
+test("first menu selection hands off to customer care", () => {
   const decision = decideBotAction({ enabled: true, state: "BOT_MENU", starting: false, text: "١", settings: DEFAULT_CHATBOT_SETTINGS });
-  assert.equal(decision.action, "BRANCHES");
-  assert.equal(decision.nextState, "BOT_MENU");
-  assert.match(buildBranchReplyText(DEFAULT_CHATBOT_SETTINGS), /أرسل الرقم 2/);
-});
-
-test("choices 2 to 5 hand off with the configured department", () => {
-  const decision = decideBotAction({ enabled: true, state: "BOT_MENU", starting: false, text: "٣", settings: DEFAULT_CHATBOT_SETTINGS });
   assert.equal(decision.action, "HANDOFF");
   assert.equal(decision.nextState, "ASSIGNED_TO_AGENT");
-  if (decision.action === "HANDOFF") assert.equal(decision.choice.label, "طلبات الجملة");
+  if (decision.action === "HANDOFF") assert.equal(decision.choice.routingDepartment, "CUSTOMER_CARE");
+});
+
+test("all menu options hand off to customer care and keep complaints flagged", () => {
+  for (const number of ["1", "2", "3", "4", "5"]) {
+    const decision = decideBotAction({ enabled: true, state: "BOT_MENU", starting: false, text: number, settings: DEFAULT_CHATBOT_SETTINGS });
+    assert.equal(decision.action, "HANDOFF");
+    if (decision.action === "HANDOFF") {
+      assert.equal(decision.choice.routingDepartment, "CUSTOMER_CARE");
+      assert.equal(decision.choice.isComplaint, number === "4");
+    }
+  }
 });
 
 test("disabled bot bypasses the menu", () => {
@@ -53,9 +59,8 @@ test("disabled bot does not unassign an active agent conversation", () => {
   assert.deepEqual(decideBotAction({ enabled: false, state: "ASSIGNED_TO_AGENT", starting: false, text: "أحتاج مساعدة", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "NONE", nextState: "ASSIGNED_TO_AGENT" });
 });
 
-test("builds the configured menu and branch response", () => {
+test("builds the configured menu", () => {
   assert.equal(AUTO_REPLY_MENU_TEXT, "أهلاً بك في حلواني بندق.\nيرجى اختيار رقم الخدمة المطلوبة:\n1. الفروع ومواعيد العمل\n2. خدمة العملاء\n3. طلبات الجملة\n4. الشكاوى والاقتراحات\n5. غير ذلك");
   const settings = { ...DEFAULT_CHATBOT_SETTINGS, welcomeText: "مرحبًا", option1ReplyText: "وسط البلد: 10 ص إلى 10 م" };
   assert.equal(buildRoutingMenuText(settings).split("\n")[0], "مرحبًا");
-  assert.equal(buildBranchReplyText(settings), "وسط البلد: 10 ص إلى 10 م\n\nللتحدث مع ممثل خدمة العملاء أرسل الرقم 2.");
 });

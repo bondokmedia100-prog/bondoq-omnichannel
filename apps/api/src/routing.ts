@@ -24,7 +24,7 @@ export async function assignConversation(conversationId: string, department?: De
 
     const targetDepartment = department ?? currentConversation.routingDepartment;
     const hqAndRemote = targetDepartment === Department.HEADQUARTERS || targetDepartment === Department.WORK_FROM_HOME;
-    const isBranchQueue = targetDepartment === Department.BRANCH || Boolean(currentConversation.branchId);
+    const isBranchQueue = targetDepartment === Department.BRANCH || (!targetDepartment && Boolean(currentConversation.branchId));
     const agents = await prisma.user.findMany({
       where: {
         role: isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
@@ -32,7 +32,9 @@ export async function assignConversation(conversationId: string, department?: De
         presence: Presence.ONLINE,
         ...(isBranchQueue
           ? { branchId: currentConversation.branchId || "__unassigned_branch__" }
-          : hqAndRemote
+          : targetDepartment === Department.CUSTOMER_CARE
+            ? { department: Department.CUSTOMER_CARE }
+            : hqAndRemote
             ? { department: { in: [Department.HEADQUARTERS, Department.WORK_FROM_HOME, Department.CUSTOMER_CARE] } }
             : targetDepartment
               ? { department: { in: [targetDepartment, Department.HEADQUARTERS, Department.WORK_FROM_HOME] } }

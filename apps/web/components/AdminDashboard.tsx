@@ -124,7 +124,14 @@ export default function AdminDashboard() {
        connection.on("conversation-note:new", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, internalNotes: [...(old.internalNotes || []).filter((note: AnyRecord) => note.id !== event.note.id), event.note].sort((a: AnyRecord, b: AnyRecord) => a.createdAt.localeCompare(b.createdAt)) } : old));
        connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
         connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
-      for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached", "team:updated"]) connection.on(event, () => load(profile));
+       for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached", "team:updated"]) connection.on(event, () => load(profile));
+       connection.on("conversation:deleted", (event) => {
+         setConversations((items) => items.filter((item) => item.id !== event.conversationId));
+         if (detailLoadingIdRef.current === event.conversationId) { ++detailRequest.current; detailLoadingIdRef.current = ""; }
+         setSelected((old: AnyRecord) => old?.id === event.conversationId ? null : old);
+         setDetail((old: AnyRecord) => old?.id === event.conversationId ? null : old);
+       });
+       connection.on("message:deleted", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).filter((message: AnyRecord) => message.id !== event.messageId) } : old));
       const requestedConversationId = new URLSearchParams(window.location.search).get("conversation");
       if (requestedConversationId) {
         window.history.replaceState(null, "", window.location.pathname);
@@ -220,17 +227,42 @@ export default function AdminDashboard() {
     setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, assignedAgentId: agentId || null, assignedAgent: nextAgent, branchId: nextAgent?.branchId || null, status: nextStatus } : old);
     try {
       const updated = await api(`/api/conversations/${conversationId}/assignment`, { method: "PATCH", body: JSON.stringify({ agentId: agentId || null }) });
-      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, ...updated, assignedAgent: agentId ? nextAgent : null } : old);
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, ...updated, assignedAgent: updated.assignedAgent || (agentId ? nextAgent : null) } : old);
       await load();
     }
     catch (e) { setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, ...previousAssignment } : old); setError(e instanceof Error ? e.message : "تعذر تحويل المحادثة"); }
+  }
+  async function deleteConversationPermanently() {
+    if (!selected || user?.role !== "ADMIN") return;
+    if (!window.confirm("حذف المحادثة نهائيًا من النظام؟ لن يمكن استعادة سجلها، ولن تُحذف الرسائل من تطبيق القناة.")) return;
+    const conversationId = selected.id;
+    try {
+      await api(`/api/conversations/${conversationId}`, { method: "DELETE" });
+      socket?.emit("conversation:leave", conversationId);
+      setSelected(null); setDetail(null); setConversations((items) => items.filter((item) => item.id !== conversationId));
+      setSuccessMessage("حُذفت المحادثة وسجلها من النظام.");
+      void load();
+    } catch (e) { setError(e instanceof Error ? e.message : "تعذر حذف المحادثة"); }
+  }
+  async function deleteCustomerPermanently() {
+    if (!selected || user?.role !== "ADMIN") return;
+    if (!window.confirm(`حذف العميل ${customerDisplayName(detail?.customer)} نهائيًا؟ سيُحذف معه سجل كل محادثاته وطلباته من النظام.`)) return;
+    const customerId = detail?.customer?.id;
+    if (!customerId) return;
+    try {
+      await api(`/api/customers/${customerId}`, { method: "DELETE" });
+      if (selected) socket?.emit("conversation:leave", selected.id);
+      setSelected(null); setDetail(null); setConversations((items) => items.filter((item) => item.customer?.id !== customerId));
+      setSuccessMessage("حُذف العميل ومحادثاته وطلباته من النظام.");
+      void load();
+    } catch (e) { setError(e instanceof Error ? e.message : "تعذر حذف العميل"); }
   }
   async function routeToBranch(branchId: string) {
     if (!selected || !branchId) return;
     const conversationId = selected.id;
     try {
       const updated = await api(`/api/conversations/${conversationId}/assignment`, { method: "PATCH", body: JSON.stringify({ agentId: null, branchId }) });
-      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, ...updated, assignedAgent: null } : old);
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, ...updated, assignedAgent: updated.assignedAgent || null } : old);
       setSuccessMessage(`أُرسلت المحادثة إلى طابور ${branches.find((branch) => branch.id === branchId)?.name || "الفرع"}.`);
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : "تعذر توجيه المحادثة إلى الفرع"); }
@@ -293,7 +325,7 @@ export default function AdminDashboard() {
       </section>
     </div>
 
-    {selected && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={closeConversationPreview}><div className="panel flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+     {selected && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={closeConversationPreview}><div className="admin-conversation-preview panel flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
        {detail ? <>
         <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div className="flex items-center gap-3"><Avatar name={detail.customer?.name || "عميل"} /><div><h3 className="font-extrabold">{detail.customer?.name || "عميل جديد"}</h3><p className="text-xs text-stone-400">{channelLabel[detail.channel]} · {detail.assignedAgent?.name || "غير مسندة"}</p></div></div><button onClick={closeConversationPreview} className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
         <div className="border-b border-stone-100 bg-white px-5 py-2">
@@ -303,8 +335,10 @@ export default function AdminDashboard() {
             <form onSubmit={sendInternalNote} className="flex gap-2"><textarea value={internalNote} onChange={(event) => setInternalNote(event.target.value)} maxLength={4000} rows={2} placeholder="أضف ملاحظة للفريق فقط..." className="min-w-0 flex-1 resize-y rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-amber-300" /><button disabled={!internalNote.trim()} className="grid h-10 w-10 shrink-0 place-items-center self-end rounded-lg bg-stone-800 text-white disabled:opacity-40" title="إضافة ملاحظة داخلية"><Send size={15} /></button></form>
           </div>}
         </div>
-        <div className="flex flex-wrap gap-2 border-b border-stone-100 bg-white px-5 py-2"><button type="button" onClick={() => void setAdminConversationStatus("RESOLVED")} className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-700"><CheckCircle2 size={14} /> حل المحادثة</button><button type="button" onClick={() => void setAdminConversationStatus(detail.status === "CLOSED" || detail.status === "RESOLVED" ? "OPEN" : "CLOSED")} className="flex items-center gap-1.5 rounded-lg bg-stone-100 px-3 py-2 text-[10px] font-bold text-stone-600">{detail.status === "CLOSED" || detail.status === "RESOLVED" ? <MessageCircle size={14} /> : <Archive size={14} />}{detail.status === "CLOSED" || detail.status === "RESOLVED" ? "إعادة فتح" : "إغلاق"}</button><span className="mr-auto self-center text-[10px] text-stone-400">الحالة: {detail.status}</span></div>
-        {detail.serviceTag && <div className="border-b border-amber-100 bg-amber-50/60 px-5 py-2 text-xs font-bold text-amber-900">الخدمة المطلوبة: {detail.serviceTag}</div>}
+         <div className="flex flex-wrap gap-2 border-b border-stone-100 bg-white px-5 py-2"><button type="button" onClick={() => void setAdminConversationStatus("RESOLVED")} className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-700"><CheckCircle2 size={14} /> حل المحادثة</button><button type="button" onClick={() => void setAdminConversationStatus(detail.status === "CLOSED" || detail.status === "RESOLVED" ? "OPEN" : "CLOSED")} className="flex items-center gap-1.5 rounded-lg bg-stone-100 px-3 py-2 text-[10px] font-bold text-stone-600">{detail.status === "CLOSED" || detail.status === "RESOLVED" ? <MessageCircle size={14} /> : <Archive size={14} />}{detail.status === "CLOSED" || detail.status === "RESOLVED" ? "إعادة فتح" : "إغلاق"}</button><span className="mr-auto self-center text-[10px] text-stone-400">الحالة: {detail.status}</span></div>
+         {detail.serviceTag && <div className="border-b border-amber-100 bg-amber-50/60 px-5 py-2 text-xs font-bold text-amber-900">الخدمة المطلوبة: {detail.serviceTag}</div>}
+        {allowed(user, "canTransferConversations") && <div className="border-b border-stone-100 bg-white px-5 py-2"><details><summary className="cursor-pointer text-xs font-bold text-stone-600">إدارة الإسناد يدويًا</summary><div className="mt-3 flex flex-wrap items-center gap-2"><label className="text-[10px] font-semibold text-stone-500">إسناد لموظف</label><select value={detail.assignedAgentId || ""} onChange={(event) => void reassign(event.target.value)} className="h-9 min-w-48 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إلغاء الإسناد وإعادة التوزيع</option>{agents.filter((agent) => agent.isActive && agent.presence === "ONLINE").map((agent) => <option key={agent.id} value={agent.id}>{agent.name}{agent.branch?.name ? ` · ${agent.branch.name}` : ""}</option>)}</select><label className="text-[10px] font-semibold text-stone-500">نقل إلى فرع</label><select value={detail.branchId || ""} onChange={(event) => void routeToBranch(event.target.value)} className="h-9 min-w-40 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">اختر فرعًا</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select><span className="text-[10px] text-stone-400">للمراقبة الحية لا يحتاج الأدمن إلى استلام المحادثة.</span></div></details></div>}
+        {user?.role === "ADMIN" && <div className="flex flex-wrap gap-2 border-b border-stone-100 bg-white px-5 py-2"><button type="button" onClick={() => void deleteConversationPermanently()} className="rounded-lg border border-red-200 px-3 py-2 text-[10px] font-bold text-red-700 hover:bg-red-50">حذف المحادثة نهائيًا</button><button type="button" onClick={() => void deleteCustomerPermanently()} className="rounded-lg border border-red-200 px-3 py-2 text-[10px] font-bold text-red-700 hover:bg-red-50">حذف العميل وكل سجلاته</button></div>}
        <div className="flex flex-wrap items-center gap-3 border-b border-stone-100 bg-[#fffdf7] px-5 py-3"><span className="text-xs font-bold text-stone-600">تحويل / استلام</span>{allowed(user, "canTransferConversations") && <><select value={detail.assignedAgentId || ""} onChange={(e) => reassign(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إبقاء في الطابور</option>{agents.filter((a) => a.isActive).map((a) => <option key={a.id} value={a.id}>{a.name}{a.branch?.name ? ` · ${a.branch.name}` : ""} · {presenceLabel[a.presence]}</option>)}</select><select value={detail.branchId || ""} onChange={(e) => void routeToBranch(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">توجيه إلى طابور فرع</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></>}<span className="mr-auto text-xs text-stone-400">{detail.slaBreachedAt ? "تجاوزت مهلة الرد" : "مراقبة مباشرة"}</span></div>
        <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex-1 space-y-3 overflow-y-auto bg-[#fffdf7] px-5 py-4">{(detail.messages || []).map((message: AnyRecord) => <div key={message.id} className={`flex ${message.direction === "OUTBOUND" ? "justify-start" : "justify-end"}`}><div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-7 ${message.direction === "OUTBOUND" ? "rounded-tr-sm bg-white shadow-sm" : "rounded-tl-sm bg-[#fce8c5]"}`}>{["IMAGE", "AUDIO", "FILE"].includes(message.kind) && (message.mediaAssetId || message.direction === "INBOUND" ? <AdminProtectedMedia conversationId={detail.id} message={message} /> : message.kind === "IMAGE" && message.mediaUrl ? <img src={message.mediaUrl} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" /> : message.mediaUrl ? <a href={message.mediaUrl} target="_blank" rel="noreferrer" className="mb-2 block text-xs font-bold text-blue-700 underline">فتح المرفق</a> : null)}{message.text || (message.kind === "LOCATION" ? `موقع: ${message.latitude}, ${message.longitude}` : message.kind === "AUDIO" ? "رسالة صوتية" : "مرفق")}{message.transcription && <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs leading-6 text-stone-600">تفريغ صوتي: {message.transcription}</p>}{message.direction === "OUTBOUND" && <p className="mt-1 text-[10px] text-stone-400">{message.author?.name || "فريق بندق"} · {timeAgo(message.createdAt)}</p>}</div></div>)}<div ref={messageEndRef} />{showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}</div>
        {!!detail.messages?.some((message: AnyRecord) => message.kind === "VIDEO") && <details className="border-t border-stone-100 bg-white px-4 py-2"><summary className="cursor-pointer text-[10px] font-bold text-stone-600">مقاطع الفيديو ({detail.messages.filter((message: AnyRecord) => message.kind === "VIDEO").length})</summary><div className="mt-2 grid gap-3 sm:grid-cols-2">{detail.messages.filter((message: AnyRecord) => message.kind === "VIDEO").map((message: AnyRecord) => <div key={message.id} className="rounded-xl bg-stone-50 p-2"><AdminProtectedMedia conversationId={detail.id} message={message} /><p className="text-[9px] text-stone-400">{message.direction === "OUTBOUND" ? "مرسل" : "وارد"} · {timeAgo(message.createdAt)}</p></div>)}</div></details>}
@@ -465,7 +499,7 @@ function ChannelBadge({ channel }: { channel: string }) { const style: Record<st
 function Empty({ text }: { text: string }) { return <p className="px-5 py-10 text-center text-sm text-stone-400">{text}</p>; }
 function formatDuration(seconds?: number | null) { if (seconds == null) return "—"; if (seconds < 60) return `${seconds}ث`; return `${Math.floor(seconds / 60)}د ${seconds % 60}ث`; }
 function timeAgo(value?: string) { if (!value) return "الآن"; const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000)); return minutes < 1 ? "الآن" : minutes < 60 ? `منذ ${minutes} د` : `منذ ${Math.floor(minutes / 60)} س`; }
-function auditText(action: string) { const map: Record<string, string> = { MESSAGE_SENT: "تم إرسال رد للعميل", MESSAGE_QUEUED: "أُضيف رد WhatsApp لقائمة الإرسال", WHISPER_SENT: "تم إرسال توجيه سري", CONVERSATION_REASSIGNED: "تم تحويل محادثة", CONVERSATION_HANDOFF: "حوّل موظف محادثة لزميل", CONVERSATION_CLOSED: "تم إغلاق محادثة", SLA_BREACHED: "تجاوزت محادثة مهلة الرد", CONVERSATION_OPENED: "تم فتح محادثة للمراجعة", AGENT_CREATED: "تمت إضافة موظف", PRESENCE_CHANGED: "تم تحديث حالة موظف", CSAT_RECEIVED: "تم استلام تقييم خدمة", PRODUCT_SENT: "تم إرسال منتج للعميل", PASSWORD_RESET_REQUESTED: "تم تقديم طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_APPROVED: "تمت الموافقة على طلب إعادة ضبط", PASSWORD_RESET_REJECTED: "تم رفض طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_COMPLETED: "تم تغيير كلمة مرور الحساب" }; return map[action] || action.replaceAll("_", " "); }
+function auditText(action: string) { const map: Record<string, string> = { MESSAGE_SENT: "تم إرسال رد للعميل", MESSAGE_QUEUED: "أُضيف رد WhatsApp لقائمة الإرسال", MESSAGE_EDITED: "تم تعديل رسالة مرسلة", MESSAGE_DELETED: "تم حذف رسالة مرسلة", CUSTOMER_VIP_UPDATED: "تم تحديث حالة VIP للعميل", CUSTOMER_BLOCK_UPDATED: "تم تحديث حالة حظر العميل", CUSTOMER_PERMANENTLY_DELETED: "تم حذف عميل وسجلاته نهائيًا", CONVERSATION_PERMANENTLY_DELETED: "تم حذف محادثة نهائيًا", BLOCKED_CUSTOMER_MESSAGE_IGNORED: "وصلت رسالة من عميل محظور", WHISPER_SENT: "تم إرسال توجيه سري", CONVERSATION_REASSIGNED: "تم تحويل محادثة", CONVERSATION_HANDOFF: "حوّل موظف محادثة لزميل", CONVERSATION_CLOSED: "تم إغلاق محادثة", SLA_BREACHED: "تجاوزت محادثة مهلة الرد", CONVERSATION_OPENED: "تم فتح محادثة للمراجعة", AGENT_CREATED: "تمت إضافة موظف", PRESENCE_CHANGED: "تم تحديث حالة موظف", CSAT_RECEIVED: "تم استلام تقييم خدمة", PRODUCT_SENT: "تم إرسال منتج للعميل", PASSWORD_RESET_REQUESTED: "تم تقديم طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_APPROVED: "تمت الموافقة على طلب إعادة ضبط", PASSWORD_RESET_REJECTED: "تم رفض طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_COMPLETED: "تم تغيير كلمة مرور الحساب" }; return map[action] || action.replaceAll("_", " "); }
 
 function AdminProtectedMedia({ conversationId, message }: { conversationId: string; message: AnyRecord }) {
   const [lightbox, setLightbox] = useState("");

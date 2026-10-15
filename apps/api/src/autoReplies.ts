@@ -30,22 +30,22 @@ export const DEFAULT_CHATBOT_SETTINGS: ChatbotSettings = {
   option3Label: "طلبات الجملة",
   option4Label: "الشكاوى والاقتراحات",
   option5Label: "غير ذلك",
-  option1ReplyText: "لم تُضف بيانات الفروع ومواعيد العمل بعد.",
+  option1ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
   option2ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
-  option3ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل طلبات الجملة المختص.",
-  option4ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل الشكاوى والاقتراحات المختص.",
+  option3ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
+  option4ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
   option5ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص."
 };
 
 export const AUTO_REPLY_MENU_TEXT = buildRoutingMenuText(DEFAULT_CHATBOT_SETTINGS);
 
-export type ServiceChoice = { number: number; label: string; routingDepartment: "CUSTOMER_CARE" | "DELIVERY" | "QUALITY" | "HEADQUARTERS"; isComplaint: boolean };
+export type ServiceChoice = { number: number; label: string; routingDepartment: "CUSTOMER_CARE"; isComplaint: boolean };
 
 const serviceDepartments: Record<number, ServiceChoice["routingDepartment"]> = {
   1: "CUSTOMER_CARE",
   2: "CUSTOMER_CARE",
-  3: "HEADQUARTERS",
-  4: "QUALITY",
+  3: "CUSTOMER_CARE",
+  4: "CUSTOMER_CARE",
   5: "CUSTOMER_CARE"
 };
 
@@ -86,7 +86,6 @@ export function getServiceChoice(value?: string | null, settings: ChatbotSetting
 
 export type BotDecision =
   | { action: "MENU"; nextState: "BOT_MENU" }
-  | { action: "BRANCHES"; nextState: "BOT_MENU"; choice: ServiceChoice }
   | { action: "HANDOFF"; nextState: "ASSIGNED_TO_AGENT"; choice: ServiceChoice }
   | { action: "INVALID"; nextState: "BOT_MENU" }
   | { action: "BYPASS"; nextState: "ASSIGNED_TO_AGENT" }
@@ -100,12 +99,7 @@ export function decideBotAction(input: { enabled: boolean; state: BotState; star
   if (input.state !== "BOT_MENU") return { action: "NONE", nextState: input.state };
   const choice = getServiceChoice(input.text, input.settings);
   if (!choice) return { action: "INVALID", nextState: "BOT_MENU" };
-  if (choice.number === 1) return { action: "BRANCHES", nextState: "BOT_MENU", choice };
   return { action: "HANDOFF", nextState: "ASSIGNED_TO_AGENT", choice };
-}
-
-export function buildBranchReplyText(settings: ChatbotSettings) {
-  return `${settings.option1ReplyText.trim()}\n\nللتحدث مع ممثل خدمة العملاء أرسل الرقم 2.`;
 }
 
 export function findMatchingAutoReply<T extends AutoReplyRuleMatch>(rules: T[], text?: string) {

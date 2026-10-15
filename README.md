@@ -45,6 +45,7 @@
 - إعداد KalemlyWA الاحتياطي متاح للمدير من زر «إعداد واتساب». يدخل المدير authkey وappkey كلًّا على حدة، ويُخزّنان مشفّرين. يستخدم هذا الوضع `https://whatsapp.kalemly.com/api/send-message` ويستقبل الرسائل عبر `POST /webhooks/kalemlywa`. لوحة المدير تعرض رابط Webhook الكامل، بما فيه `?token=`؛ لا تحذف الرمز أو تشاركه علنًا. لا يحتاج API إلى Instance ID.
 - تُحفظ جلسة Baileys في `WHATSAPP_AUTH_DIR` (الافتراضي `apps/api/data/whatsapp-auth` عند تشغيل API مباشرة). يوفر Docker Compose وحدة بيانات محلية باسم `whatsapp_auth`. يجب ربط مساحة تخزين دائمة بمسار `/data` في الاستضافة كي لا يلزم مسح QR بعد إعادة نشر الخدمة.
 - يمكن للنظام اكتشاف المكالمة الواردة وعرضها للموظف أو المدير، ثم رفضها وإرسال رد نصي تلقائي. Baileys لا يستطيع الرد على المكالمة أو تمرير صوتها إلى المتصفح؛ هذه ليست ميزة اتصال صوتي فعلي.
+- مساحة الموظف تدعم مكالمة صادرة كاملة من داخل النظام عبر WhatsApp Business Calling API وWebRTC، من دون WhatsApp Web. يلزم رقم Cloud API إيرلندي (+353)، تفعيل Calling على رقم الأعمال، حد إرسال يومي لا يقل عن 2,000 مستلم فريد وفق متطلبات Meta الحالية، اشتراك Meta في Webhook حقلي `calls` و`messages`، وموافقة العميل على الاتصال. يظل رقم مصر الحالي للمراسلات؛ المكالمة تظهر للعميل من الرقم الإيرلندي.
 - حفظ المفتاحين لا يرسل رسالة؛ اختبار الإرسال إجراء منفصل.
 - إعداد Messenger متاح للمدير من زر «إعداد Messenger»؛ تُخزّن مفاتيح الصفحة وMeta مشفّرة ويمكن اختبار Page Access Token من الواجهة. سجّل `GET/POST /webhooks/meta` لدى Meta مع اشتراك أحداث الرسائل، وتظل نافذة الـ24 ساعة خاصة بـ Messenger.
 - إعداد Telegram متاح للمدير من زر «إعداد Telegram»؛ تُخزّن بيانات البوت مشفّرة، ويمكن اختبارها وتسجيل `POST /webhooks/telegram` تلقائيًا باستخدام رمز حماية Webhook.
@@ -71,6 +72,10 @@
 - تطبيق ويب قابل للتثبيت مع Service Worker وإشعارات Push اختيارية؛ يخزّن Service Worker الأصول الثابتة فقط ولا يخزّن صفحات التطبيق أو استجابات API. يلزم إعداد مفاتيح VAPID وإذن الإشعارات في المتصفح لتفعيل Push.
 
 ## ملاحظات نشر مهمة
+
+### إعداد الاتصال الصوتي داخل النظام
+
+للمكالمات الصادرة استخدم رقم الشركة الإيرلندي على WhatsApp Business Cloud API، وليس QR/Baileys أو تطبيق WhatsApp Business. اضبط `WHATSAPP_CLOUD_PHONE_NUMBER_ID` و`WHATSAPP_CLOUD_ACCESS_TOKEN` و`WHATSAPP_CLOUD_API_VERSION` على خدمة API. سجّل `https://<api-domain>/webhooks/meta` كـCallback لدى Meta، وضع `WHATSAPP_CLOUD_VERIFY_TOKEN` المطابق، واستخدم `WHATSAPP_CLOUD_APP_SECRET` إذا كان تطبيق Calling مختلفًا عن تطبيق Messenger. اشترك تطبيق Meta في حقلي `calls` و`messages` لحساب WhatsApp Business. يجب تفعيل Calling والامتثال لمتطلبات الحساب الحالية، ومنها حد إرسال يومي لا يقل عن 2,000 مستلم فريد؛ كما يجب أن يوافق العميل على طلب الإذن قبل بدء المكالمة. طلب الإذن الحر يحتاج نافذة محادثة مفتوحة في Cloud API؛ خارجها اضبط اسم ولغة قالب معتمد يحتوي مكوّن `call_permission_request`. رقم مصر لا يدعم مكالمات الأعمال الصادرة حسب قائمة Meta الحالية.
 
 ### نشر Railway
 

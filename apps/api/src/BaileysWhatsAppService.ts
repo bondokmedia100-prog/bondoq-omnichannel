@@ -126,6 +126,13 @@ export async function editBaileysWhatsAppMessage(input: { recipient: string; ext
   return socket.sendMessage(key.remoteJid, { text: input.text, edit: key as any });
 }
 
+export async function deleteBaileysWhatsAppMessage(input: { recipient: string; externalId: string }) {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("حذف الرسائل متاح فقط عند اتصال WhatsApp بوضع Baileys");
+  const key = baileysMessageKey({ ...input, direction: "OUTBOUND" });
+  if (!key.id || key.id === input.externalId) throw new Error("معرّف رسالة WhatsApp غير صالح");
+  return socket.sendMessage(key.remoteJid, { delete: key as any });
+}
+
 export async function reactToBaileysWhatsAppMessage(input: { recipient: string; externalId: string; direction: "INBOUND" | "OUTBOUND"; emoji: string }) {
   if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("تفاعلات WhatsApp متاحة فقط عند اتصال WhatsApp بوضع Baileys");
   const key = baileysMessageKey(input);
