@@ -51,6 +51,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     }
   }
   if (!conversation) throw new Error("Conversation could not be created");
+  const conversationId = conversation.id;
   const storedExternalId = `${inbound.channel}:${inbound.externalId}`;
   const existingMessage = await prisma.message.findUnique({ where: { externalId: storedExternalId }, select: { id: true, conversationId: true } });
   if (existingMessage) return { duplicate: true, conversationId: existingMessage.conversationId };
@@ -85,7 +86,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
         catch (error) { console.warn("Public media URL unavailable; protected media route will be used", error); }
       }
       return tx.message.create({ data: {
-        conversationId: conversation.id, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
+        conversationId, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
         text: inbound.text, mediaUrl, mediaAssetId: asset?.id, latitude: inbound.latitude, longitude: inbound.longitude,
         externalId: storedExternalId, metadata: metadata as Prisma.InputJsonValue
       } });
@@ -158,12 +159,12 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     const result: any = await sendToChannel({ channel: inbound.channel, recipient: channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId), text });
     const providerId = kalemlyExternalMessageId(result);
     const reply = await prisma.message.create({ data: {
-      conversationId: conversation.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text,
+      conversationId, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text,
       externalId: providerId ? `${inbound.channel}:${providerId}` : undefined,
       metadata: { automation, ...details } as Prisma.InputJsonValue
     } });
-    conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: reply.createdAt } });
-    io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: reply });
+    conversation = await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: reply.createdAt } });
+    io?.to(`conversation:${conversationId}`).to("admins").emit("message:new", { conversationId, message: reply });
     if (conversation.assignedAgentId) io?.to(`agent:${conversation.assignedAgentId}`).emit("message:new", { conversationId: conversation.id, message: reply });
   }
 
