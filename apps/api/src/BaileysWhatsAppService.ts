@@ -9,6 +9,7 @@ import { config } from "./config";
 import { io } from "./realtime";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { sendPushNotification } from "./pushNotifications";
+import { repacketizeOggOpusToCode3 } from "./oggOpus";
 
 export type WhatsAppMode = "BAILEYS" | "API";
 export type WhatsAppConnectionState = {
@@ -185,7 +186,7 @@ async function transcodeVoiceToOgg(buffer: Buffer, contentType: string) {
         : contentType.includes("mpeg") ? "mp3"
           : contentType.includes("aac") ? "aac" : "ogg";
   return new Promise<Buffer>((resolve, reject) => {
-    const child = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", inputFormat, "-i", "pipe:0", "-vn", "-c:a", "libopus", "-b:a", "32k", "-application", "voip", "-f", "ogg", "pipe:1"]);
+    const child = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", inputFormat, "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "32k", "-application", "voip", "-frame_duration", "20", "-f", "ogg", "pipe:1"]);
     const chunks: Buffer[] = [];
     let outputSize = 0;
     child.stdout.on("data", (chunk: Buffer) => {
@@ -230,7 +231,7 @@ export async function sendBaileysWhatsAppMessage(input: { to: string; message: s
     return socket.sendMessage(jid, { image: media.buffer, caption: input.message || undefined, mimetype: media.contentType });
   }
   if (input.mediaType === "audio" || media.contentType.startsWith("audio/")) {
-    const audio = await transcodeVoiceToOgg(media.buffer, media.contentType);
+    const audio = repacketizeOggOpusToCode3(await transcodeVoiceToOgg(media.buffer, media.contentType));
     return socket.sendMessage(jid, { audio, mimetype: "audio/ogg; codecs=opus", ptt: true });
   }
   if (input.mediaType === "video" || media.contentType.startsWith("video/")) {
