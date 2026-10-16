@@ -25,6 +25,7 @@ button { cursor: pointer; }
   .ticket-rule { margin: 10px 0; border-top: 1px dashed #777; }
   .ticket-footer { text-align: center; font-size: 10pt; }
 }
+.conversation-view-back { display: flex; height: 38px; flex: 0 0 auto; align-items: center; gap: 6px; border-bottom: 1px solid #f0ece6; padding: 0 14px; color: #8b6b28; font-size: 11px; font-weight: 700; }
 .mobile-chat-back { display: none; }
 .workspace-chat { background-color: #efeae2 !important; }
 .workspace-chat > .flex-1 { background-color: #efeae2; }
