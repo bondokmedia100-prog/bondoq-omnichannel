@@ -502,8 +502,26 @@ export default function AgentWorkspace() {
         }
         if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: event.customer || old.customer } : old);
       });
+      connection.on("conversation:access-revoked", ({ conversationId }) => {
+        if (activeIdRef.current === conversationId) {
+          ++detailRequest.current;
+          activeIdRef.current = "";
+          detailLoadingIdRef.current = "";
+          loadingMessagesRef.current.delete(conversationId);
+          setActiveId("");
+          setDetail(null);
+          setNotice("تم نقل المحادثة إلى نطاق آخر ولم تعد لديك صلاحية عرضها.");
+        }
+        conversationsRef.current = conversationsRef.current.filter((item) => item.id !== conversationId);
+        setConversations(conversationsRef.current);
+        loadedExtraChatsRef.current = false;
+        setChatCursor(null);
+        setHasMoreChats(false);
+        setIncomingNotice((current) => current?.conversationId === conversationId ? null : current);
+        void loadChats();
+      });
       connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
-      connection.on("whisper:new", (note) => { setDetail((old: AnyRecord) => old ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old); setNotice("أرسل المدير توجيهًا سريًا جديدًا"); });
+       connection.on("whisper:new", (note) => { setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old); setNotice("أرسل المدير توجيهًا سريًا جديدًا"); });
       connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
       connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
       connection.on("admin:viewing", (event) => setWatching(Boolean(event.viewing)));
@@ -719,6 +737,7 @@ export default function AgentWorkspace() {
   }
   async function uploadAndSend(file: File) {
     if (!activeId) return;
+    if (detail?.readOnly) { setNotice("هذه المحادثة للقراءة فقط."); return; }
     if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); return; }
     if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل إرسال الملف."); return; }
     if (sendingRef.current) return;
@@ -731,7 +750,7 @@ export default function AgentWorkspace() {
       const previewUrl = ["IMAGE", "STICKER", "AUDIO", "VIDEO"].includes(kind) ? URL.createObjectURL(file) : undefined;
     sendingRef.current = true; setNotice("جارٍ رفع الملف..."); setSending(true);
     try {
-      const response = await fetch(`${API_URL}/api/media`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": contentType || "application/octet-stream", "X-File-Name": encodeURIComponent(file.name) }, body: file });
+      const response = await fetch(`${API_URL}/api/media`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": contentType || "application/octet-stream", "X-File-Name": encodeURIComponent(file.name), "X-Conversation-Id": conversationId }, body: file });
       const uploaded = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(uploaded.error || `تعذر رفع الملف (${response.status})`);
       setNotice("");
