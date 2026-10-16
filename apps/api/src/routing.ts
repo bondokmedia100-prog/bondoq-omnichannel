@@ -16,6 +16,14 @@ export function withInboundConversationLock<T>(channel: string, externalConversa
   return withRedisLock(connection, `inbound:${channel}:${externalConversationId}`, work, { leaseMs: 120_000 });
 }
 
+export function recordConversationAssignment(conversationId: string, agentId: string) {
+  return prisma.conversationAssignment.upsert({
+    where: { conversationId_agentId: { conversationId, agentId } },
+    create: { conversationId, agentId },
+    update: { lastAssignedAt: new Date() }
+  });
+}
+
 export async function assignConversation(conversationId: string, department?: Department | null, options: AssignmentOptions = {}) {
   return withRedisLock(connection, `assignment:conversation:${conversationId}`, async () => {
     const currentConversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
@@ -52,7 +60,10 @@ export async function assignConversation(conversationId: string, department?: De
         data: { assignedAgentId: null, status: ConversationStatus.QUEUED }
       });
       const waiting = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
-      if (released.count && previousAgentId) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", waiting);
+      if (released.count && previousAgentId) {
+        await recordConversationAssignment(conversationId, previousAgentId);
+        io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", waiting);
+      }
       if (waiting.status === ConversationStatus.QUEUED && !waiting.assignedAgentId) io?.to("admins").emit("conversation:queued", waiting);
       return waiting;
     }
@@ -66,6 +77,8 @@ export async function assignConversation(conversationId: string, department?: De
       data: { assignedAgentId: agent.id, status: ConversationStatus.OPEN }
     });
     if (!claimed.count) return prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
+    if (previousAgentId) await recordConversationAssignment(conversationId, previousAgentId);
+    await recordConversationAssignment(conversationId, agent.id);
     const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
     await prisma.auditLog.create({ data: { conversationId, action: previousAgentId ? "CONVERSATION_AUTO_REASSIGNED" : "CONVERSATION_AUTO_ASSIGNED", details: { from: previousAgentId, agentId: agent.id } } });
     if (previousAgentId && previousAgentId !== agent.id) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", conversation);
@@ -89,15 +102,23 @@ export async function dispatchQueued() {
 }
 
 export async function releaseAgentConversations(agentId: string) {
-  const assigned = await prisma.conversation.findMany({
-    where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
-    select: { id: true }
+  const assigned = await prisma.$transaction(async (tx) => {
+    const current = await tx.conversation.findMany({
+      where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
+      select: { id: true }
+    });
+    if (!current.length) return current;
+    await tx.conversationAssignment.createMany({
+      data: current.map(({ id }) => ({ conversationId: id, agentId })),
+      skipDuplicates: true
+    });
+    await tx.conversation.updateMany({
+      where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
+      data: { assignedAgentId: null, status: ConversationStatus.QUEUED }
+    });
+    return current;
   });
   if (!assigned.length) return 0;
-  await prisma.conversation.updateMany({
-    where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
-    data: { assignedAgentId: null, status: ConversationStatus.QUEUED }
-  });
   for (const { id } of assigned) io?.to("admins").emit("conversation:updated", { id, assignedAgentId: null, status: ConversationStatus.QUEUED });
   await dispatchQueued();
   return assigned.length;

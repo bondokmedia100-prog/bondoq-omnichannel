@@ -119,6 +119,7 @@ model User {
   createdAt                DateTime               @default(now())
   updatedAt                DateTime               @updatedAt
   assignedChats            Conversation[]         @relation("AssignedAgent")
+  conversationAssignmentHistory ConversationAssignment[]
   sessions                 AgentSession[]
   auditLogs                AuditLog[]
   whisperNotes             WhisperNote[]
@@ -248,11 +249,24 @@ model Conversation {
   auditLogs              AuditLog[]
   csatSurvey             CsatSurvey?
   whatsappCallSessions   WhatsAppCallSession[]
+  assignmentHistory      ConversationAssignment[]
 
   @@unique([channel, externalConversationId])
   @@index([assignedAgentId, status, lastMessageAt])
   @@index([branchId, status, lastMessageAt])
   @@index([status, slaBreachedAt])
+}
+
+model ConversationAssignment {
+  conversationId  String
+  agentId         String
+  firstAssignedAt DateTime     @default(now())
+  lastAssignedAt  DateTime     @default(now())
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agent           User         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, agentId])
+  @@index([agentId, lastAssignedAt])
 }
 
 model Message {

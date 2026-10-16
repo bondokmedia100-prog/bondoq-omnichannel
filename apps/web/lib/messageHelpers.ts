@@ -1,4 +1,5 @@
 type Message = { id?: string; createdAt?: string; [key: string]: any };
+export type MessageTextPart = { text: string; href?: string };
 
 export function mergeMessages(messages: Message[] = [], incoming: Message[] | Message) {
   const merged = new Map<string, Message>();
@@ -15,6 +16,34 @@ export function messageNotificationPreview(message?: { text?: string | null; kin
   const text = message?.text?.trim();
   if (text) return text;
   return ({ IMAGE: "صورة جديدة", STICKER: "ملصق جديد", AUDIO: "رسالة صوتية جديدة", FILE: "ملف مرفق جديد", LOCATION: "موقع جديد" } as Record<string, string>)[message?.kind || ""] || "رسالة جديدة";
+}
+
+export function splitMessageTextLinks(text: string): MessageTextPart[] {
+  const parts: MessageTextPart[] = [];
+  const pattern = /(?:https?:\/\/|www\.)[^\s<>"'`]+/gi;
+  const trailingPunctuation = /[.,!?;:،؛؟。»]+$/u;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const candidate = match[0].replace(trailingPunctuation, "");
+    if (!candidate) continue;
+    const href = candidate.startsWith("www.") ? `https://${candidate}` : candidate;
+    try {
+      const parsed = new URL(href);
+      if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") || !parsed.hostname) continue;
+      if (start > cursor) parts.push({ text: text.slice(cursor, start) });
+      parts.push({ text: candidate, href: parsed.href });
+      cursor = start + candidate.length;
+    } catch {
+      continue;
+    }
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
+  return parts.length ? parts : [{ text }];
+}
+
+export function hasMessageTextLinks(text?: string | null) {
+  return Boolean(text && splitMessageTextLinks(text).some((part) => Boolean(part.href)));
 }
 
 let audioContext: AudioContext | null = null;

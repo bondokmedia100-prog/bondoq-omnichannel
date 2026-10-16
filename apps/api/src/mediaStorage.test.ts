@@ -7,6 +7,8 @@ test("signed media links validate and reject tampering", () => {
   assert.equal(verifyPublicMediaUrl("asset-test", url.searchParams.get("expires"), url.searchParams.get("signature")), true);
   assert.equal(verifyPublicMediaUrl("other-asset", url.searchParams.get("expires"), url.searchParams.get("signature")), false);
   assert.equal(verifyPublicMediaUrl("asset-test", url.searchParams.get("expires"), "bad-signature"), false);
+  assert.equal(verifyPublicMediaUrl("asset-test", "0", url.searchParams.get("signature")), false);
+  assert.throws(() => publicMediaUrl("asset-test", 0));
 });
 
 test("upload allowlist and filenames exclude executable media and path components", () => {

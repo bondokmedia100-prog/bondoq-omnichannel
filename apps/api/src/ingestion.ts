@@ -9,7 +9,7 @@ import { transcribeAudioMessage } from "./transcription";
 import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, shouldStartBotFlow, type BotState } from "./autoReplies";
 import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
-import { detectImageContentType, publicMediaUrl, safeFileName } from "./mediaStorage";
+import { detectImageContentType, safeFileName } from "./mediaStorage";
 import { isWithinBusinessHours } from "./businessHours";
 import { startOfCairoDay } from "./cairoTime";
 
@@ -62,11 +62,12 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   let cachedMedia: { body: Buffer; contentType: string } | undefined = inbound.mediaBuffer
     ? { body: inbound.mediaBuffer, contentType: inbound.mediaContentType || String(metadata.mediaMimeType || "application/octet-stream") }
     : undefined;
-  if (!cachedMedia && metadata.provider === "kalemlywa" && typeof metadata.mediaId === "string" && metadata.mediaId) {
+  const hasMedia = [MessageKind.IMAGE, MessageKind.AUDIO, MessageKind.VIDEO, MessageKind.FILE, MessageKind.STICKER].includes(inbound.kind);
+  if (!cachedMedia && hasMedia) {
     try {
       cachedMedia = await fetchInboundMedia(inbound.channel, metadata, inbound.mediaUrl);
     } catch (error) {
-      console.warn("KalemlyWA inbound media cache failed", error instanceof Error ? error.message : error);
+      console.warn("Inbound media cache failed", error instanceof Error ? error.message : error);
     }
   }
   let message;
@@ -80,17 +81,13 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       ? `${metadata.voiceNote === true ? "voice-note" : "audio"}.${extension}`
       : inbound.kind === MessageKind.IMAGE ? `image.${extension}` : inbound.kind === MessageKind.VIDEO ? `video.${extension}` : `attachment.${extension}`);
     message = await prisma.$transaction(async (tx) => {
-      const asset = cachedMedia ? await tx.mediaAsset.create({ data: {
+      const cacheable = cachedMedia && (inbound.kind !== MessageKind.IMAGE && inbound.kind !== MessageKind.STICKER || Boolean(detectImageContentType(cachedMedia.body)));
+      const asset = cacheable ? await tx.mediaAsset.create({ data: {
         fileName: safeFileName(fileName), contentType, size: cachedMedia.body.length, data: Uint8Array.from(cachedMedia.body)
       }, select: { id: true } }) : null;
-      let mediaUrl = inbound.mediaUrl;
-      if (asset) {
-        try { mediaUrl = publicMediaUrl(asset.id, 0); }
-        catch (error) { console.warn("Public media URL unavailable; protected media route will be used", error); }
-      }
       return tx.message.create({ data: {
         conversationId, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
-        text: inbound.text, mediaUrl, mediaAssetId: asset?.id, latitude: inbound.latitude, longitude: inbound.longitude,
+        text: inbound.text, mediaUrl: asset ? null : inbound.mediaUrl, mediaAssetId: asset?.id, latitude: inbound.latitude, longitude: inbound.longitude,
         externalId: storedExternalId, metadata: metadata as Prisma.InputJsonValue
       } });
     });

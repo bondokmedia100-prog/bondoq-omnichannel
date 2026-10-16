@@ -7,6 +7,7 @@ import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { io } from "./realtime";
 import { getWhatsAppMode, sendBaileysWhatsAppMessage } from "./BaileysWhatsAppService";
 import { serializeBaileysMessageKey } from "./baileysMessageKey";
+import { publicMediaUrl } from "./mediaStorage";
 
 const queueName = "kalemlywa-outbound";
 const redis = () => new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -18,6 +19,7 @@ export type KalemlyWaMessage = {
   to: string;
   message: string;
   file?: string;
+  mediaAssetId?: string;
   mediaType?: "image" | "audio" | "video" | "document" | "sticker";
   pollOptions?: string[];
 };
@@ -135,7 +137,12 @@ export async function sendKalemlyTest(to: string, message: string) {
 
 export function startKalemlyWaWorker() {
   const worker = new Worker<QueuedKalemlyWaMessage, any>(queueName, async (job: Job<QueuedKalemlyWaMessage>) => {
-    const { outboundMessageId, ...payload } = job.data;
+    const { outboundMessageId, mediaAssetId, ...payload } = job.data;
+    if (mediaAssetId) {
+      const asset = await prisma.mediaAsset.findUnique({ where: { id: mediaAssetId }, select: { id: true } });
+      if (!asset) throw new Error("ملف الوسائط لم يعد موجودًا");
+      payload.file = publicMediaUrl(asset.id);
+    }
     const result = await postMessage(payload);
     if (outboundMessageId) await persistQueuedDelivery(outboundMessageId, "SENT", result);
     return result;

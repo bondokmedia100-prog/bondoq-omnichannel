@@ -29,7 +29,9 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
     return enqueueKalemlyMessage({
       to: input.recipient, message,
       ...(input.pollOptions ? { pollOptions: input.pollOptions } : {}),
-      ...(input.mediaUrl ? { file: input.mediaUrl, mediaType: kind === MessageKind.STICKER ? "sticker" : kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : kind === MessageKind.VIDEO ? "video" : "document" } : {})
+      ...(input.mediaUrl ? { file: input.mediaUrl } : {}),
+      ...(input.mediaAssetId ? { mediaAssetId: input.mediaAssetId } : {}),
+      ...(input.mediaUrl || input.mediaAssetId ? { mediaType: kind === MessageKind.STICKER ? "sticker" : kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : kind === MessageKind.VIDEO ? "video" : "document" } : {})
     }, input.outboundMessageId);
   }
   if (input.channel === Channel.MESSENGER) {
@@ -261,24 +263,47 @@ export async function fetchInboundMedia(channel: Channel, metadata: Record<strin
   let url = mediaUrl || String(metadata.attachmentUrl || "");
   const telegramSettings = channel === Channel.TELEGRAM ? await getTelegramSettings() : null;
   if (channel === Channel.TELEGRAM && metadata.fileId && telegramSettings?.botToken) {
-    const infoResponse = await fetch(`https://api.telegram.org/bot${telegramSettings.botToken}/getFile?file_id=${encodeURIComponent(String(metadata.fileId))}`);
+    const infoResponse = await fetch(`https://api.telegram.org/bot${telegramSettings.botToken}/getFile?file_id=${encodeURIComponent(String(metadata.fileId))}`, { signal: AbortSignal.timeout(45_000) });
     if (!infoResponse.ok) throw new Error(`Telegram file lookup failed (${infoResponse.status})`);
     const info = await infoResponse.json() as { result?: { file_path?: string } };
     if (!info.result?.file_path) throw new Error("Telegram file path is unavailable");
     url = `https://api.telegram.org/file/bot${telegramSettings.botToken}/${info.result.file_path}`;
   }
   if (!url) throw new Error("Media URL is unavailable for this message");
-  const mediaAddress = new URL(url);
-  if (mediaAddress.protocol !== "https:") throw new Error("Media must be loaded over HTTPS");
-  const hostname = mediaAddress.hostname;
-  const trustedMediaHost = hostname === "graph.facebook.com" || hostname.endsWith(".fbcdn.net") || hostname.endsWith(".fbsbx.com") || hostname === "api.telegram.org" || hostname === "whatsapp.kalemly.com" || hostname.endsWith(".kalemly.com");
-  if (!trustedMediaHost) throw new Error("Media host is not trusted");
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Media download failed (${response.status})`);
   const maxBytes = 12 * 1024 * 1024;
-  const contentLength = Number(response.headers.get("content-length") || 0);
-  if (contentLength > maxBytes) throw new Error("Inbound media exceeds the 12 MiB forwarding limit");
-  const body = Buffer.from(await response.arrayBuffer());
-  if (body.length > maxBytes) throw new Error("Inbound media exceeds the 12 MiB forwarding limit");
-  return { body, contentType: response.headers.get("content-type") || "application/octet-stream" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45_000);
+  try {
+    let mediaAddress = new URL(url);
+    for (let redirects = 0; redirects <= 3; redirects++) {
+      const hostname = mediaAddress.hostname;
+      const trustedMediaHost = hostname === "graph.facebook.com" || hostname.endsWith(".fbcdn.net") || hostname.endsWith(".fbsbx.com") || hostname === "api.telegram.org" || hostname === "whatsapp.kalemly.com" || hostname.endsWith(".kalemly.com");
+      if (mediaAddress.protocol !== "https:" || !trustedMediaHost || mediaAddress.username || mediaAddress.password) throw new Error("Media host is not trusted");
+      const response = await fetch(mediaAddress, { redirect: "manual", signal: controller.signal });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (!location || redirects === 3) throw new Error("Media redirect limit exceeded");
+        mediaAddress = new URL(location, mediaAddress);
+        continue;
+      }
+      if (!response.ok) throw new Error(`Media download failed (${response.status})`);
+      const contentLength = Number(response.headers.get("content-length") || 0);
+      if (contentLength > maxBytes) throw new Error("Inbound media exceeds the 12 MiB forwarding limit");
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of response.body || []) {
+        const bytes = Buffer.from(chunk);
+        size += bytes.length;
+        if (size > maxBytes) {
+          controller.abort();
+          throw new Error("Inbound media exceeds the 12 MiB forwarding limit");
+        }
+        chunks.push(bytes);
+      }
+      return { body: Buffer.concat(chunks, size), contentType: response.headers.get("content-type") || "application/octet-stream" };
+    }
+    throw new Error("Media redirect limit exceeded");
+  } finally {
+    clearTimeout(timeout);
+  }
 }

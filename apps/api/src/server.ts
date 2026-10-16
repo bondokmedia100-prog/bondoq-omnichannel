@@ -88,6 +88,19 @@ async function lastInboundAt(conversationId: string, stored?: Date | null) {
   const latest = await prisma.message.findFirst({ where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
   return latest?.createdAt || null;
 }
+async function canReadConversationOrHistory(user: NonNullable<AuthedRequest["user"]>, conversation: { id: string; assignedAgentId: string | null }) {
+  if (canReadConversation(user, conversation)) return true;
+  if (user.role !== Role.AGENT && user.role !== Role.BRANCH_USER) return false;
+  return Boolean(await prisma.conversation.findFirst({
+    where: { id: conversation.id, OR: [
+      { assignmentHistory: { some: { agentId: user.id } } },
+      { messages: { some: { authorId: user.id } } },
+      { internalNotes: { some: { authorId: user.id } } },
+      { whatsappCallSessions: { some: { agentId: user.id } } }
+    ] },
+    select: { id: true }
+  }));
+}
 function messengerWindowOpen(channel: Channel, inboundAt: Date | null) {
   return !isMessenger(channel) || Boolean(inboundAt && Date.now() - inboundAt.getTime() < MESSENGER_WINDOW_MS);
 }
@@ -112,7 +125,7 @@ async function queueWhatsAppMessage(messageId: string, conversationId: string, a
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "bondoq-api" }));
 
 app.post("/api/media", agentGuard, express.raw({ type: () => true, limit: uploadLimitBytes }), async (req: AuthedRequest, res: express.Response) => {
-  try { publicMediaUrl("configuration-check", 0); }
+  try { publicMediaUrl("configuration-check", 3600); }
   catch { return res.status(503).json({ error: "لم يتم إعداد API_PUBLIC_URL صالح وآمن لاستقبال الوسائط" }); }
   if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "اختر ملفًا صالحًا" });
   const contentType = String(req.header("content-type") || "").split(";")[0].trim().toLowerCase();
@@ -124,7 +137,7 @@ app.post("/api/media", agentGuard, express.raw({ type: () => true, limit: upload
   const asset = await prisma.mediaAsset.create({ data: {
     fileName, contentType, size: req.body.length, data: Uint8Array.from(req.body), createdById: req.user!.id
   }, select: { id: true, fileName: true, contentType: true, size: true } });
-  res.status(201).json({ ...asset, url: publicMediaUrl(asset.id, 0) });
+  res.status(201).json(asset);
 });
 
 app.get("/public-media/:id", async (req, res) => {
@@ -135,7 +148,7 @@ app.get("/public-media/:id", async (req, res) => {
     "Content-Type": asset.contentType,
     "Content-Length": String(asset.size),
     "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`,
-    "Cache-Control": "public, max-age=3600",
+    "Cache-Control": "private, max-age=300",
     "X-Content-Type-Options": "nosniff"
   }).send(Buffer.from(asset.data));
 });
@@ -355,7 +368,16 @@ app.post("/api/auth/password-reset/complete", async (req, res) => {
 app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const actor = req.user!;
   const canSeeAll = actor.role === Role.ADMIN || actor.role === Role.SUPERVISOR && hasPermission(actor, "canViewAllConversations");
-  const scope = canSeeAll ? {} : { assignedAgentId: actor.id };
+  const historyOnly = req.query.history === "1" && !canSeeAll;
+  const scope: Prisma.ConversationWhereInput[] = canSeeAll ? [] : historyOnly ? [
+    { OR: [{ assignedAgentId: null }, { assignedAgentId: { not: actor.id } }] },
+    { OR: [
+      { assignmentHistory: { some: { agentId: actor.id } } },
+      { messages: { some: { authorId: actor.id } } },
+      { internalNotes: { some: { authorId: actor.id } } },
+      { whatsappCallSessions: { some: { agentId: actor.id } } }
+    ] }
+  ] : [{ assignedAgentId: actor.id }];
   const channel = typeof req.query.channel === "string" ? req.query.channel : undefined;
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const paginated = req.query.limit !== undefined || req.query.cursor !== undefined;
@@ -364,17 +386,17 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
   const limit = pageLimit(req.query.limit);
   const conversations = await prisma.conversation.findMany({
     where: {
-      ...scope,
+      ...(scope.length ? { AND: [...scope, ...(cursor ? [{ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] }] : [])] } : {}),
       ...(channel && channel !== "ALL" ? { channel: channel as Channel } : {}),
       ...(status && status !== "ALL" ? { status: status as ConversationStatus } : {}),
-      ...(cursor ? { OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] } : {})
+      ...(!scope.length && cursor ? { OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] } : {})
     },
     include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } },
     orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }], take: paginated ? limit + 1 : 100
   });
-  if (!paginated) return res.json(conversations);
+  if (!paginated) return res.json(conversations.map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation) })));
   const hasMore = conversations.length > limit;
-  const items = conversations.slice(0, limit);
+  const items = conversations.slice(0, limit).map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation) }));
   res.json({ items, hasMore, nextCursor: hasMore && items.length ? encodePageCursor(items[items.length - 1].lastMessageAt, items[items.length - 1].id) : null });
 });
 
@@ -432,10 +454,13 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   const messageLimit = req.query.messageLimit === undefined ? null : pageLimit(req.query.messageLimit);
   let conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: {
     customer: { include: { orders: { orderBy: { createdAt: "desc" }, take: 10 }, tags: { include: { tag: true } } } }, assignedAgent: { select: { id: true, name: true } },
-    messages: { include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: messageLimit ? messageLimit + 1 : 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "desc" }, take: 100 }, internalNotes: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" }, take: 100 }
+    messages: { include: { author: { select: { id: true, name: true } }, mediaAsset: { select: { fileName: true, contentType: true, size: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: messageLimit ? messageLimit + 1 : 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "desc" }, take: 100 }, internalNotes: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" }, take: 100 },
+    whatsappCallSessions: { orderBy: { createdAt: "desc" }, take: 50, select: { id: true, direction: true, transport: true, status: true, createdAt: true, endedAt: true, recording: { select: { durationSeconds: true } } } }
   } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
-  if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  const readOnly = !canWorkOnConversation(req.user!, conversation);
+  if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  if (readOnly) conversation.customer.orders = conversation.customer.orders.filter((order) => order.conversationId === conversation!.id);
   const openedConversation = conversation;
   if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && openedConversation.assignedAgentId === req.user!.id && openedConversation.serviceTag && openedConversation.serviceTag !== "تواصل مباشر") {
     try {
@@ -488,15 +513,15 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
     const receivedAt = await lastInboundAt(conversation.id);
     if (receivedAt) conversation = { ...conversation, lastInboundAt: receivedAt };
   }
-  await prisma.conversation.update({ where: { id: conversation.id }, data: { unreadCount: 0 } });
+  if (!readOnly) await prisma.conversation.update({ where: { id: conversation.id }, data: { unreadCount: 0 } });
   await audit(req.user!.id, "CONVERSATION_OPENED", conversation.id);
   const hasMoreMessages = Boolean(messageLimit && conversation.messages.length > messageLimit);
   if (hasMoreMessages) conversation.messages.pop();
   conversation.messages.reverse();
   conversation.whisperNotes.reverse();
   conversation.internalNotes.reverse();
-  void markBaileysMessagesRead(conversation.messages.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
-  res.json(messageLimit ? { ...conversation, hasMoreMessages } : conversation);
+  if (!readOnly) void markBaileysMessagesRead(conversation.messages.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
+  res.json(messageLimit ? { ...conversation, hasMoreMessages, readOnly } : { ...conversation, readOnly });
 });
 
 app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -523,7 +548,7 @@ app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest
 app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
-  if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   const limit = pageLimit(req.query.limit);
   let before: { createdAt: Date; id: string } | null = null;
   if (req.query.before !== undefined) {
@@ -541,7 +566,7 @@ app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest
   });
   const hasMore = messages.length > limit;
   const page = messages.slice(0, limit).reverse();
-  void markBaileysMessagesRead(page.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
+  if (canWorkOnConversation(req.user!, conversation)) void markBaileysMessagesRead(page.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
   res.json({ messages: page, hasMore, nextBefore: hasMore && page.length ? page[0].id : null });
 });
 
@@ -894,7 +919,7 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
      if (parsed.data.mediaAssetId && !asset) return res.status(404).json({ error: "الملف المرفق غير موجود" });
      if (parsed.data.kind === MessageKind.STICKER && !asset) return res.status(400).json({ error: "ارفع ملصق WebP صالحًا أولًا" });
       if (asset && (parsed.data.kind === MessageKind.IMAGE && !asset.contentType.startsWith("image/") || parsed.data.kind === MessageKind.STICKER && asset.contentType !== "image/webp" || parsed.data.kind === MessageKind.AUDIO && !asset.contentType.startsWith("audio/") || parsed.data.kind === MessageKind.VIDEO && !asset.contentType.startsWith("video/") || parsed.data.kind === MessageKind.FILE && /^(?:image|audio|video)\//.test(asset.contentType))) return res.status(400).json({ error: "نوع الملف لا يطابق نوع الرسالة" });
-    const mediaUrl = asset ? publicMediaUrl(asset.id, conversation.channel === Channel.WHATSAPP ? 0 : undefined) : parsed.data.mediaUrl;
+    const mediaUrl = asset ? conversation.channel === Channel.WHATSAPP ? undefined : publicMediaUrl(asset.id) : parsed.data.mediaUrl;
     if (conversation.channel === Channel.WHATSAPP) {
       const message = await prisma.message.create({ data: {
         conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND,
@@ -1023,7 +1048,7 @@ app.post("/api/conversations/:id/messages/:messageId/forward", agentGuard, async
     }
     if (hasMedia && !sourceAsset) return res.status(409).json({ error: "تعذر العثور على ملف المرفق لتحويله" });
     if (source.kind === MessageKind.STICKER && sourceAsset?.contentType !== "image/webp") return res.status(409).json({ error: "الملصق غير محفوظ بصيغة WebP صالحة" });
-    const mediaUrl = sourceAsset ? publicMediaUrl(sourceAsset.id, target.channel === Channel.WHATSAPP ? 0 : undefined) : undefined;
+    const mediaUrl = sourceAsset ? target.channel === Channel.WHATSAPP ? undefined : publicMediaUrl(sourceAsset.id) : undefined;
     const forwardedMetadata = { ...(source.kind === MessageKind.POLL && pollOptions ? { pollOptions } : {}), forwardedFrom: { messageId: source.id, conversationId: source.conversationId } };
     const data = { conversationId: target.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND, kind: source.kind, text: source.kind === MessageKind.STICKER ? null : source.text, mediaUrl, mediaAssetId: sourceAsset?.id, latitude: source.latitude, longitude: source.longitude, metadata: forwardedMetadata as Prisma.InputJsonValue };
     if (target.channel === Channel.WHATSAPP) {
@@ -1069,7 +1094,7 @@ app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedReques
         const textMessage = await prisma.message.create({ data: { conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text, productId: product.id, deliveryStatus: "QUEUED" } });
         await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: textMessage.createdAt, status: ConversationStatus.OPEN } });
         const queuedText = await queueWhatsAppMessage(textMessage.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, text });
-        const imageUrl = product.imageAssetId ? publicMediaUrl(product.imageAssetId, 0) : product.imageUrl!;
+        const imageUrl = product.imageAssetId ? undefined : product.imageUrl!;
         const imageMessage = await prisma.message.create({ data: { conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.IMAGE, mediaUrl: imageUrl, mediaAssetId: product.imageAssetId, productId: product.id, deliveryStatus: "QUEUED" } });
          const queuedImage = await queueWhatsAppMessage(imageMessage.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, kind: MessageKind.IMAGE, mediaUrl: imageUrl, mediaAssetId: product.imageAssetId || undefined });
         const captionDelivery = queuedText?.deliveryStatus === "FAILED" ? "failed" : queuedText?.deliveryStatus === "SENT" ? "sent" : "queued";
@@ -1085,7 +1110,7 @@ app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedReques
       const textProviderId = kalemlyExternalMessageId(textResult);
       const textMessage = await prisma.message.create({ data: { conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND, kind: MessageKind.TEXT, text, productId: product.id, deliveryStatus: "SENT", externalId: textProviderId ? `${conversation.channel}:${textProviderId}` : undefined } });
       io.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: textMessage });
-      const imageUrl = product.imageAssetId ? publicMediaUrl(product.imageAssetId) : product.imageUrl!;
+       const imageUrl = product.imageAssetId ? publicMediaUrl(product.imageAssetId) : product.imageUrl!;
       let imageMessage: any;
       let imageError: string | undefined;
       try {
@@ -1109,7 +1134,7 @@ app.post("/api/conversations/:id/products", agentGuard, async (req: AuthedReques
 
 app.get("/api/products", agentGuard, async (_req: express.Request, res: express.Response) => {
   const products = await prisma.product.findMany({ where: { isAvailable: true }, orderBy: [{ category: "asc" }, { name: "asc" }] });
-  res.json(products.map((product) => product.imageAssetId ? { ...product, imageUrl: publicMediaUrl(product.imageAssetId, 0) } : product));
+   res.json(products.map((product) => product.imageAssetId ? { ...product, imageUrl: publicMediaUrl(product.imageAssetId, 90 * 24 * 60 * 60) } : product));
 });
 app.get("/api/branches", agentGuard, async (_req: express.Request, res: express.Response) => {
   await ensureBranches();
@@ -1117,7 +1142,7 @@ app.get("/api/branches", agentGuard, async (_req: express.Request, res: express.
 });
 app.get("/api/admin/products", permissionGuard("canManageCatalog"), async (_req: express.Request, res: express.Response) => {
   const products = await prisma.product.findMany({ orderBy: [{ category: "asc" }, { name: "asc" }] });
-  res.json(products.map((product) => product.imageAssetId ? { ...product, imageUrl: publicMediaUrl(product.imageAssetId, 0) } : product));
+   res.json(products.map((product) => product.imageAssetId ? { ...product, imageUrl: publicMediaUrl(product.imageAssetId, 90 * 24 * 60 * 60) } : product));
 });
 app.post("/api/admin/products", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ name: z.string().min(2).max(120), sku: z.preprocess((value) => typeof value === "string" && !value.trim() ? null : value, z.string().trim().max(80).nullable().optional()), category: z.nativeEnum(ProductCategory), price: z.number().nonnegative(), imageUrl: httpsUrl.nullable().optional(), imageAssetId: z.string().nullable().optional(), description: z.string().max(800).nullable().optional(), isAvailable: z.boolean().default(true) }).safeParse(req.body);
@@ -1125,7 +1150,7 @@ app.post("/api/admin/products", permissionGuard("canManageCatalog"), async (req:
   const asset = parsed.data.imageAssetId ? await prisma.mediaAsset.findFirst({ where: { id: parsed.data.imageAssetId, contentType: { startsWith: "image/" } }, select: { id: true } }) : null;
   if (parsed.data.imageAssetId && !asset) return res.status(400).json({ error: "صورة المنتج غير موجودة أو ليست صورة" });
   let product;
-  try { product = await prisma.product.create({ data: { ...parsed.data, imageUrl: asset ? publicMediaUrl(asset.id, 0) : parsed.data.imageUrl, imageAssetId: asset?.id, price: new Prisma.Decimal(parsed.data.price) } }); }
+   try { product = await prisma.product.create({ data: { ...parsed.data, imageUrl: asset ? publicMediaUrl(asset.id, 90 * 24 * 60 * 60) : parsed.data.imageUrl, imageAssetId: asset?.id, price: new Prisma.Decimal(parsed.data.price) } }); }
   catch (error) { if (isUniqueConstraintError(error)) return res.status(409).json({ error: "كود المنتج مستخدم بالفعل" }); throw error; }
   await audit(req.user!.id, "PRODUCT_CREATED", undefined, { productId: product.id });
   res.status(201).json(product);
@@ -1137,7 +1162,7 @@ app.patch("/api/admin/products/:id", permissionGuard("canManageCatalog"), async 
   const asset = imageAssetId ? await prisma.mediaAsset.findFirst({ where: { id: imageAssetId, contentType: { startsWith: "image/" } }, select: { id: true } }) : null;
   if (imageAssetId && !asset) return res.status(400).json({ error: "صورة المنتج غير موجودة أو ليست صورة" });
   const imageFields = imageAssetId !== undefined
-    ? { imageAssetId: asset?.id || null, ...(asset ? { imageUrl: publicMediaUrl(asset.id, 0) } : {}) }
+     ? { imageAssetId: asset?.id || null, ...(asset ? { imageUrl: publicMediaUrl(asset.id, 90 * 24 * 60 * 60) } : {}) }
     : fields.imageUrl !== undefined ? { imageAssetId: null } : {};
   let product;
   try { product = await prisma.product.update({ where: { id: req.params.id }, data: { ...fields, ...imageFields, ...(price === undefined ? {} : { price: new Prisma.Decimal(price) }) } }); }
@@ -1191,6 +1216,8 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
     if (!branch) return res.status(400).json({ error: "الفرع المحدد غير موجود أو متوقف" });
   }
   let updated = await prisma.conversation.update({ where: { id: conversation.id }, data: { assignedAgentId: parsed.data.agentId, branchId, routingDepartment: branchId ? Department.BRANCH : conversation.routingDepartment === Department.BRANCH ? null : conversation.routingDepartment, status: parsed.data.agentId ? ConversationStatus.OPEN : ConversationStatus.QUEUED, awaitingRouting: false } });
+  const historyAgentIds = [...new Set([conversation.assignedAgentId, parsed.data.agentId].filter((id): id is string => Boolean(id)))];
+  if (historyAgentIds.length) await prisma.conversationAssignment.createMany({ data: historyAgentIds.map((agentId) => ({ conversationId: conversation.id, agentId })), skipDuplicates: true });
   await audit(req.user!.id, "CONVERSATION_REASSIGNED", conversation.id, { from: conversation.assignedAgentId, to: parsed.data.agentId });
   if (conversation.assignedAgentId && conversation.assignedAgentId !== parsed.data.agentId) io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:unassigned", updated);
   if (!parsed.data.agentId) updated = await assignConversation(conversation.id, branchId ? Department.BRANCH : undefined);
@@ -1228,6 +1255,7 @@ app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest
   });
   if (!moved.count) return res.status(409).json({ error: "تغيّر إسناد المحادثة. حدّث الصفحة وحاول مجددًا" });
   const updated = await prisma.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: { customer: true, assignedAgent: { select: { id: true, name: true } } } });
+  await prisma.conversationAssignment.createMany({ data: [req.user!.id, colleague.id].map((agentId) => ({ conversationId: conversation.id, agentId })), skipDuplicates: true });
   await audit(req.user!.id, "CONVERSATION_HANDOFF", conversation.id, { from: req.user!.id, to: colleague.id });
   io.to(`agent:${req.user!.id}`).emit("conversation:unassigned", updated);
   io.to(`agent:${colleague.id}`).emit("conversation:assigned", updated);
@@ -1276,12 +1304,13 @@ app.patch("/api/conversations/:id/status", agentGuard, async (req: AuthedRequest
 app.get("/api/conversations/:id/messages/:messageId/media", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
   if (!message) return res.status(404).json({ error: "الملف غير موجود" });
-  if (!canReadConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية عرض هذا الملف" });
+  if (!await canReadConversationOrHistory(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية عرض هذا الملف" });
   try {
     if (message.mediaAssetId) {
       const asset = await prisma.mediaAsset.findUnique({ where: { id: message.mediaAssetId }, select: { data: true, contentType: true, fileName: true, size: true } });
       if (!asset) return res.status(404).json({ error: "الملف غير موجود" });
-      return res.set({ "Content-Type": asset.contentType, "Content-Length": String(asset.size), "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" }).send(Buffer.from(asset.data));
+      const disposition = message.kind === MessageKind.FILE ? "attachment" : "inline";
+      return res.set({ "Content-Type": asset.contentType, "Content-Length": String(asset.size), "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" }).send(Buffer.from(asset.data));
     }
     const media = await fetchInboundMedia(message.conversation.channel, (message.metadata || {}) as unknown as Record<string, unknown>, message.mediaUrl || undefined);
     res.setHeader("Content-Type", media.contentType); res.setHeader("Cache-Control", "private, max-age=300"); res.setHeader("X-Content-Type-Options", "nosniff"); res.send(media.body);

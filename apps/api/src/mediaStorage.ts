@@ -32,10 +32,13 @@ export function detectImageContentType(bytes: Buffer) {
 }
 
 function signatureFor(assetId: string, expires: number) {
-  return createHmac("sha256", config.mediaSigningSecret).update(`${assetId}:${expires || "permanent"}`).digest("hex");
+  return createHmac("sha256", config.mediaSigningSecret).update(`${assetId}:${expires}`).digest("hex");
 }
 
 export function publicMediaUrl(assetId: string, lifetimeSeconds = 24 * 60 * 60) {
+  if (!Number.isSafeInteger(lifetimeSeconds) || lifetimeSeconds < 1 || lifetimeSeconds > 90 * 24 * 60 * 60) {
+    throw new Error("Signed media links must expire within 90 days");
+  }
   const baseUrl = config.apiPublicUrl || (process.env.NODE_ENV === "production" ? "" : `http://localhost:${config.port}`);
   if (!baseUrl) throw new Error("API_PUBLIC_URL must be set to send uploaded media");
   const parsedBase = new URL(baseUrl);
@@ -43,7 +46,7 @@ export function publicMediaUrl(assetId: string, lifetimeSeconds = 24 * 60 * 60) 
   if (parsedBase.protocol !== "https:" && !localHttpAllowed || parsedBase.pathname !== "/" || parsedBase.search || parsedBase.hash || parsedBase.username || parsedBase.password) {
     throw new Error("API_PUBLIC_URL must be an HTTPS API origin");
   }
-  const expires = lifetimeSeconds === 0 ? 0 : Math.floor(Date.now() / 1000) + lifetimeSeconds;
+  const expires = Math.floor(Date.now() / 1000) + lifetimeSeconds;
   const token = signatureFor(assetId, expires);
   return `${parsedBase.origin}/public-media/${encodeURIComponent(assetId)}?expires=${expires}&signature=${token}`;
 }
@@ -52,7 +55,7 @@ export function verifyPublicMediaUrl(assetId: string, expiresValue: unknown, sup
   if (typeof expiresValue !== "string" || typeof supplied !== "string" || !/^\d+$/.test(expiresValue)) return false;
   const expires = Number(expiresValue);
   const now = Math.floor(Date.now() / 1000);
-  if (expires !== 0 && (expires < now || expires > now + 366 * 24 * 60 * 60)) return false;
+  if (expires <= now || expires > now + 90 * 24 * 60 * 60 + 5) return false;
   const expected = Buffer.from(signatureFor(assetId, expires));
   const actual = Buffer.from(supplied);
   return expected.length === actual.length && timingSafeEqual(expected, actual);

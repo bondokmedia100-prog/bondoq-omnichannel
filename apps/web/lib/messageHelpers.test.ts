@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeMessages, messageNotificationPreview } from "./messageHelpers";
+import { hasMessageTextLinks, mergeMessages, messageNotificationPreview, splitMessageTextLinks } from "./messageHelpers";
 
 test("merges duplicate real-time messages and retains chronological order", () => {
   const result = mergeMessages([
@@ -20,4 +20,16 @@ test("uses message content or a useful media label for notifications", () => {
   assert.equal(messageNotificationPreview({ kind: "IMAGE" }), "صورة جديدة");
   assert.equal(messageNotificationPreview({ kind: "STICKER" }), "ملصق جديد");
   assert.equal(messageNotificationPreview(), "رسالة جديدة");
+});
+
+test("linkifies only safe web URLs and leaves trailing punctuation as text", () => {
+  const parts = splitMessageTextLinks("شوف https://example.com/path. وبعدها www.example.org!");
+  assert.deepEqual(parts, [
+    { text: "شوف " },
+    { text: "https://example.com/path", href: "https://example.com/path" },
+    { text: ". وبعدها " },
+    { text: "www.example.org", href: "https://www.example.org/" },
+    { text: "!" }
+  ]);
+  assert.equal(hasMessageTextLinks("javascript:alert(1)"), false);
 });
