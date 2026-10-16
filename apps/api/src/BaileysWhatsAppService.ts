@@ -39,6 +39,13 @@ let callReplyText = defaultCallReply;
 const pendingCalls = new Map<string, { callId: string; callerJid: string; phoneNumber: string; conversationId?: string; assignedAgentId?: string; customerName: string; isVideo: boolean; receivedAt: string }>();
 const profilePictureCache = new Map<string, { url: string | undefined; expiresAt: number }>();
 const profilePictureRequests = new Map<string, Promise<string | undefined>>();
+const groupSubjectCache = new Map<string, { subject: string; expiresAt: number }>();
+
+export type BaileysWhatsAppGroup = {
+  id: string;
+  subject: string;
+  participants: Array<{ id: string; phone: string | null; admin: string | null }>;
+};
 
 let state: WhatsAppConnectionState = {
   mode: "BAILEYS", status: "DISCONNECTED", qrDataUrl: "", phoneNumber: "", accountName: "", lastError: ""
@@ -147,6 +154,48 @@ export async function saveWhatsAppCallReply(text: string) {
 }
 
 export function getBaileysWhatsAppState() { return { ...state }; }
+
+function connectedBaileysSocket() {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("إدارة جروبات WhatsApp متاحة فقط عند اتصال Baileys");
+  return socket;
+}
+
+function groupInfo(metadata: any): BaileysWhatsAppGroup {
+  return {
+    id: String(metadata.id || ""),
+    subject: String(metadata.subject || "مجموعة WhatsApp"),
+    participants: (Array.isArray(metadata.participants) ? metadata.participants : []).flatMap((participant: any) => {
+      const id = String(participant.id || participant.phoneNumber || "");
+      const phone = String(participant.phoneNumber || (id.endsWith("@s.whatsapp.net") ? id : "")) || null;
+      return id ? [{ id, phone, admin: participant.admin === "superadmin" || participant.admin === "admin" ? participant.admin : null }] : [];
+    })
+  };
+}
+
+export async function listBaileysWhatsAppGroups() {
+  const currentSocket = connectedBaileysSocket();
+  const groups = await currentSocket.groupFetchAllParticipating();
+  return Object.values(groups).map(groupInfo).filter((group) => group.id.endsWith("@g.us"));
+}
+
+export async function getBaileysWhatsAppGroup(groupId: string) {
+  const currentSocket = connectedBaileysSocket();
+  if (!groupId.endsWith("@g.us")) throw new Error("معرّف مجموعة WhatsApp غير صالح");
+  return groupInfo(await currentSocket.groupMetadata(groupId));
+}
+
+export async function createBaileysWhatsAppGroup(subject: string, participants: string[]) {
+  const currentSocket = connectedBaileysSocket();
+  const result = await currentSocket.groupCreate(subject, participants.map(normalizeJid));
+  return groupInfo(result);
+}
+
+export async function updateBaileysWhatsAppGroupParticipants(groupId: string, participants: string[], action: "add" | "remove" | "promote" | "demote") {
+  const currentSocket = connectedBaileysSocket();
+  if (!groupId.endsWith("@g.us")) throw new Error("معرّف مجموعة WhatsApp غير صالح");
+  await currentSocket.groupParticipantsUpdate(groupId, participants.map(normalizeJid), action);
+  return getBaileysWhatsAppGroup(groupId);
+}
 
 export async function setWhatsAppMode(mode: WhatsAppMode) {
   state = { ...state, mode };
@@ -308,12 +357,25 @@ async function handleIncomingMessage(message: any) {
   if (!message?.message || message.key?.fromMe) return;
   const content = unwrapMessage(message);
   const remoteJid = String(message.key?.remoteJid || "");
-  if (!remoteJid || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) return;
-  const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
-  const phoneNumber = phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
-  const externalCustomerId = phoneNumber || remoteJid;
+  if (!remoteJid || remoteJid === "status@broadcast") return;
+  const isGroup = remoteJid.endsWith("@g.us");
   const currentSocket = socket;
-  const profilePictureUrl = currentSocket && state.status === "CONNECTED"
+  let groupSubject = "مجموعة WhatsApp";
+  if (isGroup && currentSocket && state.status === "CONNECTED") {
+    const cached = groupSubjectCache.get(remoteJid);
+    if (cached && cached.expiresAt > Date.now()) groupSubject = cached.subject;
+    else {
+      try {
+        groupSubject = String((await currentSocket.groupMetadata(remoteJid)).subject || groupSubject);
+        groupSubjectCache.set(remoteJid, { subject: groupSubject, expiresAt: Date.now() + 5 * 60_000 });
+      } catch {}
+    }
+  }
+  const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
+  const participantJid = String(message.key?.participant || message.key?.participantAlt || "");
+  const phoneNumber = isGroup ? "" : phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
+  const externalCustomerId = isGroup ? remoteJid : phoneNumber || remoteJid;
+  const profilePictureUrl = !isGroup && currentSocket && state.status === "CONNECTED"
     ? await customerProfilePicture(currentSocket, remoteJid, phoneNumber)
     : undefined;
   const audio = content.audioMessage;
@@ -345,7 +407,7 @@ async function handleIncomingMessage(message: any) {
     externalConversationId: remoteJid,
     externalCustomerId,
     ...(phoneNumber ? { customerPhone: phoneNumber } : {}),
-    customerName: message.pushName || undefined,
+    customerName: isGroup ? groupSubject : message.pushName || undefined,
     profilePictureUrl,
     text: String(text || ""),
     kind,
@@ -356,6 +418,13 @@ async function handleIncomingMessage(message: any) {
     metadata: {
       provider: "baileys",
       remoteJid,
+      ...(isGroup ? {
+        isWhatsAppGroup: true,
+        groupSubject,
+        groupParticipantJid: participantJid,
+        groupParticipantPhone: phoneFromJid(String(message.key?.participantAlt || participantJid)) || undefined,
+        groupParticipantName: String(message.pushName || "") || undefined
+      } : {}),
       voiceNote: Boolean(audio?.ptt),
       mediaMimeType: mediaContentType,
       pollOptions: Array.isArray(poll?.options) ? poll.options.map((option: any) => String(option.optionName || option.name || "")).filter(Boolean) : undefined,

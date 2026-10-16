@@ -77,10 +77,15 @@ export function canReadTeamConversations(user: SessionUser, conversation?: { bra
     && (!conversation || conversation.branchId === user.branchId);
 }
 
-export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+export function isWhatsAppGroupConversation(conversation: { externalConversationId?: string | null }) {
+  return Boolean(conversation.externalConversationId?.endsWith("@g.us"));
+}
+
+export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; externalConversationId?: string | null }) {
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
+  if ((user.role === Role.AGENT || user.role === Role.BRANCH_USER) && isWhatsAppGroupConversation(conversation)) return true;
   return conversation.assignedAgentId === user.id;
 }
 

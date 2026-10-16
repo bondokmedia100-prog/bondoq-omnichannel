@@ -50,6 +50,15 @@ test("team conversation browsing is enabled for frontline staff only", () => {
   assert.equal(canReadTeamConversations(user({ role: Role.ADMIN })), false);
 });
 
+test("frontline staff can work shared WhatsApp groups inside their branch scope", () => {
+  const group = { externalConversationId: "120363000000000000@g.us", assignedAgentId: null, branchId: null };
+  assert.equal(canWorkOnConversation(user(), group), true);
+  const branchUser = user({ role: Role.BRANCH_USER, branchId: "branch-a" });
+  assert.equal(canWorkOnConversation(branchUser, { ...group, branchId: "branch-a" }), true);
+  assert.equal(canWorkOnConversation(branchUser, { ...group, branchId: "branch-b" }), false);
+  assert.equal(canWorkOnConversation(user({ role: Role.SUPERVISOR, canViewAllConversations: false }), group), false);
+});
+
 test("login tokens do not expire automatically", () => {
   const { id, role, name, authVersion } = user();
   const payload = jwt.decode(signToken({ id, role, name, authVersion })) as jwt.JwtPayload;

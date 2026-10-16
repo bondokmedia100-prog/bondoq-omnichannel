@@ -18,24 +18,33 @@ export async function ingestMessage(inbound: NormalizedInbound) {
 }
 
 async function ingestMessageLocked(inbound: NormalizedInbound) {
+  const metadata = (inbound.metadata || {}) as Record<string, unknown>;
+  const isWhatsAppGroup = metadata.isWhatsAppGroup === true && inbound.channel === "WHATSAPP";
+  const groupSubject = isWhatsAppGroup ? String(metadata.groupSubject || inbound.customerName || "مجموعة WhatsApp") : undefined;
   const customer = await prisma.customer.upsert({
     where: { id: `external_${inbound.channel.toLowerCase()}_${inbound.externalCustomerId}` },
     update: {
       ...(inbound.customerName ? { name: inbound.customerName } : {}),
+      ...(isWhatsAppGroup ? { displayName: groupSubject } : {}),
       ...(inbound.profilePictureUrl ? { avatarUrl: inbound.profilePictureUrl } : {}),
-      ...(inbound.customerPhone ? { phone: inbound.customerPhone } : {}),
+      ...(isWhatsAppGroup ? { phone: null } : inbound.customerPhone ? { phone: inbound.customerPhone } : {}),
       ...(inbound.latitude === undefined ? {} : { lastLatitude: inbound.latitude }),
       ...(inbound.longitude === undefined ? {} : { lastLongitude: inbound.longitude }),
-      channelIdentifiers: { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
+      channelIdentifiers: isWhatsAppGroup
+        ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
+        : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
     },
     create: {
       id: `external_${inbound.channel.toLowerCase()}_${inbound.externalCustomerId}`,
-      name: inbound.customerName,
-      phone: inbound.customerPhone || (inbound.channel === "WHATSAPP" ? inbound.externalCustomerId : null),
+      name: groupSubject || inbound.customerName,
+      ...(isWhatsAppGroup ? { displayName: groupSubject } : {}),
+      phone: inbound.customerPhone || (inbound.channel === "WHATSAPP" && !isWhatsAppGroup ? inbound.externalCustomerId : null),
       avatarUrl: inbound.profilePictureUrl,
       lastLatitude: inbound.latitude,
       lastLongitude: inbound.longitude,
-      channelIdentifiers: { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
+      channelIdentifiers: isWhatsAppGroup
+        ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
+        : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
     }
   });
   let conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: inbound.channel, externalConversationId: inbound.externalConversationId } } });
@@ -43,7 +52,8 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     try {
       conversation = await prisma.conversation.create({ data: {
         customerId: customer.id, channel: inbound.channel, externalConversationId: inbound.externalConversationId,
-        externalCustomerId: inbound.externalCustomerId, status: ConversationStatus.QUEUED, awaitingRouting: true
+        externalCustomerId: inbound.externalCustomerId, ...(groupSubject ? { subject: groupSubject } : {}),
+        status: ConversationStatus.QUEUED, awaitingRouting: !isWhatsAppGroup
       } });
     } catch (error) {
       if ((error as { code?: string }).code !== "P2002") throw error;
@@ -58,7 +68,6 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const previousInboundAt = conversation.lastInboundAt || (await prisma.message.findFirst({
     where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true }
   }))?.createdAt || null;
-  const metadata = (inbound.metadata || {}) as Record<string, unknown>;
   let cachedMedia: { body: Buffer; contentType: string } | undefined = inbound.mediaBuffer
     ? { body: inbound.mediaBuffer, contentType: inbound.mediaContentType || String(metadata.mediaMimeType || "application/octet-stream") }
     : undefined;
@@ -109,7 +118,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     io?.to("admins").emit("message:new", { conversation, message, customer });
     return { conversationId: conversation.id, messageId: message.id, blocked: true };
   }
-  const pendingSurvey = await prisma.csatSurvey.findUnique({ where: { conversationId: conversation.id } });
+  const pendingSurvey = isWhatsAppGroup ? null : await prisma.csatSurvey.findUnique({ where: { conversationId: conversation.id } });
   const ratingText = (inbound.text || "").trim()
     .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
     .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)));
@@ -118,17 +127,19 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const isRatingReply = Boolean(pendingSurvey && pendingSurvey.rating === null && customerRating);
   const isTerminal = conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED;
   const chatbotSettings = await getChatbotSettings();
-  const outsideBusinessHours = chatbotSettings.businessHoursEnabled && !isWithinBusinessHours(chatbotSettings, message.createdAt);
+  const outsideBusinessHours = !isWhatsAppGroup && chatbotSettings.businessHoursEnabled && !isWithinBusinessHours(chatbotSettings, message.createdAt);
   const priorOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled ? await prisma.message.findFirst({ where: {
     conversationId: conversation.id, direction: MessageDirection.OUTBOUND, createdAt: { gte: startOfCairoDay(message.createdAt) },
     metadata: { path: ["automation"], equals: "off-hours-reply" }
   }, select: { id: true } }) : null;
   const shouldSendOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled && !priorOffHoursReply;
   const currentBotState: BotState = conversation.awaitingRouting ? "BOT_MENU" : conversation.botState;
-  const starting = !isRatingReply && shouldStartBotFlow(previousInboundAt, isTerminal, message.createdAt);
-  const decision = decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
+  const starting = !isWhatsAppGroup && !isRatingReply && shouldStartBotFlow(previousInboundAt, isTerminal, message.createdAt);
+  const decision = isWhatsAppGroup
+    ? { action: "NONE" as const, nextState: "ASSIGNED_TO_AGENT" as const }
+    : decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
   const serviceChoice = decision.action === "HANDOFF" ? decision.choice : undefined;
-  const autoRules = decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
+  const autoRules = !isWhatsAppGroup && decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
     ? await prisma.autoReplyRule.findMany({ where: { isActive: true, isWelcome: false }, orderBy: [{ priority: "desc" }, { createdAt: "asc" }] })
     : [];
   const autoReply = findMatchingAutoReply(autoRules, inbound.text);
@@ -148,6 +159,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       assignedAgentId: awaitingMenu || needsAssignment ? null : undefined,
       awaitingRouting: awaitingMenu,
       botState: decision.nextState === "BOT_MENU" ? ConversationBotState.BOT_MENU : ConversationBotState.ASSIGNED_TO_AGENT,
+      ...(groupSubject ? { subject: groupSubject } : {}),
       routingDepartment: awaitingMenu || decision.action === "BYPASS" ? null : routeDepartment || conversation.routingDepartment,
       serviceTag: decision.action === "HANDOFF" ? serviceChoice?.label : decision.action === "BYPASS" ? "تواصل مباشر" : awaitingMenu ? null : conversation.serviceTag,
       isComplaint: decision.action === "HANDOFF" ? Boolean(serviceChoice?.isComplaint) : awaitingMenu || decision.action === "BYPASS" ? false : inbound.isComplaint ?? conversation.isComplaint,
