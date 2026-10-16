@@ -27,3 +27,14 @@ test("distinguishes morning hours from a shift that runs past midnight", () => {
   assert.equal(isWithinBusinessHours(overnight, new Date("2026-10-12T22:00:00.000Z")), true);
   assert.equal(isWithinBusinessHours(overnight, new Date("2026-10-12T22:30:00.000Z")), false);
 });
+
+test("treats 2:37 PM in Cairo as open for a 9 AM to 1 AM daily schedule", () => {
+  const daily = {
+    ...settings,
+    businessDays: ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"],
+    businessStart: "09:00",
+    businessEnd: "01:00"
+  };
+
+  assert.equal(isWithinBusinessHours(daily, new Date("2026-10-16T11:37:00.000Z")), true);
+});

@@ -28,3 +28,25 @@ test("migrates old chatbot defaults but keeps customized copy", () => {
     option5ReplyText: DEFAULT_CHATBOT_SETTINGS.option5ReplyText
   });
 });
+
+test("corrects the saved business-hours range shown in the settings screenshot", () => {
+  const existing = {
+    ...DEFAULT_CHATBOT_SETTINGS,
+    businessHoursEnabled: true,
+    businessStart: "01:15",
+    businessEnd: "09:00"
+  };
+
+  assert.deepEqual(migrateLegacyChatbotSettings(existing), {
+    businessStart: "09:00",
+    businessEnd: "01:00"
+  });
+});
+
+test("leaves disabled or otherwise customized business-hours ranges unchanged", () => {
+  const disabled = { ...DEFAULT_CHATBOT_SETTINGS, businessHoursEnabled: false, businessStart: "01:15", businessEnd: "09:00" };
+  const customized = { ...DEFAULT_CHATBOT_SETTINGS, businessHoursEnabled: true, businessStart: "10:00", businessEnd: "18:00" };
+
+  assert.deepEqual(migrateLegacyChatbotSettings(disabled), {});
+  assert.deepEqual(migrateLegacyChatbotSettings(customized), {});
+});

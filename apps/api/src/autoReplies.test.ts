@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AUTO_REPLY_MENU_TEXT, BOT_MENU_IDLE_TIMEOUT_MS, DEFAULT_CHATBOT_SETTINGS, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, getServiceChoice, isBotMenuIdleExpired } from "./autoReplies";
+import { AUTO_REPLY_MENU_TEXT, BOT_MENU_IDLE_TIMEOUT_MS, DEFAULT_CHATBOT_SETTINGS, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, getServiceChoice, shouldStartBotFlow } from "./autoReplies";
 
 test("matches Arabic keywords without diacritics", () => {
   const rules = [{ keywords: ["توصيل"], responseText: "سنساعدك", routingDepartment: "DELIVERY" }];
@@ -74,9 +74,19 @@ test("invalid menu choice uses the requested correction message", () => {
   assert.equal(DEFAULT_CHATBOT_SETTINGS.invalidChoiceText, "عذرًا، يرجى إرسال رقم الاختيار المطلوب فقط (من 1 إلى 5) لنتمكن من توجيهك للقسم الصحيح.");
 });
 
-test("bot menu expires after one hour of inactivity", () => {
+test("starts the bot on the first inbound even if the conversation was created by an outbound message", () => {
+  assert.equal(shouldStartBotFlow(null, false, new Date("2026-10-16T00:00:00.000Z")), true);
+});
+
+test("restarts the bot after an hour since the last customer message, including after handoff", () => {
   const lastInboundAt = new Date("2026-10-16T00:00:00.000Z");
-  assert.equal(isBotMenuIdleExpired("BOT_MENU", lastInboundAt, new Date(lastInboundAt.getTime() + BOT_MENU_IDLE_TIMEOUT_MS - 1)), false);
-  assert.equal(isBotMenuIdleExpired("BOT_MENU", lastInboundAt, new Date(lastInboundAt.getTime() + BOT_MENU_IDLE_TIMEOUT_MS)), true);
-  assert.equal(isBotMenuIdleExpired("ASSIGNED_TO_AGENT", lastInboundAt, new Date(lastInboundAt.getTime() + BOT_MENU_IDLE_TIMEOUT_MS)), false);
+  const beforeTimeout = new Date(lastInboundAt.getTime() + BOT_MENU_IDLE_TIMEOUT_MS - 1);
+  const afterTimeout = new Date(lastInboundAt.getTime() + BOT_MENU_IDLE_TIMEOUT_MS);
+  assert.equal(shouldStartBotFlow(lastInboundAt, false, beforeTimeout), false);
+  assert.equal(shouldStartBotFlow(lastInboundAt, false, afterTimeout), true);
+  assert.deepEqual(decideBotAction({ enabled: true, state: "ASSIGNED_TO_AGENT", starting: shouldStartBotFlow(lastInboundAt, false, afterTimeout), text: "هلا", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "MENU", nextState: "BOT_MENU" });
+});
+
+test("closed conversations start a new bot flow immediately", () => {
+  assert.equal(shouldStartBotFlow(new Date("2026-10-16T00:00:00.000Z"), true, new Date("2026-10-16T00:01:00.000Z")), true);
 });

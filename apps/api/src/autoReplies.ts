@@ -122,8 +122,8 @@ export function decideBotAction(input: { enabled: boolean; state: BotState; star
   return { action: "HANDOFF", nextState: "ASSIGNED_TO_AGENT", choice };
 }
 
-export function isBotMenuIdleExpired(state: BotState, lastInboundAt: Date | null | undefined, currentAt: Date) {
-  if (state !== "BOT_MENU" || !lastInboundAt) return false;
+export function shouldStartBotFlow(lastInboundAt: Date | null | undefined, isTerminal: boolean, currentAt: Date) {
+  if (isTerminal || !lastInboundAt) return true;
   return currentAt.getTime() - lastInboundAt.getTime() >= BOT_MENU_IDLE_TIMEOUT_MS;
 }
 

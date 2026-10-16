@@ -4,7 +4,8 @@ import { DEFAULT_CHATBOT_SETTINGS, type ChatbotSettings } from "./autoReplies";
 const settingsId = "default";
 
 type MigratedSetting = "welcomeText" | "option1Label" | "option3Label" | "option4Label"
-  | "option1ReplyText" | "option2ReplyText" | "option3ReplyText" | "option4ReplyText" | "option5ReplyText";
+  | "option1ReplyText" | "option2ReplyText" | "option3ReplyText" | "option4ReplyText" | "option5ReplyText"
+  | "businessStart" | "businessEnd";
 
 export function migrateLegacyChatbotSettings(existing: ChatbotSettings): Partial<Pick<ChatbotSettings, MigratedSetting>> {
   const migrated: Partial<Pick<ChatbotSettings, MigratedSetting>> = {};
@@ -18,6 +19,10 @@ export function migrateLegacyChatbotSettings(existing: ChatbotSettings): Partial
   if (existing.option3ReplyText === oldGenericReply || existing.option3ReplyText === "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل طلبات الجملة المختص.") migrated.option3ReplyText = DEFAULT_CHATBOT_SETTINGS.option3ReplyText;
   if (existing.option4ReplyText === oldGenericReply || existing.option4ReplyText === "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل الشكاوى والاقتراحات المختص.") migrated.option4ReplyText = DEFAULT_CHATBOT_SETTINGS.option4ReplyText;
   if (existing.option5ReplyText === oldGenericReply) migrated.option5ReplyText = DEFAULT_CHATBOT_SETTINGS.option5ReplyText;
+  if (existing.businessHoursEnabled && existing.businessStart === "01:15" && existing.businessEnd === "09:00") {
+    migrated.businessStart = "09:00";
+    migrated.businessEnd = "01:00";
+  }
   return migrated;
 }
 

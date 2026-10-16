@@ -6,7 +6,7 @@ import { io } from "./realtime";
 import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
-import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, isBotMenuIdleExpired, type BotState } from "./autoReplies";
+import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, shouldStartBotFlow, type BotState } from "./autoReplies";
 import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
 import { detectImageContentType, publicMediaUrl, safeFileName } from "./mediaStorage";
@@ -39,7 +39,6 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     }
   });
   let conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: inbound.channel, externalConversationId: inbound.externalConversationId } } });
-  let isNewConversation = !conversation;
   if (!conversation) {
     try {
       conversation = await prisma.conversation.create({ data: {
@@ -49,7 +48,6 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     } catch (error) {
       if ((error as { code?: string }).code !== "P2002") throw error;
       conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: inbound.channel, externalConversationId: inbound.externalConversationId } } });
-      isNewConversation = false;
     }
   }
   if (!conversation) throw new Error("Conversation could not be created");
@@ -57,6 +55,9 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const storedExternalId = `${inbound.channel}:${inbound.externalId}`;
   const existingMessage = await prisma.message.findUnique({ where: { externalId: storedExternalId }, select: { id: true, conversationId: true } });
   if (existingMessage) return { duplicate: true, conversationId: existingMessage.conversationId };
+  const previousInboundAt = conversation.lastInboundAt || (await prisma.message.findFirst({
+    where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true }
+  }))?.createdAt || null;
   const metadata = (inbound.metadata || {}) as Record<string, unknown>;
   let cachedMedia: { body: Buffer; contentType: string } | undefined = inbound.mediaBuffer
     ? { body: inbound.mediaBuffer, contentType: inbound.mediaContentType || String(metadata.mediaMimeType || "application/octet-stream") }
@@ -126,7 +127,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   }, select: { id: true } }) : null;
   const shouldSendOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled && !priorOffHoursReply;
   const currentBotState: BotState = conversation.awaitingRouting ? "BOT_MENU" : conversation.botState;
-  const starting = !isRatingReply && (isNewConversation || isTerminal || isBotMenuIdleExpired(currentBotState, conversation.lastInboundAt, message.createdAt));
+  const starting = !isRatingReply && shouldStartBotFlow(previousInboundAt, isTerminal, message.createdAt);
   const decision = decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
   const serviceChoice = decision.action === "HANDOFF" ? decision.choice : undefined;
   const autoRules = decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
