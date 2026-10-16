@@ -438,7 +438,7 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
     queryFilters.push({ OR: [
       { customer: { is: { OR: customerSearch } } },
       ...(phoneTerms.length ? phoneTerms.flatMap((term) => [{ externalCustomerId: { contains: term } }, { externalConversationId: { contains: term } }]) : [
-        { externalCustomerId: { contains: q, mode: "insensitive" } }, { externalConversationId: { contains: q, mode: "insensitive" } }
+        { externalCustomerId: { contains: q, mode: "insensitive" as const } }, { externalConversationId: { contains: q, mode: "insensitive" as const } }
       ])
     ] });
   }
