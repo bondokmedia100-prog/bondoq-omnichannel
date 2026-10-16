@@ -2,7 +2,7 @@ import type { Server as HttpServer } from "node:http";
 import jwt from "jsonwebtoken";
 import { Server } from "socket.io";
 import { Department, Presence, Role } from "@prisma/client";
-import { canReadConversation, hasPermission, type SessionUser } from "./auth";
+import { canReadConversation, canReadTeamConversations, hasPermission, type SessionUser } from "./auth";
 import { config } from "./config";
 import { prisma } from "./prisma";
 
@@ -36,8 +36,8 @@ export function initRealtime(server: HttpServer) {
     if (canObserveAllConversations) socket.join("admins");
     if (user.department) socket.join(`department:${user.department}`);
     socket.on("conversation:join", async (conversationId: string) => {
-      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true } });
-      if (!conversation || !canReadConversation(user, conversation)) return;
+      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, status: true } });
+      if (!conversation || !canReadConversation(user, conversation) && !canReadTeamConversations(user, conversation)) return;
       socket.join(`conversation:${conversationId}`);
       if (canObserveAllConversations) {
         io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: true, userId: user.id });
