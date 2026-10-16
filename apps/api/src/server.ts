@@ -28,6 +28,7 @@ import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermis
 import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
 import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
 import { channelEligibilityWhere } from "./routingSelection";
+import { formatAgentHandoffGreeting } from "./autoReplies";
 
 const app = express();
 const server = http.createServer(app);
@@ -469,7 +470,8 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
     try {
       await withInboundConversationLock(openedConversation.channel, openedConversation.externalConversationId, async () => {
         const customerName = openedConversation.customer.displayName || openedConversation.customer.name;
-        const text = `أهلاً${customerName ? ` ${customerName}` : ""}، معاك ${req.user!.name} من خدمة العملاء في حلواني بندق. كيف أستطيع مساعدتك؟`;
+        const chatbotSettings = await getChatbotSettings();
+        const text = formatAgentHandoffGreeting(chatbotSettings.agentHandoffGreeting, customerName, req.user!.name);
         let greeting = await prisma.message.findFirst({
           where: { conversationId: openedConversation.id, direction: MessageDirection.OUTBOUND, metadata: { path: ["automation"], equals: "agent-handoff-greeting" } },
           include: { author: { select: { id: true, name: true } } }
@@ -1622,7 +1624,7 @@ app.delete("/api/admin/auto-replies/:id", permissionGuard("canManageCatalog"), a
 });
 
 const chatbotSettingsSchema = z.object({
-  enabled: z.boolean(), welcomeText: z.string().trim().min(1).max(1000), invalidChoiceText: z.string().trim().min(1).max(1000),
+  enabled: z.boolean(), welcomeText: z.string().trim().min(1).max(1000), agentHandoffGreeting: z.string().trim().min(1).max(1000), invalidChoiceText: z.string().trim().min(1).max(1000),
   option1Label: z.string().trim().min(1).max(100), option2Label: z.string().trim().min(1).max(100), option3Label: z.string().trim().min(1).max(100), option4Label: z.string().trim().min(1).max(100), option5Label: z.string().trim().min(1).max(100),
   option1ReplyText: z.string().trim().min(1).max(3000), option2ReplyText: z.string().trim().min(1).max(1000), option3ReplyText: z.string().trim().min(1).max(1000), option4ReplyText: z.string().trim().min(1).max(1000), option5ReplyText: z.string().trim().min(1).max(1000),
   businessHoursEnabled: z.boolean(), businessDays: z.array(z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"])).min(1).max(7),
@@ -1635,7 +1637,7 @@ app.get("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), asyn
 });
 app.put("/api/admin/chatbot-settings", permissionGuard("canManageCatalog"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = chatbotSettingsSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "تحقق من رسالة الترحيب وخيارات البوت وردوده" });
+  if (!parsed.success) return res.status(400).json({ error: "تحقق من إعدادات البوت ورسالة استلام الموظف" });
   const settings = await saveChatbotSettings(parsed.data);
   await audit(req.user!.id, "CHATBOT_SETTINGS_UPDATED", undefined, { enabled: settings.enabled });
   io.to("admins").emit("chatbot:settings-updated");

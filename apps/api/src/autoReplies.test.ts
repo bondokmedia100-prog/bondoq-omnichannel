@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AUTO_REPLY_MENU_TEXT, BOT_MENU_IDLE_TIMEOUT_MS, DEFAULT_CHATBOT_SETTINGS, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, getServiceChoice, shouldStartBotFlow } from "./autoReplies";
+import { AUTO_REPLY_MENU_TEXT, BOT_MENU_IDLE_TIMEOUT_MS, DEFAULT_CHATBOT_SETTINGS, buildRoutingMenuText, decideBotAction, findMatchingAutoReply, formatAgentHandoffGreeting, getServiceChoice, shouldStartBotFlow } from "./autoReplies";
 
 test("matches Arabic keywords without diacritics", () => {
   const rules = [{ keywords: ["توصيل"], responseText: "سنساعدك", routingDepartment: "DELIVERY" }];
@@ -63,6 +63,17 @@ test("builds the configured menu", () => {
   assert.equal(AUTO_REPLY_MENU_TEXT, "برجاء اختيار الاختيار المناسب لحضرتك\n1 الفروع\n2 خدمة العملاء\n3 طلبات الجمله\n4 الشكاوي والاقتراحات\n5 غير ذلك");
   const settings = { ...DEFAULT_CHATBOT_SETTINGS, welcomeText: "مرحبًا", option1ReplyText: "وسط البلد: 10 ص إلى 10 م" };
   assert.equal(buildRoutingMenuText(settings).split("\n")[0], "مرحبًا");
+});
+
+test("formats the configurable agent handoff greeting", () => {
+  assert.equal(
+    formatAgentHandoffGreeting(DEFAULT_CHATBOT_SETTINGS.agentHandoffGreeting, "هلب سنتر", "محمد الجمال"),
+    "أهلاً هلب سنتر، معاك محمد الجمال من خدمة العملاء في حلواني بندق. كيف أستطيع مساعدتك؟"
+  );
+  assert.equal(
+    formatAgentHandoffGreeting(DEFAULT_CHATBOT_SETTINGS.agentHandoffGreeting, null, "محمد الجمال"),
+    "أهلاً، معاك محمد الجمال من خدمة العملاء في حلواني بندق. كيف أستطيع مساعدتك؟"
+  );
 });
 
 test("uses a different waiting message for each menu option", () => {

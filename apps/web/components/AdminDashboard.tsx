@@ -677,7 +677,7 @@ function AutoReplyRulesModal({ onClose }: { onClose: () => void }) {
       const settings = Object.fromEntries(Object.entries(chatbotSettings).filter(([key]) => !["id", "createdAt", "updatedAt"].includes(key)));
       const saved = await api("/api/admin/chatbot-settings", { method: "PUT", body: JSON.stringify(settings) });
       setChatbotSettings(saved);
-      setNotice("تم حفظ إعدادات قائمة البوت وردودها.");
+       setNotice("تم حفظ الإعدادات. سيُستخدم النص المحدّث في رسائل التحويل الجديدة.");
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ إعدادات البوت"); }
     finally { setSaving(false); }
   }
@@ -719,7 +719,12 @@ function AutoReplyRulesModal({ onClose }: { onClose: () => void }) {
     <form onSubmit={saveChatbotSettings} className="mb-5 space-y-4 rounded-2xl border border-amber-100 bg-amber-50/60 p-4">
        <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-extrabold text-amber-950">إعدادات قائمة البوت</h3><p className="mt-1 text-[10px] text-amber-900">تصل القائمة عند أول رسالة من العميل أو بعد 60 دقيقة من آخر رسالة واردة، داخل ساعات العمل. خارجها يُرسل رد انتهاء الدوام إذا كان مفعّلًا.</p></div><label className="flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-xs font-bold"><input type="checkbox" checked={Boolean(chatbotSettings?.enabled)} disabled={!chatbotSettings} onChange={(event) => setChatbotSettings((old) => old ? { ...old, enabled: event.target.checked } : old)} /> تفعيل البوت</label></div>
       {chatbotSettings ? <>
-        <label className="block text-xs font-bold text-stone-700">رسالة الترحيب<textarea value={chatbotSettings.welcomeText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, welcomeText: event.target.value })} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label>
+         <label className="block text-xs font-bold text-stone-700">رسالة الترحيب<textarea value={chatbotSettings.welcomeText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, welcomeText: event.target.value })} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label>
+         <fieldset className="space-y-2 rounded-xl border border-sky-100 bg-white p-3">
+           <legend className="px-1 text-xs font-extrabold text-sky-950">رسالة استلام الموظف</legend>
+           <p className="text-[10px] leading-5 text-stone-500">تُرسل تلقائيًا عند فتح الموظف للمحادثة المسندة إليه. استخدم <code>{"{customer}"}</code> لاسم العميل و<code>{"{agent}"}</code> لاسم الموظف.</p>
+           <textarea aria-label="رسالة استلام الموظف" value={chatbotSettings.agentHandoffGreeting} onChange={(event) => setChatbotSettings({ ...chatbotSettings, agentHandoffGreeting: event.target.value })} maxLength={1000} rows={3} className="w-full rounded-xl border border-sky-100 px-3 py-2 text-xs font-normal leading-6 outline-none focus:border-sky-300" />
+         </fieldset>
         <label className="block text-xs font-bold text-stone-700">رسالة الاختيار غير الصحيح<textarea value={chatbotSettings.invalidChoiceText} onChange={(event) => setChatbotSettings({ ...chatbotSettings, invalidChoiceText: event.target.value })} maxLength={1000} rows={2} className="mt-1 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-normal outline-none" /></label>
         <fieldset className="space-y-3 rounded-xl border border-amber-100 bg-white p-3">
           <legend className="px-1 text-xs font-extrabold text-amber-950">ساعات العمل والرد خارج الدوام</legend>

@@ -9,6 +9,7 @@ export const BOT_MENU_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 export type ChatbotSettings = {
   enabled: boolean;
   welcomeText: string;
+  agentHandoffGreeting: string;
   invalidChoiceText: string;
   option1Label: string;
   option2Label: string;
@@ -31,6 +32,7 @@ export type ChatbotSettings = {
 export const DEFAULT_CHATBOT_SETTINGS: ChatbotSettings = {
   enabled: true,
   welcomeText: "برجاء اختيار الاختيار المناسب لحضرتك",
+  agentHandoffGreeting: "أهلاً {customer}، معاك {agent} من خدمة العملاء في حلواني بندق. كيف أستطيع مساعدتك؟",
   invalidChoiceText: "عذرًا، يرجى إرسال رقم الاختيار المطلوب فقط (من 1 إلى 5) لنتمكن من توجيهك للقسم الصحيح.",
   option1Label: "الفروع",
   option2Label: "خدمة العملاء",
@@ -91,6 +93,14 @@ export function buildRoutingMenuText(settings: ChatbotSettings = DEFAULT_CHATBOT
     `4 ${settings.option4Label}`,
     `5 ${settings.option5Label}`
   ].join("\n");
+}
+
+export function formatAgentHandoffGreeting(template: string, customerName: string | null | undefined, agentName: string | null | undefined) {
+  return (template.trim() || DEFAULT_CHATBOT_SETTINGS.agentHandoffGreeting)
+    .replaceAll("{customer}", customerName?.trim() || "")
+    .replaceAll("{agent}", agentName?.trim() || "فريق خدمة العملاء")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([،,])/g, "$1");
 }
 
 export function getServiceChoice(value?: string | null, settings: ChatbotSettings = DEFAULT_CHATBOT_SETTINGS): ServiceChoice | undefined {
