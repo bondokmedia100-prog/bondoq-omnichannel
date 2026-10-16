@@ -120,6 +120,9 @@ model User {
   canManageCatalog         Boolean?
   canViewReports           Boolean?
   canManageTeam            Boolean?
+  canReceiveWhatsApp       Boolean                @default(true)
+  canReceiveMessenger       Boolean                @default(true)
+  canReceiveTelegram        Boolean                @default(true)
   presence                 Presence               @default(OFFLINE)
   isActive                 Boolean                @default(true)
   lastSeenAt               DateTime?

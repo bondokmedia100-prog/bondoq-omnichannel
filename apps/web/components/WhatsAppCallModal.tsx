@@ -18,20 +18,33 @@ type PermissionInfo = {
 function waitForIceGathering(peer: RTCPeerConnection) {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
   return new Promise<void>((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      const sdp = peer.localDescription?.sdp || "";
-      const hasUsableCandidate = /^a=candidate:.* typ (?:srflx|relay)\s/m.test(sdp);
-      finish(hasUsableCandidate ? undefined : new Error("تعذر الوصول إلى مسار اتصال صالح. تحقق من الإنترنت أو جرّب شبكة أخرى."));
-    }, 30_000);
+    const hasUsableCandidate = () => /^a=candidate:.* typ (?:srflx|relay)\s/m.test(peer.localDescription?.sdp || "");
+    const timeout = window.setTimeout(() => finish(hasUsableCandidate() ? undefined : new Error("لم يظهر مسار صوت صالح خلال 5 ثوانٍ. تحقق من اتصال الإنترنت وإعدادات TURN أو جرّب شبكة أخرى.")), 5_000);
     const changed = () => { if (peer.iceGatheringState === "complete") finish(); };
+    const candidate = (event: RTCPeerConnectionIceEvent) => {
+      if (event.candidate && (event.candidate.type === "srflx" || event.candidate.type === "relay")) finish();
+      else if (!event.candidate && peer.iceGatheringState === "complete") finish();
+    };
     function finish(error?: Error) {
       window.clearTimeout(timeout);
       peer.removeEventListener("icegatheringstatechange", changed);
+      peer.removeEventListener("icecandidate", candidate);
       if (error) reject(error); else resolve();
     }
     peer.addEventListener("icegatheringstatechange", changed);
+    peer.addEventListener("icecandidate", candidate);
     if (peer.iceGatheringState === "complete") finish();
+    else if (hasUsableCandidate()) finish();
   });
+}
+
+function callSetupError(reason: unknown) {
+  if (reason instanceof DOMException) {
+    if (reason.name === "NotAllowedError" || reason.name === "PermissionDeniedError") return new Error("منع المتصفح استخدام الميكروفون. اسمح به من إعدادات الموقع بجوار العنوان، ثم أعد المحاولة.");
+    if (reason.name === "NotFoundError" || reason.name === "DevicesNotFoundError") return new Error("لم يعثر Chrome على ميكروفون متاح. وصّل ميكروفونًا أو اختر جهازًا آخر.");
+    if (reason.name === "NotReadableError" || reason.name === "TrackStartError") return new Error("الميكروفون مستخدم أو محجوب من النظام. أغلق التطبيقات الأخرى التي تستخدمه ثم أعد المحاولة.");
+  }
+  return reason instanceof Error ? reason : new Error("تعذر بدء المكالمة الصوتية");
 }
 
 export default function WhatsAppCallModal({ conversationId, customerName, phone, socket, onClose }: {
@@ -295,7 +308,7 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
       peerRef.current = null;
       localStreamRef.current = null;
       remoteStreamRef.current = null;
-      setError(reason instanceof Error ? reason.message : "تعذر بدء المكالمة الصوتية");
+      setError(callSetupError(reason).message);
     } finally { setBusy(false); }
   }
 

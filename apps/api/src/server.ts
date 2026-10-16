@@ -27,6 +27,7 @@ import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
 import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
 import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
 import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
+import { channelEligibilityWhere } from "./routingSelection";
 
 const app = express();
 const server = http.createServer(app);
@@ -52,7 +53,8 @@ const terminalStatuses: ConversationStatus[] = [ConversationStatus.CLOSED, Conve
 const httpsUrl = z.string().url().refine((value) => value.startsWith("https://"), "استخدم رابط HTTPS آمنًا");
 const usernameSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9._-]{3,32}$/, "اسم المستخدم من 3 إلى 32 حرفًا، ويقبل الحروف الإنجليزية والأرقام والنقطة والشرطة");
 const permissionFields = { canViewAllConversations: z.boolean().nullable().optional(), canTransferConversations: z.boolean().nullable().optional(), canManageCatalog: z.boolean().nullable().optional(), canViewReports: z.boolean().nullable().optional(), canManageTeam: z.boolean().nullable().optional() };
-const staffSelect = { id: true, email: true, username: true, name: true, role: true, department: true, branchId: true, branch: { select: { id: true, name: true } }, presence: true, isActive: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true } as const;
+const channelPermissionFields = { canReceiveWhatsApp: z.boolean().optional(), canReceiveMessenger: z.boolean().optional(), canReceiveTelegram: z.boolean().optional() };
+const staffSelect = { id: true, email: true, username: true, name: true, role: true, department: true, branchId: true, branch: { select: { id: true, name: true } }, presence: true, isActive: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } as const;
 const defaultBranches = Array.from({ length: 8 }, (_, index) => ({ id: `branch-${index + 1}`, name: `الفرع ${index + 1}` }));
 function encodePageCursor(date: Date, id: string) {
   return Buffer.from(`${date.toISOString()}|${id}`).toString("base64url");
@@ -188,7 +190,7 @@ app.post("/api/auth/logout", authenticate, async (req: AuthedRequest, res) => {
 });
 
 app.get("/api/auth/me", authenticate, async (req: AuthedRequest, res) => {
-  const user = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { id: true, username: true, name: true, email: true, role: true, department: true, branchId: true, branch: { select: { name: true } }, presence: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true } });
+  const user = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { id: true, username: true, name: true, email: true, role: true, department: true, branchId: true, branch: { select: { name: true } }, presence: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } });
   if (!user) return res.status(401).json({ error: "الحساب غير موجود" });
   res.json(user);
 });
@@ -599,6 +601,8 @@ app.get("/api/contacts", agentGuard, async (req: express.Request, res: express.R
 });
 
 app.post("/api/contacts/:id/whatsapp-conversation", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const canReceiveWhatsApp = await prisma.user.findFirst({ where: { id: req.user!.id, canReceiveWhatsApp: true }, select: { id: true } });
+  if (!canReceiveWhatsApp) return res.status(403).json({ error: "حسابك غير مخصص لاستقبال محادثات WhatsApp" });
   const customer = await prisma.customer.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, displayName: true, phone: true } });
   if (!customer) return res.status(404).json({ error: "جهة الاتصال غير موجودة" });
   const phone = customer.phone?.replace(/[^0-9]/g, "") || "";
@@ -1205,7 +1209,7 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية لتحويل هذه المحادثة" });
   if (parsed.data.agentId) {
-    const assignee = await prisma.user.findFirst({ where: { id: parsed.data.agentId, role: { in: [Role.AGENT, Role.BRANCH_USER] }, isActive: true }, select: { id: true, role: true, presence: true, branchId: true } });
+    const assignee = await prisma.user.findFirst({ where: { id: parsed.data.agentId, role: { in: [Role.AGENT, Role.BRANCH_USER] }, isActive: true, ...channelEligibilityWhere(conversation.channel) }, select: { id: true, role: true, presence: true, branchId: true } });
     if (!assignee) return res.status(400).json({ error: "الموظف المحدد غير متاح" });
     if (assignee.presence !== Presence.ONLINE) return res.status(409).json({ error: "لا يمكن إسناد محادثة لموظف غير متصل" });
     if (assignee.role === Role.BRANCH_USER && !assignee.branchId) return res.status(409).json({ error: "اربط الموظف بفرع قبل إسناد المحادثة" });
@@ -1248,8 +1252,11 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
 
 app.get("/api/agents/customer-care-colleagues", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "التحويل متاح لموظفي خدمة العملاء فقط" });
+  const conversationId = typeof req.query.conversationId === "string" ? req.query.conversationId : "";
+  const conversation = conversationId ? await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, channel: true } }) : null;
+  if (!conversation || conversation.assignedAgentId !== req.user!.id) return res.status(404).json({ error: "المحادثة غير موجودة أو ليست مسندة إليك" });
   const colleagues = await prisma.user.findMany({
-    where: { id: { not: req.user!.id }, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE },
+    where: { id: { not: req.user!.id }, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE, ...channelEligibilityWhere(conversation.channel) },
     select: { id: true, name: true, presence: true }, orderBy: { name: "asc" }
   });
   res.json(colleagues);
@@ -1274,7 +1281,7 @@ app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest
   if (conversation.assignedAgentId !== req.user!.id) return res.status(403).json({ error: "يمكنك تحويل المحادثات المسندة إليك فقط" });
   if (conversation.status !== ConversationStatus.OPEN && conversation.status !== ConversationStatus.PENDING) return res.status(409).json({ error: "لا يمكن تحويل محادثة مغلقة أو منتهية" });
   const colleague = await prisma.user.findFirst({
-    where: { id: { equals: parsed.data.agentId, not: req.user!.id }, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE },
+    where: { id: { equals: parsed.data.agentId, not: req.user!.id }, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE, ...channelEligibilityWhere(conversation.channel) },
     select: { id: true, name: true }
   });
   if (!colleague) return res.status(409).json({ error: "الزميل المحدد لم يعد متاحًا" });
@@ -1319,6 +1326,12 @@ app.post("/api/conversations/:id/handoff-response", agentGuard, async (req: Auth
     void sendPushNotification([request.fromAgentId], { title: "رُفض طلب تحويل المحادثة", body: `رفض ${req.user!.name} استلام محادثة ${request.conversation.customer.displayName || request.conversation.customer.name || "العميل"}؛ بقيت المحادثة لديك.`, url: "/agent/workspace", tag: `handoff-declined-${request.conversationId}` }).catch((error) => console.warn("Handoff decline push notification failed", error));
     return res.json({ status: ConversationHandoffStatus.DECLINED, conversationId: request.conversationId });
   }
+
+  const eligibleRecipient = await prisma.user.findFirst({
+    where: { id: req.user!.id, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE, ...channelEligibilityWhere(request.conversation.channel) },
+    select: { id: true }
+  });
+  if (!eligibleRecipient) return res.status(409).json({ error: "لم تعد مؤهلًا لاستقبال محادثات هذه القناة" });
 
   let updated;
   try {
@@ -2186,12 +2199,12 @@ app.patch("/api/admin/branches/:id", permissionGuard("canManageTeam"), async (re
   res.json(branch);
 });
 
-app.get("/api/admin/agents", adminGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.user.findMany({ where: { role: { in: [Role.AGENT, Role.BRANCH_USER] } }, select: { id: true, name: true, role: true, department: true, branchId: true, branch: { select: { id: true, name: true } }, presence: true, isActive: true }, orderBy: { name: "asc" } })));
+app.get("/api/admin/agents", adminGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.user.findMany({ where: { role: { in: [Role.AGENT, Role.BRANCH_USER] } }, select: { id: true, name: true, role: true, department: true, branchId: true, branch: { select: { id: true, name: true } }, presence: true, isActive: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true }, orderBy: { name: "asc" } })));
 app.get("/api/admin/team", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => res.json(await prisma.user.findMany({ where: { role: { not: Role.ADMIN } }, select: staffSelect, orderBy: { name: "asc" } })));
 app.post("/api/admin/agents", permissionGuard("canManageTeam"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({
     name: z.string().trim().min(2).max(100), email: z.string().trim().email().max(254), username: usernameSchema.optional(), password: z.string().min(10).max(128),
-    role: z.nativeEnum(Role).default(Role.AGENT), department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields
+    role: z.nativeEnum(Role).default(Role.AGENT), department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields, ...channelPermissionFields
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "راجع بيانات الموظف" });
   const { password, email, name, username: suppliedUsername, role, department, branchId, ...permissions } = parsed.data;
@@ -2224,11 +2237,11 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
   const parsed = z.object({
     name: z.string().trim().min(2).max(100).optional(), email: z.string().trim().email().max(254).optional(), username: usernameSchema.optional(),
     isActive: z.boolean().optional(), password: z.string().min(10).max(128).optional(), role: z.nativeEnum(Role).optional(),
-    department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields
+    department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields, ...channelPermissionFields
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "بيانات التعديل غير صالحة" });
   if (!Object.keys(parsed.data).length) return res.status(400).json({ error: "لا توجد تغييرات لحفظها" });
-  const previous = await prisma.user.findUnique({ where: { id: req.params.id }, select: { id: true, role: true, department: true, branchId: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true } });
+  const previous = await prisma.user.findUnique({ where: { id: req.params.id }, select: { id: true, role: true, department: true, branchId: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } });
   if (!previous) return res.status(404).json({ error: "حساب الموظف غير موجود" });
   if (previous.role === Role.ADMIN) return res.status(403).json({ error: "حساب مدير النظام محمي من التعديل عبر إدارة الفريق" });
   const role = parsed.data.role ?? previous.role;
@@ -2249,7 +2262,11 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
       const defaultValue = previous.role === Role.ADMIN || previous.role === Role.SUPERVISOR;
       return (previous[key] ?? defaultValue) !== requested;
     });
-  const revokeSessions = Boolean(parsed.data.password || parsed.data.isActive === false || policyChanged);
+  const channelPolicyChanged = (Object.keys(channelPermissionFields) as Array<keyof typeof channelPermissionFields>).some((key) => {
+    const requested = parsed.data[key];
+    return requested !== undefined && previous[key] !== requested;
+  });
+  const revokeSessions = Boolean(parsed.data.password || parsed.data.isActive === false || policyChanged || channelPolicyChanged);
   const data: Prisma.UserUncheckedUpdateInput = {
     ...(parsed.data.name === undefined ? {} : { name: parsed.data.name }),
     ...(parsed.data.email === undefined ? {} : { email: parsed.data.email.toLowerCase() }),
@@ -2260,7 +2277,7 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
     ...(parsed.data.isActive === undefined ? {} : { isActive: parsed.data.isActive }),
     ...((parsed.data.isActive === false || role !== Role.AGENT && role !== Role.BRANCH_USER || parsed.data.isActive === true) ? { presence: Presence.OFFLINE } : {}),
     ...(parsed.data.password ? { passwordHash: await bcrypt.hash(parsed.data.password, 12) } : {}),
-    ...Object.fromEntries(Object.keys(permissionFields).filter((key) => parsed.data[key as keyof typeof parsed.data] !== undefined).map((key) => [key, parsed.data[key as keyof typeof parsed.data]])),
+    ...Object.fromEntries([...Object.keys(permissionFields), ...Object.keys(channelPermissionFields)].filter((key) => parsed.data[key as keyof typeof parsed.data] !== undefined).map((key) => [key, parsed.data[key as keyof typeof parsed.data]])),
     ...(revokeSessions ? { authVersion: { increment: 1 }, ...(role === Role.AGENT || role === Role.BRANCH_USER ? { presence: Presence.OFFLINE } : {}) } : {})
   };
   try {

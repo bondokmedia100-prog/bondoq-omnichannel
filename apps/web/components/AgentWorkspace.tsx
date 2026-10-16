@@ -199,6 +199,7 @@ export default function AgentWorkspace() {
     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
   async function startChatFromContact(contact: AnyRecord) {
+    if (user?.canReceiveWhatsApp === false) { setNotice("حسابك غير مخصص لاستقبال محادثات WhatsApp."); return; }
     try {
       const result = await api<{ conversationId: string }>(`/api/contacts/${contact.id}/whatsapp-conversation`, { method: "POST", body: JSON.stringify({}) });
       setShowContacts(false);
@@ -224,7 +225,7 @@ export default function AgentWorkspace() {
   }
   async function openHandoffDialog() {
     try {
-      const colleagues = await api("/api/agents/customer-care-colleagues");
+      const colleagues = await api(`/api/agents/customer-care-colleagues?conversationId=${encodeURIComponent(activeId)}`);
       setHandoffColleagues(colleagues);
       setShowHandoff(true);
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحميل زملاء خدمة العملاء"); }
@@ -239,7 +240,7 @@ export default function AgentWorkspace() {
       setNotice(`أُرسل طلب التحويل إلى ${agentName}. ستبقى المحادثة لديك حتى يقبله الزميل.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "تعذر تحويل المحادثة للزميل");
-      void api("/api/agents/customer-care-colleagues").then(setHandoffColleagues).catch(() => {});
+      void api(`/api/agents/customer-care-colleagues?conversationId=${encodeURIComponent(conversationId)}`).then(setHandoffColleagues).catch(() => {});
     }
     finally { setHandoffBusyId(""); }
   }
@@ -406,11 +407,11 @@ export default function AgentWorkspace() {
       connection.on("connect", () => { void loadChats(); if (activeIdRef.current) void openChat(activeIdRef.current); });
       connection.on("canned:updated", () => { void api("/api/canned-responses").then(setCanned).catch(() => {}); });
       connection.on("agent:quick-replies-updated", () => { void api("/api/agent/quick-replies").then(setAgentQuickReplies).catch(() => {}); });
-      connection.on("presence:updated", () => {
-        if (profile.role === "AGENT" && profile.department === "CUSTOMER_CARE") {
-          void api("/api/agents/customer-care-colleagues").then(setHandoffColleagues).catch(() => {});
-        }
-      });
+       connection.on("presence:updated", () => {
+         if (profile.role === "AGENT" && profile.department === "CUSTOMER_CARE" && activeIdRef.current) {
+           void api(`/api/agents/customer-care-colleagues?conversationId=${encodeURIComponent(activeIdRef.current)}`).then(setHandoffColleagues).catch(() => {});
+         }
+       });
       connection.on("customer:updated", (event) => {
         if (event.conversationId) {
           setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, customer: { ...old.customer, ...event.customer } } : old);

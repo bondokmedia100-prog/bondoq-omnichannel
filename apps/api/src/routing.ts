@@ -4,7 +4,7 @@ import IORedis from "ioredis";
 import { config } from "./config";
 import { prisma } from "./prisma";
 import { io } from "./realtime";
-import { chooseRoundRobinAgent } from "./routingSelection";
+import { channelEligibilityWhere, chooseRoundRobinAgent } from "./routingSelection";
 import { withRedisLock } from "./redisLock";
 
 const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -38,6 +38,7 @@ export async function assignConversation(conversationId: string, department?: De
         role: isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
         isActive: true,
         presence: Presence.ONLINE,
+        ...channelEligibilityWhere(currentConversation.channel),
         ...(isBranchQueue
           ? { branchId: currentConversation.branchId || "__unassigned_branch__" }
           : targetDepartment === Department.CUSTOMER_CARE
