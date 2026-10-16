@@ -62,7 +62,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   let cachedMedia: { body: Buffer; contentType: string } | undefined = inbound.mediaBuffer
     ? { body: inbound.mediaBuffer, contentType: inbound.mediaContentType || String(metadata.mediaMimeType || "application/octet-stream") }
     : undefined;
-  const hasMedia = [MessageKind.IMAGE, MessageKind.AUDIO, MessageKind.VIDEO, MessageKind.FILE, MessageKind.STICKER].includes(inbound.kind);
+  const hasMedia = inbound.kind === MessageKind.IMAGE || inbound.kind === MessageKind.AUDIO || inbound.kind === MessageKind.VIDEO || inbound.kind === MessageKind.FILE || inbound.kind === MessageKind.STICKER;
   if (!cachedMedia && hasMedia) {
     try {
       cachedMedia = await fetchInboundMedia(inbound.channel, metadata, inbound.mediaUrl);
@@ -81,9 +81,10 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       ? `${metadata.voiceNote === true ? "voice-note" : "audio"}.${extension}`
       : inbound.kind === MessageKind.IMAGE ? `image.${extension}` : inbound.kind === MessageKind.VIDEO ? `video.${extension}` : `attachment.${extension}`);
     message = await prisma.$transaction(async (tx) => {
-      const cacheable = cachedMedia && (inbound.kind !== MessageKind.IMAGE && inbound.kind !== MessageKind.STICKER || Boolean(detectImageContentType(cachedMedia.body)));
-      const asset = cacheable ? await tx.mediaAsset.create({ data: {
-        fileName: safeFileName(fileName), contentType, size: cachedMedia.body.length, data: Uint8Array.from(cachedMedia.body)
+      const mediaToCache = cachedMedia && (inbound.kind !== MessageKind.IMAGE && inbound.kind !== MessageKind.STICKER || Boolean(detectImageContentType(cachedMedia.body)))
+        ? cachedMedia : undefined;
+      const asset = mediaToCache ? await tx.mediaAsset.create({ data: {
+        fileName: safeFileName(fileName), contentType, size: mediaToCache.body.length, data: Uint8Array.from(mediaToCache.body)
       }, select: { id: true } }) : null;
       return tx.message.create({ data: {
         conversationId, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
