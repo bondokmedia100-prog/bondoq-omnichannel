@@ -37,12 +37,65 @@ let stopRequested = false;
 let reconnectDelay = 2000;
 let callReplyText = defaultCallReply;
 const pendingCalls = new Map<string, { callId: string; callerJid: string; phoneNumber: string; conversationId?: string; assignedAgentId?: string; customerName: string; isVideo: boolean; receivedAt: string }>();
+const profilePictureCache = new Map<string, { url: string | undefined; expiresAt: number }>();
+const profilePictureRequests = new Map<string, Promise<string | undefined>>();
 
 let state: WhatsAppConnectionState = {
   mode: "BAILEYS", status: "DISCONNECTED", qrDataUrl: "", phoneNumber: "", accountName: "", lastError: ""
 };
 
 function callKey(callId: string, callerJid: string) { return `${callId}:${callerJid}`; }
+
+async function getProfilePictureUrl(currentSocket: WASocket, jid: string) {
+  const cached = profilePictureCache.get(jid);
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+  const pending = profilePictureRequests.get(jid);
+  if (pending) return pending;
+
+  let request: Promise<string | undefined>;
+  request = Promise.resolve().then(() => currentSocket.profilePictureUrl(jid, "image")).then((url) => {
+    if (!url) return undefined;
+    return new URL(url).protocol === "https:" ? url : undefined;
+  }).catch(() => undefined).then((url) => {
+    profilePictureCache.set(jid, { url, expiresAt: Date.now() + (url ? 30 * 60_000 : 5 * 60_000) });
+    if (profilePictureCache.size > 1000) profilePictureCache.delete(profilePictureCache.keys().next().value!);
+    return url;
+  }).finally(() => {
+    if (profilePictureRequests.get(jid) === request) profilePictureRequests.delete(jid);
+  });
+  profilePictureRequests.set(jid, request);
+  return request;
+}
+
+async function customerProfilePicture(currentSocket: WASocket, remoteJid: string, phoneNumber: string) {
+  const remotePicture = await getProfilePictureUrl(currentSocket, remoteJid);
+  if (remotePicture || !phoneNumber) return remotePicture;
+  return getProfilePictureUrl(currentSocket, normalizeJid(phoneNumber));
+}
+
+async function refreshRecentCustomerProfilePictures(currentSocket: WASocket) {
+  const conversations = await prisma.conversation.findMany({
+    where: { channel: Channel.WHATSAPP, customer: { is: { avatarUrl: null } } },
+    orderBy: { lastMessageAt: "desc" },
+    take: 50,
+    select: { id: true, externalConversationId: true, externalCustomerId: true, assignedAgentId: true, customer: { select: { id: true, phone: true } } }
+  });
+  let adminUpdate: { conversationId: string; customer: { id: string; avatarUrl: string } } | undefined;
+  const agentUpdates = new Map<string, { conversationId: string; customer: { id: string; avatarUrl: string } }>();
+  for (const conversation of conversations) {
+    if (socket !== currentSocket || state.status !== "CONNECTED") return;
+    const phoneNumber = phoneFromJid(conversation.externalCustomerId) || conversation.customer.phone || "";
+    const avatarUrl = await customerProfilePicture(currentSocket, conversation.externalConversationId, phoneNumber);
+    if (!avatarUrl) continue;
+    const saved = await prisma.customer.updateMany({ where: { id: conversation.customer.id, avatarUrl: null }, data: { avatarUrl } });
+    if (!saved.count) continue;
+    const update = { conversationId: conversation.id, customer: { id: conversation.customer.id, avatarUrl } };
+    adminUpdate ||= update;
+    if (conversation.assignedAgentId && !agentUpdates.has(conversation.assignedAgentId)) agentUpdates.set(conversation.assignedAgentId, update);
+  }
+  if (adminUpdate) io?.to("admins").emit("customer:updated", adminUpdate);
+  for (const [agentId, update] of agentUpdates) io?.to(`agent:${agentId}`).emit("customer:updated", update);
+}
 
 function emitState() {
   io?.to("admins").emit("whatsapp:status", { ...state });
@@ -259,6 +312,10 @@ async function handleIncomingMessage(message: any) {
   const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
   const phoneNumber = phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
   const externalCustomerId = phoneNumber || remoteJid;
+  const currentSocket = socket;
+  const profilePictureUrl = currentSocket && state.status === "CONNECTED"
+    ? await customerProfilePicture(currentSocket, remoteJid, phoneNumber)
+    : undefined;
   const audio = content.audioMessage;
   const image = content.imageMessage;
   const video = content.videoMessage;
@@ -289,6 +346,7 @@ async function handleIncomingMessage(message: any) {
     externalCustomerId,
     ...(phoneNumber ? { customerPhone: phoneNumber } : {}),
     customerName: message.pushName || undefined,
+    profilePictureUrl,
     text: String(text || ""),
     kind,
     latitude: location?.degreesLatitude,
@@ -419,6 +477,7 @@ async function startSocket() {
         const jid = current.user?.id || "";
         const phoneNumber = phoneFromJid(jid) || jid.split(":")[0].split("@")[0];
         await saveState({ mode: "BAILEYS", status: "CONNECTED", qrDataUrl: "", phoneNumber, accountName: current.user?.name || "WhatsApp", lastError: "" });
+        void refreshRecentCustomerProfilePictures(current).catch((error) => console.warn("WhatsApp profile-picture sync failed", error));
       }
       if (update.connection === "close") {
         const statusCode = (update.lastDisconnect?.error as any)?.output?.statusCode;
