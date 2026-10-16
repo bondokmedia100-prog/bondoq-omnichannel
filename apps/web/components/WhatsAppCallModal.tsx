@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
-import { LoaderCircle, Mic, MicOff, PhoneCall, PhoneOff, ShieldCheck, Volume2, X } from "lucide-react";
+import { LoaderCircle, Maximize2, Mic, MicOff, Minimize2, PhoneCall, PhoneOff, ShieldCheck, Volume2, X } from "lucide-react";
 import { API_URL, api, getToken } from "@/lib/api";
 
 type PermissionInfo = {
@@ -44,6 +44,7 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
   const [permission, setPermission] = useState<PermissionInfo | null>(null);
   const [loadingPermission, setLoadingPermission] = useState(true);
   const [permissionRequested, setPermissionRequested] = useState(false);
+  const [minimized, setMinimized] = useState(false);
   const [sessionId, setSessionId] = useState("");
   const [callStatus, setCallStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -283,6 +284,7 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
       if (result.recordingEnabled) recordingSessionIdRef.current = result.sessionId;
       setRecordingStatus(result.transport === "INTERNAL_WEB" ? "أُرسل رابط الانضمام للعميل عبر WhatsApp. انتظر فتحه والرد على المكالمة." : "");
       setSessionId(result.sessionId);
+      setMinimized(true);
       setCallStatus(result.status);
       if (result.recordingEnabled && localStreamRef.current && remoteStreamRef.current) startCallRecording(localStreamRef.current, remoteStreamRef.current);
       void refreshCall(result.sessionId);
@@ -297,7 +299,7 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
     } finally { setBusy(false); }
   }
 
-  async function endCall(closeAfter = false) {
+  async function endCall() {
     const id = sessionIdRef.current;
     let succeeded = false;
     setBusy(true);
@@ -316,7 +318,6 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
         stopLocalMedia();
       }
       setBusy(false);
-      if (closeAfter && succeeded) onClose();
     }
   }
 
@@ -329,17 +330,29 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
   const activeCall = Boolean(sessionId) && !["TERMINATED", "REJECTED", "FAILED"].includes(callStatus);
   const usesInternalWebCall = permission?.transport === "INTERNAL_WEB";
   const permissionLabel = usesInternalWebCall ? "دعوة متصفح آمنة عبر WhatsApp" : permission?.status === "permanent" ? "إذن دائم" : permission?.status === "temporary" ? "إذن مؤقت" : permission?.status === "no_permission" ? "لم يمنح العميل إذن الاتصال بعد" : permission?.status === "pending" ? "طلب الإذن بانتظار العميل" : "جارٍ التحقق من إذن العميل";
-  const callLabel = callStatus === "CONNECTED" ? "المكالمة متصلة" : callStatus === "RINGING" ? usesInternalWebCall ? "العميل ينضم إلى المكالمة..." : "يرن واتساب لدى العميل..." : callStatus === "INITIATING" && usesInternalWebCall ? "بانتظار فتح العميل لرابط الاتصال..." : callStatus === "REJECTED" ? "رفض العميل المكالمة" : callStatus === "TERMINATED" ? "انتهت المكالمة" : callStatus === "FAILED" ? "تعذر إكمال المكالمة" : "جارٍ الاتصال بواتساب العميل...";
+  const callLabel = callStatus === "CONNECTED" ? "المكالمة متصلة" : callStatus === "RINGING" ? usesInternalWebCall ? "العميل ينضم إلى المكالمة..." : "يرن واتساب لدى العميل..." : callStatus === "INITIATING" && usesInternalWebCall ? "بانتظار فتح العميل لرابط الاتصال..." : callStatus === "REJECTED" ? "رفض العميل المكالمة" : callStatus === "TERMINATED" ? "انتهت المكالمة" : callStatus === "FAILED" ? "تعذر إكمال المكالمة" : "جاهز لبدء المكالمة";
 
-  return <div className="fixed inset-0 z-[90] grid place-items-center overflow-y-auto bg-stone-950/70 p-3 backdrop-blur-sm sm:p-5" dir="rtl">
+  return <>
+    <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+    {minimized ? <aside role="region" aria-label="نافذة المكالمة المصغّرة" aria-live="polite" dir="rtl" className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+5rem)] z-[90] sm:left-auto sm:right-4 sm:w-[min(360px,calc(100vw-2rem))]">
+      <div className="rounded-2xl border border-emerald-200 bg-white p-3 shadow-2xl">
+        <div className="flex items-center gap-3">
+          <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${activeCall ? "bg-emerald-100 text-emerald-800" : "bg-stone-100 text-stone-500"}`}><PhoneCall size={18}/></span>
+          <div className="min-w-0 flex-1"><p className="truncate text-xs font-extrabold text-stone-800">{customerName}</p><p className={`mt-1 truncate text-[10px] font-semibold ${callStatus === "CONNECTED" ? "text-emerald-700" : "text-stone-500"}`}>{busy && !activeCall ? "جارٍ تجهيز الاتصال..." : callLabel}</p></div>
+          <button type="button" onClick={() => setMinimized(false)} aria-label="تكبير نافذة المكالمة" title="تكبير نافذة المكالمة" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-stone-500 hover:bg-stone-100"><Maximize2 size={17}/></button>
+          {!activeCall && !busy && <button type="button" onClick={onClose} aria-label="إغلاق نافذة المكالمة" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><X size={17}/></button>}
+        </div>
+        {activeCall && <div className="mt-3 grid grid-cols-2 gap-2"><button type="button" disabled={busy} onClick={toggleMute} className={`flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${muted ? "bg-amber-100 text-amber-900" : "bg-stone-100 text-stone-700"}`}>{muted ? <MicOff size={14} /> : <Mic size={14} />}{muted ? "فتح الميكروفون" : "كتم الميكروفون"}</button><button type="button" disabled={busy} onClick={() => void endCall()} className="flex min-h-10 items-center justify-center gap-2 rounded-xl bg-red-600 px-3 py-2 text-[10px] font-extrabold text-white hover:bg-red-700 disabled:opacity-50"><PhoneOff size={14}/>{busy ? "جارٍ الإنهاء..." : "إنهاء المكالمة"}</button></div>}
+        {error && <p role="alert" className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[10px] leading-5 text-amber-900">{error}</p>}
+      </div>
+    </aside> : <div className="fixed inset-0 z-[90] grid place-items-center overflow-y-auto bg-stone-950/70 p-3 backdrop-blur-sm sm:p-5" dir="rtl">
     <section role="dialog" aria-modal="true" aria-labelledby="whatsapp-call-title" className="my-auto max-h-[calc(100dvh-24px)] w-full max-w-md overflow-y-auto rounded-3xl border border-white/60 bg-[#fffdf7] shadow-2xl">
       <header className="flex items-start justify-between gap-3 border-b border-stone-100 bg-white px-5 py-4 sm:px-6">
          <div className="flex min-w-0 items-center gap-3"><div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-emerald-100 text-emerald-700"><PhoneCall size={20}/></div><div className="min-w-0"><p className="text-[10px] font-bold text-emerald-700">{usesInternalWebCall ? "مكالمة متصفح عبر رابط WhatsApp" : "مكالمة صوتية عبر WhatsApp Cloud"}</p><h2 id="whatsapp-call-title" className="mt-0.5 truncate text-base font-extrabold text-stone-800">{customerName}</h2><p dir="ltr" className="mt-0.5 text-right text-[10px] text-stone-400">{phone}</p></div></div>
-        <button type="button" disabled={busy} onClick={() => void endCall(true)} aria-label="إغلاق شاشة المكالمة" className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-stone-400 hover:bg-stone-100 disabled:opacity-40"><X size={18}/></button>
-      </header>
+         <div className="flex shrink-0 items-center gap-1"><button type="button" onClick={() => setMinimized(true)} aria-label="تصغير نافذة المكالمة" title="تصغير نافذة المكالمة مع استمرار الاتصال" className="grid h-9 w-9 place-items-center rounded-xl text-stone-500 hover:bg-stone-100"><Minimize2 size={17}/></button>{!activeCall && !busy && <button type="button" onClick={onClose} aria-label="إغلاق شاشة المكالمة" className="grid h-9 w-9 place-items-center rounded-xl text-stone-400 hover:bg-stone-100"><X size={18}/></button>}</div>
+       </header>
       <div className="space-y-4 p-5 sm:p-6">
-        <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
-        {activeCall ? <>
+         {activeCall ? <>
            <div className="rounded-2xl bg-emerald-50 px-4 py-5 text-center"><div className="mx-auto grid h-16 w-16 animate-pulse place-items-center rounded-full bg-white text-emerald-700 shadow-sm"><PhoneCall size={25}/></div><p role="status" aria-live="polite" className="mt-4 text-sm font-extrabold text-emerald-900">{callLabel}</p><p className="mt-1 text-[10px] text-emerald-700">{usesInternalWebCall ? "هذه مكالمة متصفح؛ يفتح العميل الرابط الذي وصل إليه في WhatsApp." : "الصوت يُنقل مباشرة بين متصفح الموظف وWhatsApp Cloud Calling."}</p></div>
           {recordingStatus && <p role="status" className="rounded-xl bg-amber-50 px-3 py-2.5 text-[10px] leading-5 text-amber-900">{recordingStatus}</p>}
           {error && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-[10px] leading-5 text-amber-950">{error}</p>}
@@ -360,5 +373,6 @@ export default function WhatsAppCallModal({ conversationId, customerName, phone,
          {!activeCall && error && <p className="text-center text-[9px] leading-4 text-stone-500">{usesInternalWebCall ? "يلزم HTTPS وفتح رابط الدعوة والسماح بالميكروفون؛ أضف TURN لزيادة نجاح الاتصال عبر الشبكات المقيدة." : "تأكد أن رقم الشركة الإيرلندي (+353) مفعّل على Cloud API وأن إعدادات المكالمات وWebhook مكتملة."}</p>}
       </div>
     </section>
-  </div>;
+  </div>}
+  </>;
 }
