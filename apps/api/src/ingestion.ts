@@ -1,7 +1,7 @@
 import { ConversationBotState, ConversationStatus, Department, MessageDirection, MessageKind, Prisma, Role } from "@prisma/client";
 import type { NormalizedInbound } from "./providers";
 import { prisma } from "./prisma";
-import { assignConversation, scheduleSla, withInboundConversationLock } from "./routing";
+import { assignConversation, scheduleSla, scheduleUnansweredReassignment, withInboundConversationLock } from "./routing";
 import { io } from "./realtime";
 import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
@@ -145,7 +145,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       lastMessageAt: message.createdAt, lastInboundAt: message.createdAt, unreadCount: { increment: 1 },
       status: awaitingMenu || needsAssignment ? ConversationStatus.QUEUED : shouldPreserveResolved ? conversation.status : isTerminal ? ConversationStatus.OPEN : conversation.status,
       closedAt: awaitingMenu || needsAssignment ? null : shouldPreserveResolved ? conversation.closedAt : isTerminal ? null : conversation.closedAt,
-      assignedAgentId: awaitingMenu || needsAssignment ? null : conversation.assignedAgentId,
+      assignedAgentId: awaitingMenu || needsAssignment ? null : undefined,
       awaitingRouting: awaitingMenu,
       botState: decision.nextState === "BOT_MENU" ? ConversationBotState.BOT_MENU : ConversationBotState.ASSIGNED_TO_AGENT,
       routingDepartment: awaitingMenu || decision.action === "BYPASS" ? null : routeDepartment || conversation.routingDepartment,
@@ -267,7 +267,10 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const tag = `inbound-${conversation.id}`;
   void sendPushNotification(admins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
   if (conversation.assignedAgentId) void sendPushNotification([conversation.assignedAgentId], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
-  if (conversation.assignedAgentId) await scheduleSla(conversation.id, message.id);
+  if (conversation.assignedAgentId) {
+    await scheduleSla(conversation.id, message.id);
+    await scheduleUnansweredReassignment(conversation.id, message.id, conversation.assignedAgentId);
+  }
   if (message.kind === MessageKind.AUDIO) void transcribeAudioMessage(message.id).catch((error) => console.error("Voice note transcription failed", error));
   return { conversationId: conversation.id, messageId: message.id };
 }
