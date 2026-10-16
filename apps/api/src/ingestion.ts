@@ -6,7 +6,7 @@ import { io } from "./realtime";
 import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
-import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, shouldStartBotFlow, type BotState } from "./autoReplies";
+import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, formatAgentHandoffGreeting, shouldStartBotFlow, type BotState } from "./autoReplies";
 import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
 import { detectImageContentType, safeFileName } from "./mediaStorage";
@@ -226,6 +226,21 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       const replyText = [chatbotSettings.option1ReplyText, chatbotSettings.option2ReplyText, chatbotSettings.option3ReplyText, chatbotSettings.option4ReplyText, chatbotSettings.option5ReplyText][serviceChoice.number - 1];
       await sendBotReply(replyText, "agent-handoff", { service: serviceChoice.label, serviceNumber: serviceChoice.number });
     } catch (error) { console.error("Agent handoff acknowledgement failed", error); }
+    try {
+      const assignedAgent = conversation.assignedAgentId
+        ? await prisma.user.findUnique({ where: { id: conversation.assignedAgentId }, select: { name: true } })
+        : null;
+      const greeting = formatAgentHandoffGreeting(
+        chatbotSettings.agentHandoffGreeting,
+        customer.displayName || customer.name,
+        assignedAgent?.name
+      );
+      await sendBotReply(greeting, "agent-handoff-greeting", {
+        service: serviceChoice.label,
+        serviceNumber: serviceChoice.number,
+        agentId: conversation.assignedAgentId
+      });
+    } catch (error) { console.error("Agent handoff greeting failed", error); }
   } else if (decision.action === "BYPASS") {
     conversation = await assignConversation(conversation.id);
   } else if (autoReply) {
