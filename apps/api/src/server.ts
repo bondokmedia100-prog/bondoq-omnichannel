@@ -441,7 +441,7 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
     try {
       await withInboundConversationLock(openedConversation.channel, openedConversation.externalConversationId, async () => {
         const customerName = openedConversation.customer.displayName || openedConversation.customer.name;
-        const text = `أهلاً${customerName ? ` ${customerName}` : ""}، معك ${req.user!.name} من خدمة العملاء في حلواني بندق. كيف أستطيع مساعدتك؟`;
+        const text = `أهلاً${customerName ? ` ${customerName}` : ""}، معاك ${req.user!.name} من خدمة العملاء في حلواني بندق. كيف أستطيع مساعدتك؟`;
         let greeting = await prisma.message.findFirst({
           where: { conversationId: openedConversation.id, direction: MessageDirection.OUTBOUND, metadata: { path: ["automation"], equals: "agent-handoff-greeting" } },
           include: { author: { select: { id: true, name: true } } }
