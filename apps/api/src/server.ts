@@ -466,7 +466,7 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
           const providerId = kalemlyExternalMessageId(result);
           const sent = await prisma.message.update({ where: { id: greeting.id }, data: {
             deliveryStatus: "SENT", ...(providerId ? { externalId: `${openedConversation.channel}:${providerId}` } : {})
-          }, include: { author: { select: { id: true, name: true } } });
+          }, include: { author: { select: { id: true, name: true } } } });
           const sentAt = sent.createdAt;
           await prisma.conversation.update({ where: { id: openedConversation.id }, data: {
             lastMessageAt: sentAt, lastAgentResponseAt: sentAt, firstResponseAt: openedConversation.firstResponseAt || sentAt,
