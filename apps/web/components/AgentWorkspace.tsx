@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Archive, ArrowDown, ArrowLeft, Ban, Bell, BellOff, BookUser, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, Forward, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, Paperclip, Pencil, Phone, PhoneCall, Pin, Printer, Reply as ReplyIcon, Search, Send, Star, Trash2, UserPlus, UserRound, Users, X } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, Ban, Bell, BellOff, BookUser, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, Forward, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, Paperclip, Pencil, Phone, PhoneCall, Pin, Printer, Reply as ReplyIcon, Search, Send, Star, Trash2, UserRound, Users, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
-import { displayPhoneNumber, normalizePhoneNumber, phoneNumbersMatch } from "@/lib/egyptianPhoneFormatter";
+import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
 import AccountSettingsModal from "./AccountSettingsModal";
 import PushNotificationsButton from "./PushNotificationsButton";
 import InstallAppButton from "./InstallAppButton";
@@ -42,20 +42,10 @@ export default function AgentWorkspace() {
   const [messageFilter, setMessageFilter] = useState("ALL");
   const [chatLoadError, setChatLoadError] = useState("");
   const [search, setSearch] = useState("");
-  const [searchingChats, setSearchingChats] = useState(false);
-  const [startingPhoneChat, setStartingPhoneChat] = useState(false);
   const [chatFontSize, setChatFontSize] = useState(14);
   const [text, setText] = useState("");
   const [showCanned, setShowCanned] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
-  const [showGroupCreator, setShowGroupCreator] = useState(false);
-  const [groupSubject, setGroupSubject] = useState("");
-  const [groupPhones, setGroupPhones] = useState("");
-  const [creatingGroup, setCreatingGroup] = useState(false);
-  const [showGroupMembers, setShowGroupMembers] = useState(false);
-  const [groupData, setGroupData] = useState<AnyRecord | null>(null);
-  const [groupMemberPhone, setGroupMemberPhone] = useState("");
-  const [groupActionBusy, setGroupActionBusy] = useState(false);
   const [contactQuery, setContactQuery] = useState("");
   const [contactResults, setContactResults] = useState<AnyRecord[]>([]);
   const [loadingContacts, setLoadingContacts] = useState(false);
@@ -73,11 +63,10 @@ export default function AgentWorkspace() {
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [internalNote, setInternalNote] = useState("");
-  const [privateNoteText, setPrivateNoteText] = useState("");
-  const [privateNoteRecipientId, setPrivateNoteRecipientId] = useState("");
-  const [privateNoteRecipients, setPrivateNoteRecipients] = useState<AnyRecord[]>([]);
-  const [sendingPrivateNote, setSendingPrivateNote] = useState(false);
-  const [showPrivateNoteComposer, setShowPrivateNoteComposer] = useState(false);
+  const [secretNote, setSecretNote] = useState("");
+  const [secretNoteRecipients, setSecretNoteRecipients] = useState<AnyRecord[]>([]);
+  const [secretNoteRecipientId, setSecretNoteRecipientId] = useState("");
+  const [sendingSecretNote, setSendingSecretNote] = useState(false);
   const [replyingTo, setReplyingTo] = useState<AnyRecord | null>(null);
   const [editingMessageId, setEditingMessageId] = useState("");
   const [editingText, setEditingText] = useState("");
@@ -96,9 +85,6 @@ export default function AgentWorkspace() {
   const [loadingMoreChats, setLoadingMoreChats] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState("");
-  const [imageEditor, setImageEditor] = useState<{ file: File; url: string } | null>(null);
-  const [annotationColor, setAnnotationColor] = useState("#d32f2f");
-  const [annotationSize, setAnnotationSize] = useState(7);
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -126,13 +112,8 @@ export default function AgentWorkspace() {
   const historyModeRef = useRef(false);
   historyModeRef.current = statusFilter === "HISTORY";
   const teamModeRef = useRef(false);
-  teamModeRef.current = statusFilter === "TEAM" || statusFilter === "GROUPS";
-  const groupModeRef = useRef(false);
-  groupModeRef.current = statusFilter === "GROUPS";
+  teamModeRef.current = statusFilter === "TEAM";
   const chatScopeRef = useRef("OWN");
-  const searchRef = useRef(search);
-  searchRef.current = search;
-  const loadedSearchRef = useRef("");
   const loadedExtraChatsRef = useRef(false);
   const socketRef = useRef<Socket | null>(null);
   const activeIdRef = useRef("");
@@ -140,12 +121,6 @@ export default function AgentWorkspace() {
   const messageEndRef = useRef<HTMLDivElement>(null);
   const headerOptionsRef = useRef<HTMLDivElement>(null);
   const replyInputRef = useRef<HTMLTextAreaElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const imageCanvasRef = useRef<HTMLCanvasElement>(null);
-  const imageEditorImageRef = useRef<HTMLImageElement | null>(null);
-  const imageEditorResolverRef = useRef<((file: File | null) => void) | null>(null);
-  const imageEditorDrawingRef = useRef(false);
-  const imageEditorPointRef = useRef<{ x: number; y: number } | null>(null);
   const stickToBottom = useRef(true);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -153,38 +128,16 @@ export default function AgentWorkspace() {
   const recordingStartedAtRef = useRef(0);
   const [order, setOrder] = useState({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" });
 
-  useEffect(() => {
-    const conversationId = detail?.id;
-    setPrivateNoteRecipients([]);
-    setPrivateNoteRecipientId("");
-    setPrivateNoteText("");
-    setShowPrivateNoteComposer(false);
-    if (!conversationId || !detail.canSendPrivateNote) return;
-    let current = true;
-    void api(`/api/conversations/${conversationId}/private-note-recipients`).then((recipients: AnyRecord[]) => {
-      if (!current) return;
-      setPrivateNoteRecipients(recipients);
-      setPrivateNoteRecipientId((selected) => recipients.some((recipient) => recipient.id === selected) ? selected : recipients[0]?.id || "");
-    }).catch(() => { if (current) setPrivateNoteRecipients([]); });
-    return () => { current = false; };
-  }, [detail?.id, detail?.canSendPrivateNote]);
-
-  async function loadChats(history = historyModeRef.current, team = teamModeRef.current, query = searchRef.current, groups = groupModeRef.current) {
-    const trimmedQuery = query.trim();
-    const listGroups = groups && !trimmedQuery;
-    const scope = trimmedQuery ? "SEARCH" : listGroups ? "GROUPS" : team ? "TEAM" : history ? "HISTORY" : "OWN";
+  async function loadChats(history = historyModeRef.current, team = teamModeRef.current) {
+    const scope = team ? "TEAM" : history ? "HISTORY" : "OWN";
     const request = ++chatLoadRequest.current;
-    if (trimmedQuery !== loadedSearchRef.current || chatScopeRef.current !== scope) loadedExtraChatsRef.current = false;
-    loadedSearchRef.current = trimmedQuery;
-    chatScopeRef.current = scope;
     try {
       const params = new URLSearchParams({ limit: "50" });
-      if (trimmedQuery) { params.set("q", trimmedQuery); params.set("team", "1"); }
-      else if (team || groups) params.set("team", "1");
+      if (team) params.set("team", "1");
       else if (history) params.set("history", "1");
-      const page = listGroups ? await api("/api/whatsapp/groups") : await api(`/api/conversations?${params}`);
+      const page = await api(`/api/conversations?${params}`);
       if (request === chatLoadRequest.current && scope === chatScopeRef.current) {
-        const fresh = Array.isArray(page) ? page : page.items || [];
+        const fresh = page.items || [];
         setConversations((current) => {
           const refreshed = chatScopeRef.current === scope && loadedExtraChatsRef.current
             ? [...fresh, ...current.filter((item: AnyRecord) => !fresh.some((next: AnyRecord) => next.id === item.id))]
@@ -194,8 +147,8 @@ export default function AgentWorkspace() {
           return sorted;
         });
         chatScopeRef.current = scope;
-        setChatCursor(Array.isArray(page) ? null : page.nextCursor || null); setHasMoreChats(Array.isArray(page) ? false : Boolean(page.hasMore)); setChatLoadError("");
-        if (Array.isArray(page) || !page.hasMore) loadedExtraChatsRef.current = false;
+        setChatCursor(page.nextCursor || null); setHasMoreChats(Boolean(page.hasMore)); setChatLoadError("");
+        if (!page.hasMore) loadedExtraChatsRef.current = false;
       }
       return page;
     } catch (error) {
@@ -211,7 +164,6 @@ export default function AgentWorkspace() {
     try {
       const params = new URLSearchParams({ limit: "50", cursor: chatCursor });
       if (scope === "TEAM") params.set("team", "1");
-      else if (scope === "SEARCH") { params.set("q", searchRef.current.trim()); params.set("team", "1"); }
       else if (scope === "HISTORY") params.set("history", "1");
       const page = await api(`/api/conversations?${params}`);
       if (request !== chatLoadRequest.current || scope !== chatScopeRef.current) return;
@@ -228,9 +180,8 @@ export default function AgentWorkspace() {
   }
   function selectStatusFilter(next: string) {
     const history = next === "HISTORY";
-    const groups = next === "GROUPS";
-    const team = next === "TEAM" || groups;
-    const scope = searchRef.current.trim() ? "SEARCH" : groups ? "GROUPS" : team ? "TEAM" : history ? "HISTORY" : "OWN";
+    const team = next === "TEAM";
+    const scope = team ? "TEAM" : history ? "HISTORY" : "OWN";
     setStatusFilter(next);
     if (scope !== chatScopeRef.current || history || team) {
       historyModeRef.current = history;
@@ -241,7 +192,7 @@ export default function AgentWorkspace() {
       setConversations([]);
       setChatCursor(null);
       setHasMoreChats(false);
-      void loadChats(history, team, searchRef.current, groups);
+      void loadChats(history, team);
     }
   }
   async function openChat(id: string) {
@@ -249,7 +200,7 @@ export default function AgentWorkspace() {
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" }); setSelectedProductIds([]); }
     const request = ++detailRequest.current;
-    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setShowMobileProfile(false); setShowHeaderOptions(false); setActiveId(id); setDetail(null); setNotice("");
+    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setShowMobileProfile(false); setShowHeaderOptions(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote(""); setSecretNoteRecipients([]); setSecretNoteRecipientId("");
     socketRef.current?.emit("conversation:join", id);
     try {
       const conversation = await api(`/api/conversations/${id}?messageLimit=50`);
@@ -257,6 +208,11 @@ export default function AgentWorkspace() {
         const queuedMessages = loadingMessagesRef.current.get(id) || [];
         loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
         setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) }); setSavedOrder(null);
+        void api(`/api/conversations/${id}/secret-note-recipients`).then((result) => {
+          if (request !== detailRequest.current) return;
+          setSecretNoteRecipients(result.recipients || []);
+          setSecretNoteRecipientId(result.defaultRecipientId || "");
+        }).catch(() => {});
       }
     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
@@ -268,50 +224,6 @@ export default function AgentWorkspace() {
       await openChat(result.conversationId);
       void loadChats();
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر فتح محادثة WhatsApp لهذا العميل"); }
-  }
-  async function startChatByPhone(phone: string) {
-    if (startingPhoneChat) return;
-    if (user?.canReceiveWhatsApp === false) { setNotice("حسابك غير مخصص لاستقبال محادثات WhatsApp."); return; }
-    setStartingPhoneChat(true);
-    try {
-      const result = await api<{ conversationId: string }>("/api/whatsapp/conversations/by-phone", { method: "POST", body: JSON.stringify({ phone }) });
-      setSearch(""); searchRef.current = "";
-      await loadChats(false, true, "", false);
-      await openChat(result.conversationId);
-    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر بدء محادثة WhatsApp لهذا الرقم"); }
-    finally { setStartingPhoneChat(false); }
-  }
-  async function createWhatsAppGroup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (creatingGroup) return;
-    const participants = groupPhones.split(/[\n,;،]+/).map((phone) => phone.trim()).filter(Boolean);
-    setCreatingGroup(true);
-    try {
-      const result = await api<{ conversationId: string }>("/api/whatsapp/groups", { method: "POST", body: JSON.stringify({ subject: groupSubject, participants }) });
-      setShowGroupCreator(false); setGroupSubject(""); setGroupPhones("");
-      setSearch(""); searchRef.current = "";
-      selectStatusFilter("GROUPS");
-      await openChat(result.conversationId);
-      setNotice("تم إنشاء مجموعة WhatsApp وفتح محادثتها.");
-    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إنشاء مجموعة WhatsApp"); }
-    finally { setCreatingGroup(false); }
-  }
-  async function openGroupMembers() {
-    if (!detail?.externalConversationId) return;
-    try {
-      const group = await api(`/api/whatsapp/groups/${encodeURIComponent(detail.externalConversationId)}`);
-      setGroupData(group); setGroupMemberPhone(""); setShowGroupMembers(true);
-    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحميل أعضاء المجموعة"); }
-  }
-  async function updateGroupParticipants(action: "add" | "remove" | "promote" | "demote", participants: string[]) {
-    if (!detail?.externalConversationId || groupActionBusy) return;
-    setGroupActionBusy(true);
-    try {
-      const group = await api(`/api/whatsapp/groups/${encodeURIComponent(detail.externalConversationId)}/participants`, { method: "PATCH", body: JSON.stringify({ action, participants }) });
-      setGroupData(group); setGroupMemberPhone("");
-      setNotice(action === "add" ? "تمت إضافة العضو." : action === "remove" ? "تمت إزالة العضو." : "تم تحديث صلاحية العضو.");
-    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث أعضاء المجموعة"); }
-    finally { setGroupActionBusy(false); }
   }
   async function saveCustomerProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -439,20 +351,19 @@ export default function AgentWorkspace() {
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ الملاحظة الداخلية"); }
   }
 
-  async function sendPrivateConversationNote(event: FormEvent<HTMLFormElement>) {
+  async function sendSecretNote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const conversationId = activeId;
-    const noteText = privateNoteText.trim();
-    if (!conversationId || !privateNoteRecipientId || !noteText || sendingPrivateNote) return;
-    const recipientName = privateNoteRecipients.find((recipient) => recipient.id === privateNoteRecipientId)?.name || "الزميل";
-    setSendingPrivateNote(true);
+    const noteText = secretNote.trim();
+    if (!conversationId || !noteText || !secretNoteRecipientId || sendingSecretNote) return;
+    setSendingSecretNote(true);
     try {
-      const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ recipientId: privateNoteRecipientId, text: noteText }) });
-      setDetail((old: AnyRecord) => old?.id === conversationId && !old.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...old, privateNotes: [...(old.privateNotes || []), note] } : old);
-      setPrivateNoteText("");
-      setNotice(`أُرسلت الرسالة السرية إلى ${recipientName}.`);
+      const note = await api(`/api/conversations/${conversationId}/secret-notes`, { method: "POST", body: JSON.stringify({ text: noteText, recipientId: secretNoteRecipientId }) });
+      setDetail((current: AnyRecord) => current?.id === conversationId && !current.internalNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...current, internalNotes: [...(current.internalNotes || []), note] } : current);
+      setSecretNote("");
+      setNotice(`تم إرسال رسالة سرية إلى ${note.recipient?.name || "الزميل"}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال الرسالة السرية"); }
-    finally { setSendingPrivateNote(false); }
+    finally { setSendingSecretNote(false); }
   }
 
   async function reactToMessage(message: AnyRecord, emoji: string) {
@@ -543,19 +454,6 @@ export default function AgentWorkspace() {
       connection.on("conversation-note:new", (event) => {
         if (event.conversationId) setDetail((old: AnyRecord) => old?.id === event.conversationId && !old.internalNotes?.some((note: AnyRecord) => note.id === event.note.id) ? { ...old, internalNotes: [...(old.internalNotes || []), event.note] } : old);
       });
-      connection.on("conversation-private-note:new", (event) => {
-        const note = event.note;
-        if (!event.conversationId || !note) return;
-        setDetail((old: AnyRecord) => old?.id === event.conversationId && !old.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...old, privateNotes: [...(old.privateNotes || []), note] } : old);
-        if (note.recipientId === profile.id && activeIdRef.current !== event.conversationId) {
-          const chat = conversationsRef.current.find((item) => item.id === event.conversationId);
-          playIncomingMessageTone();
-          setIncomingNotice({ isPrivateNote: true, conversationId: event.conversationId, customerName: event.customerName || customerDisplayName(chat?.customer), channel: event.channel || chat?.channel, authorName: note.author?.name, preview: note.text });
-        }
-      });
-      connection.on("whatsapp:group-updated", (event) => {
-        if (event.conversationId) setGroupData((old: AnyRecord) => old?.id === event.group?.id ? event.group : old);
-      });
       connection.on("customer:tags-updated", (event) => {
         setDetail((old: AnyRecord) => old?.customer?.id === event.customerId ? { ...old, customer: { ...old.customer, tags: event.tags } } : old);
         void loadChats();
@@ -628,15 +526,6 @@ export default function AgentWorkspace() {
         }
         if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: event.customer || old.customer } : old);
       });
-      connection.on("whatsapp:history-synced", ({ conversationIds }: { conversationIds?: string[] }) => {
-        void loadChats();
-        const conversationId = activeIdRef.current;
-        if (conversationId && conversationIds?.includes(conversationId)) {
-          void api(`/api/conversations/${conversationId}?messageLimit=50`).then((conversation) => {
-            setDetail((current: AnyRecord) => current?.id === conversationId ? conversation : current);
-          }).catch(() => {});
-        }
-      });
       connection.on("conversation:access-revoked", ({ conversationId }) => {
         if (activeIdRef.current === conversationId) {
           ++detailRequest.current;
@@ -656,7 +545,14 @@ export default function AgentWorkspace() {
         void loadChats();
       });
       connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
-       connection.on("whisper:new", (note) => { setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old); setNotice("أرسل المدير توجيهًا سريًا جديدًا"); });
+        connection.on("whisper:new", (note) => { setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old); setNotice("أرسل المدير توجيهًا سريًا جديدًا"); });
+        connection.on("conversation:secret-note:new", (event) => {
+          setDetail((old: AnyRecord) => old?.id === event.conversationId && !old.internalNotes?.some((item: AnyRecord) => item.id === event.note.id) ? { ...old, internalNotes: [...(old.internalNotes || []), event.note] } : old);
+          if (event.recipientId === profile.id && event.note.authorId !== profile.id) {
+            setIncomingNotice({ isSecretNote: true, conversationId: event.conversationId, customerName: event.note.author?.name || "زميل", preview: `رسالة سرية: ${event.note.text}`, createdAt: event.note.createdAt });
+            playIncomingMessageTone();
+          }
+        });
       connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
       connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
       connection.on("admin:viewing", (event) => setWatching(Boolean(event.viewing)));
@@ -716,27 +612,6 @@ export default function AgentWorkspace() {
   }, [showContacts, contactQuery]);
 
   useEffect(() => {
-    if (!search.trim()) {
-      setSearchingChats(false);
-      if (chatScopeRef.current === "SEARCH") void loadChats();
-      return;
-    }
-    if (loadedSearchRef.current !== search.trim()) {
-      conversationsRef.current = [];
-      setConversations([]);
-      loadedExtraChatsRef.current = false;
-      setChatCursor(null);
-      setHasMoreChats(false);
-    }
-    let current = true;
-    setSearchingChats(true);
-    const timer = window.setTimeout(() => {
-      void loadChats(false, true, search, false).finally(() => { if (current) setSearchingChats(false); });
-    }, 250);
-    return () => { current = false; window.clearTimeout(timer); };
-  }, [search]);
-
-  useEffect(() => {
     const saved = Number(localStorage.getItem("bondoq_chat_font_size"));
     if (Number.isFinite(saved) && saved >= 12 && saved <= 20) setChatFontSize(saved);
   }, []);
@@ -747,22 +622,6 @@ export default function AgentWorkspace() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [lightboxImage]);
-
-  useEffect(() => {
-    if (!imageEditor) return;
-    const image = new Image();
-    image.onload = () => {
-      const canvas = imageCanvasRef.current;
-      const context = canvas?.getContext("2d");
-      if (!canvas || !context) return;
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      context.drawImage(image, 0, 0);
-      imageEditorImageRef.current = image;
-    };
-    image.src = imageEditor.url;
-    return () => { imageEditorImageRef.current = null; };
-  }, [imageEditor?.url]);
 
   useEffect(() => {
     if (!showHeaderOptions) return;
@@ -821,7 +680,7 @@ export default function AgentWorkspace() {
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
 
   useEffect(() => {
-    if (statusFilter !== "TEAM" && statusFilter !== "GROUPS") return;
+    if (statusFilter !== "TEAM") return;
     const timer = window.setInterval(() => void loadChats(false, true), 20_000);
     return () => window.clearInterval(timer);
   }, [statusFilter]);
@@ -840,8 +699,7 @@ export default function AgentWorkspace() {
     || messageFilter === "LINKS" && hasMessageTextLinks(message.text));
   const lastInboundAt = detail?.lastInboundAt || latestInbound?.createdAt;
   const metaChannel = detail?.channel === "MESSENGER";
-  const isGroupConversation = Boolean(detail?.externalConversationId?.endsWith("@g.us"));
-  const callTarget = isGroupConversation ? "" : detail?.customer?.phone || detail?.externalCustomerId || "";
+  const callTarget = detail?.customer?.phone || detail?.externalCustomerId || "";
   const windowRemaining = lastInboundAt ? new Date(lastInboundAt).getTime() + 24 * 60 * 60 * 1000 - now : 0;
   const metaWindowOpen = !metaChannel || windowRemaining > 0;
   const messagingEnabled = metaWindowOpen && !detail?.customer?.isBlocked;
@@ -935,86 +793,7 @@ export default function AgentWorkspace() {
     }
   }
   async function uploadSelectedFiles(files: File[]) {
-    for (const file of files) {
-      const prepared = file.type.startsWith("image/") ? await editImageBeforeSend(file) : file;
-      if (prepared) await uploadAndSend(prepared);
-    }
-  }
-  function editImageBeforeSend(file: File): Promise<File | null> {
-    return new Promise((resolve) => {
-      imageEditorResolverRef.current = resolve;
-      setImageEditor({ file, url: URL.createObjectURL(file) });
-    });
-  }
-  function finishImageEditor(save: boolean) {
-    const editor = imageEditor;
-    const resolve = imageEditorResolverRef.current;
-    if (!editor || !resolve) return;
-    imageEditorResolverRef.current = null;
-    setImageEditor(null);
-    imageEditorDrawingRef.current = false;
-    if (!save) {
-      resolve(null);
-      URL.revokeObjectURL(editor.url);
-      return;
-    }
-    const canvas = imageCanvasRef.current;
-    if (!canvas) {
-      resolve(editor.file);
-      URL.revokeObjectURL(editor.url);
-      return;
-    }
-    canvas.toBlob((blob) => {
-      if (!blob) { resolve(editor.file); URL.revokeObjectURL(editor.url); return; }
-      const extension = blob.type === "image/jpeg" ? "jpg" : blob.type === "image/webp" ? "webp" : "png";
-      const name = `${editor.file.name.replace(/\.[^.]+$/, "")}-annotated.${extension}`;
-      resolve(new File([blob], name, { type: blob.type }));
-      URL.revokeObjectURL(editor.url);
-    }, editor.file.type);
-  }
-  function imageEditorPosition(event: ReactPointerEvent<HTMLCanvasElement>) {
-    const canvas = imageCanvasRef.current;
-    const bounds = canvas?.getBoundingClientRect();
-    if (!canvas || !bounds) return null;
-    return { x: (event.clientX - bounds.left) * canvas.width / bounds.width, y: (event.clientY - bounds.top) * canvas.height / bounds.height };
-  }
-  function beginImageAnnotation(event: ReactPointerEvent<HTMLCanvasElement>) {
-    const canvas = event.currentTarget;
-    const context = canvas.getContext("2d");
-    const point = imageEditorPosition(event);
-    if (!context || !point) return;
-    event.preventDefault();
-    canvas.setPointerCapture(event.pointerId);
-    imageEditorDrawingRef.current = true;
-    imageEditorPointRef.current = point;
-    context.strokeStyle = annotationColor;
-    context.lineWidth = annotationSize * (canvas.width / Math.max(1, canvas.clientWidth));
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    context.beginPath();
-    context.arc(point.x, point.y, context.lineWidth / 2, 0, Math.PI * 2);
-    context.stroke();
-  }
-  function drawImageAnnotation(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!imageEditorDrawingRef.current) return;
-    const canvas = event.currentTarget;
-    const context = canvas.getContext("2d");
-    const point = imageEditorPosition(event);
-    const previous = imageEditorPointRef.current;
-    if (!context || !point || !previous) return;
-    context.strokeStyle = annotationColor;
-    context.lineWidth = annotationSize * (canvas.width / Math.max(1, canvas.clientWidth));
-    context.beginPath();
-    context.moveTo(previous.x, previous.y);
-    context.lineTo(point.x, point.y);
-    context.stroke();
-    imageEditorPointRef.current = point;
-  }
-  function clearImageAnnotations() {
-    const canvas = imageCanvasRef.current;
-    const context = canvas?.getContext("2d");
-    const image = imageEditorImageRef.current;
-    if (canvas && context && image) { context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(image, 0, 0); }
+    for (const file of files) await uploadAndSend(file);
   }
    async function startRecording() {
       if (recorderRef.current || !activeId || sendingRef.current) return;
@@ -1131,16 +910,9 @@ export default function AgentWorkspace() {
   async function logout() { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* clear the local session even if the API is unreachable */ } socket?.disconnect(); localStorage.removeItem("bondoq_token"); router.replace("/login"); }
 
   const visible = conversations.filter((chat) => {
-    const isGroup = chat.externalConversationId?.endsWith("@g.us");
-    const statusMatches = search.trim() ? statusFilter !== "GROUPS" || isGroup
-      : statusFilter === "GROUPS" ? isGroup
-        : statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
-    return statusMatches && (filter === "ALL" || chat.channel === filter);
+    const statusMatches = statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
+    return statusMatches && (filter === "ALL" || chat.channel === filter) && `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase());
   });
-  let unsavedPhone = "";
-  try { if (search.trim()) unsavedPhone = normalizePhoneNumber(search.trim()); } catch {}
-  const hasPhoneConversation = Boolean(unsavedPhone && visible.some((chat) => [chat.customer?.phone, chat.externalCustomerId, chat.externalConversationId]
-    .some((value) => typeof value === "string" && phoneNumbersMatch(value, unsavedPhone))));
   const availableChannels = user
     ? channels.filter((item) => {
       if (item.id === "ALL") return true;
@@ -1150,54 +922,8 @@ export default function AgentWorkspace() {
       return false;
     })
     : channels.filter((item) => item.id === "ALL");
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target;
-      const typing = target instanceof HTMLElement && (target.matches("input, textarea, select") || target.isContentEditable);
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-        return;
-      }
-      if (event.key === "Escape" && imageEditor) {
-        finishImageEditor(false);
-        return;
-      }
-      if (event.key === "Escape" && editingMessageId) {
-        setEditingMessageId("");
-        setEditingText("");
-        return;
-      }
-      if (event.key === "Enter" && !event.shiftKey && target instanceof HTMLTextAreaElement && target.closest(".agent-message-bubble") && editingMessageId) {
-        event.preventDefault();
-        const message = detail?.messages?.find((item: AnyRecord) => item.id === editingMessageId);
-        if (message) void saveMessageEdit(message);
-        return;
-      }
-      if (typing || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
-      if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && visible.length) {
-        event.preventDefault();
-        const current = visible.findIndex((chat) => chat.id === activeId);
-        const next = current < 0 ? 0 : (current + (event.key === "ArrowDown" ? 1 : -1) + visible.length) % visible.length;
-        void openChat(visible[next].id);
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [activeId, detail, editingMessageId, imageEditor, visible]);
   const filteredCanned = [...agentQuickReplies, ...canned].filter((item) => !text.startsWith("/") || item.shortcut.toLowerCase().includes(text.toLowerCase()) || item.title.includes(text.slice(1)));
   const visibleProducts = products.filter((product) => (productFilter === "ALL" || product.category === productFilter) && `${product.name || ""} ${product.sku || ""}`.toLocaleLowerCase().includes(productSearch.trim().toLocaleLowerCase()));
-  const privateNoteComposer = detail?.canSendPrivateNote && <form onSubmit={sendPrivateConversationNote} className="space-y-2 rounded-xl border border-violet-200 bg-violet-50/80 p-3 text-right">
-    <label className="block text-[10px] font-bold text-violet-950">إلى زميل العمل
-      <select required value={privateNoteRecipientId} onChange={(event) => setPrivateNoteRecipientId(event.target.value)} disabled={!privateNoteRecipients.length || sendingPrivateNote} className="mt-1 h-9 w-full rounded-lg border border-violet-200 bg-white px-2 text-xs font-normal outline-none focus:border-violet-400 disabled:bg-violet-50">
-        <option value="">{privateNoteRecipients.length ? "اختر الزميل" : "لا يوجد زملاء ضمن صلاحية هذه المحادثة"}</option>
-        {privateNoteRecipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.branch?.name ? ` · ${recipient.branch.name}` : ""}</option>)}
-      </select>
-    </label>
-    <textarea value={privateNoteText} onChange={(event) => setPrivateNoteText(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." className="w-full resize-y rounded-lg border border-violet-200 bg-white px-2 py-2 text-xs leading-5 outline-none focus:border-violet-400" />
-    <div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1 text-[9px] text-violet-700"><LockKeyhole size={12} /> يراها أنت والزميل والإدارة المخوّلة فقط</span><button disabled={sendingPrivateNote || !privateNoteRecipientId || !privateNoteText.trim()} className="flex h-9 items-center gap-1.5 rounded-lg bg-violet-800 px-3 text-[10px] font-bold text-white hover:bg-violet-900 disabled:opacity-40"><Send size={13} />{sendingPrivateNote ? "جارٍ الإرسال..." : "إرسال سرّي"}</button></div>
-  </form>;
 
   return <main style={{ "--chat-font-size": `${chatFontSize}px` } as CSSProperties} className="agent-app h-screen min-h-[700px] overflow-hidden bg-[#f0f2f5] text-stone-800">
     <header className="flex h-[68px] items-center justify-between border-b border-stone-200 bg-white px-4 sm:px-6">
@@ -1206,18 +932,16 @@ export default function AgentWorkspace() {
     </header>
 
       {incomingHandoffs.length > 0 && <div className="fixed left-3 right-3 top-[76px] z-[60] ml-auto max-h-[60vh] max-w-sm space-y-2 overflow-y-auto sm:left-auto sm:right-6">{incomingHandoffs.slice(0, 4).map((request) => <article key={request.conversationId} role="status" className="rounded-2xl border border-amber-200 bg-white p-4 shadow-xl"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-xs font-extrabold text-amber-900">طلب استلام محادثة</p><p className="mt-1 truncate text-xs font-bold text-stone-700">{request.conversation?.customer?.displayName || request.conversation?.customer?.name || "عميل"}</p><p className="mt-1 text-[10px] text-stone-500">حوّلها إليك {request.fromAgent?.name || "زميل"}. اقبل لتصبح مسؤولًا عنها أو ارفض لتبقى لدى زميلك.</p></div><button type="button" onClick={() => setIncomingHandoffs((current) => current.filter((item) => item.conversationId !== request.conversationId))} aria-label="إخفاء طلب التحويل" className="rounded-md p-1 text-stone-400 hover:bg-stone-100">×</button></div><div className="mt-3 flex gap-2"><button type="button" disabled={handoffResponseBusyId === request.conversationId} onClick={() => void respondToHandoff(request, "DECLINE")} className="min-h-9 flex-1 rounded-lg border border-stone-200 px-3 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">رفض</button><button type="button" disabled={handoffResponseBusyId === request.conversationId} onClick={() => void respondToHandoff(request, "ACCEPT")} className="min-h-9 flex-1 rounded-lg bg-emerald-700 px-3 text-[10px] font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{handoffResponseBusyId === request.conversationId ? "جارٍ الرد..." : "قبول واستلام"}</button></div></article>)}</div>}
-        {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isPrivateNote ? `رسالة سرية من ${incomingNotice.authorName || "زميل"}` : incomingNotice.isAutoReassignment ? "محادثة أُعيد إسنادها إليك" : incomingNotice.isAdminReassignment ? "تم سحب المحادثة بواسطة الإدارة" : incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : incomingNotice.isPrivateNote ? `محادثة مع ${incomingNotice.customerName}` : "إشعار من المدير"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
+       {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isAutoReassignment ? "محادثة أُعيد إسنادها إليك" : incomingNotice.isAdminReassignment ? "تم سحب المحادثة بواسطة الإدارة" : incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "إشعار من المدير"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
 
     <section data-chat-open={Boolean(activeId)} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
        <aside className="workspace-list panel flex min-h-0 flex-col overflow-hidden">
-             <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{search.trim() ? `نتائج البحث · ${conversations.length}` : statusFilter === "GROUPS" ? `${conversations.length} مجموعة WhatsApp` : statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input ref={searchInputRef} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف..." className="w-full bg-transparent text-xs outline-none" /></label>
+           <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="بحث عن عميل..." className="w-full bg-transparent text-xs outline-none" /></label>
             <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
-              <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "GROUPS", label: "الجروبات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
-              {statusFilter === "GROUPS" && <button type="button" onClick={() => { setGroupSubject(""); setGroupPhones(""); setShowGroupCreator(true); }} className="mb-3 flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#e7f5ed] text-xs font-bold text-[#187a4a] hover:bg-[#d6eddf]"><UserPlus size={15} /> إنشاء مجموعة WhatsApp</button>}
+              <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
           </div>
           {chatLoadError && <div role="alert" className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-[10px] text-red-800"><span>{chatLoadError}</span><button type="button" onClick={() => void loadChats()} className="shrink-0 font-bold underline">إعادة المحاولة</button></div>}
-            <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{(statusFilter === "TEAM" || statusFilter === "GROUPS") && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.externalConversationId?.endsWith("@g.us") ? "مجموعة WhatsApp" : chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · يمكنك الرد"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-8 text-center text-xs text-stone-400">{searchingChats ? "جارٍ البحث في المحادثات القديمة..." : search.trim() ? "لا توجد محادثة مطابقة." : "لا توجد محادثات هنا بعد."}{unsavedPhone && !hasPhoneConversation && !searchingChats && <button type="button" onClick={() => void startChatByPhone(unsavedPhone)} className="mt-3 block w-full rounded-xl bg-emerald-700 px-3 py-2.5 text-[10px] font-bold text-white hover:bg-emerald-800">بدء محادثة WhatsApp مع +{unsavedPhone}</button>}</div>}</div>
-        {unsavedPhone && !hasPhoneConversation && user?.canReceiveWhatsApp !== false && <div className="mx-3 my-2 rounded-xl border border-emerald-100 bg-emerald-50/70 p-3"><p className="mb-2 text-center text-[10px] leading-5 text-emerald-900">لا تظهر محادثة لهذا الرقم: <b dir="ltr">+{unsavedPhone}</b></p><button type="button" onClick={() => void startChatByPhone(unsavedPhone)} disabled={startingPhoneChat || searchingChats} className="w-full rounded-lg bg-emerald-700 px-3 py-2.5 text-[10px] font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{startingPhoneChat ? "جارٍ فتح المحادثة..." : "فتح أو بدء محادثة WhatsApp"}</button></div>}
+           <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</div>
         {hasMoreChats && <button type="button" onClick={() => void loadMoreChats()} disabled={loadingMoreChats} className="m-3 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">{loadingMoreChats ? "جارٍ تحميل المزيد..." : "تحميل المزيد من المحادثات"}</button>}
         <div className="space-y-2 border-t border-stone-100 px-4 py-3 text-[10px] text-stone-400"><div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متصل بالنظام</span><span className="truncate">{user?.email}</span></div><div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-2"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">واتساب</a></div></div>
       </aside>
@@ -1230,37 +954,37 @@ export default function AgentWorkspace() {
              <fieldset disabled={Boolean(detail.readOnly)} className="contents">
             <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-stone-100 bg-white px-4"><div className="flex min-w-0 items-center gap-3"><Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} /><div className="min-w-0"><h2 className="truncate text-sm font-extrabold">{customerDisplayName(detail.customer)} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</h2><div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</div></div></div><div className="flex items-center gap-1"><button type="button" onClick={() => void toggleFavorite()} title={favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"} aria-label={favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"} className={`grid h-9 w-9 place-items-center rounded-lg ${favoriteIds.includes(activeId) ? "text-amber-500 hover:bg-amber-50" : "text-stone-400 hover:bg-stone-100"}`}><Star size={17} fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /></button><button onClick={() => api(`/api/conversations/${activeId}/status`, { method: "PATCH", body: JSON.stringify({ status: "PENDING" }) }).then(() => setNotice("تم تأجيل المحادثة للمتابعة لاحقًا."))} title="تأجيل" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><Clock3 size={17} /></button><button onClick={resolveConversation} title="تم الحل وإرسال استبيان الرضا" className="grid h-9 w-9 place-items-center rounded-lg text-emerald-600 hover:bg-emerald-50"><CheckCircle2 size={17} /></button><button onClick={closeConversation} title="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-emerald-50 hover:text-emerald-700"><Archive size={17} /></button><div ref={headerOptionsRef} className="relative"><button type="button" title="خيارات" aria-label="خيارات المحادثة" aria-haspopup="menu" aria-expanded={showHeaderOptions} onClick={() => setShowHeaderOptions((open) => !open)} className={`grid h-9 w-9 place-items-center rounded-lg ${showHeaderOptions ? "bg-stone-100 text-stone-700" : "text-stone-400 hover:bg-stone-100"}`}><MoreHorizontal size={18} /></button>{showHeaderOptions && <div role="menu" aria-label="خيارات المحادثة" className="absolute left-0 top-full z-50 mt-2 w-60 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">{detail.channel === "WHATSAPP" && <button type="button" role="menuitem" disabled={!callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : undefined} onClick={() => { setShowHeaderOptions(false); setCallConversation(detail); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><PhoneCall size={16} className="shrink-0" /><span className="min-w-0"><span className="block text-xs font-extrabold">مكالمة WhatsApp داخل النظام</span><span className="mt-0.5 block text-[10px] text-stone-500">{callConversation ? "أنه المكالمة الحالية أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : callTarget ? "بدء مكالمة من شاشة المحادثة" : "أضف رقمًا إلى ملف العميل أولًا"}</span></span></button>}<button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); setShowMobileProfile(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><BookUser size={16} className="shrink-0 text-stone-400" /><span className="text-xs font-bold">ملف العميل وبياناته</span></button><button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void toggleFavorite(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Star size={16} className="shrink-0 text-amber-500" fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /><span className="text-xs font-bold">{favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"}</span></button></div>}</div></div></div>
               {!detail.readOnly && user?.role === "AGENT" && user.department === "CUSTOMER_CARE" && <div className="flex justify-end border-b border-stone-100 bg-white px-4 py-2"><button type="button" onClick={() => void openHandoffDialog()} className="flex items-center gap-1.5 rounded-lg bg-[#fff8e9] px-3 py-2 text-[10px] font-bold text-[#9b7219] hover:bg-amber-100"><Users size={14} /> تحويل لزميل متاح</button></div>}
-              </fieldset>
-              {detail.externalConversationId?.endsWith("@g.us") && <div className="flex shrink-0 items-center justify-between border-b border-emerald-100 bg-emerald-50 px-4 py-2"><span className="text-[10px] font-bold text-emerald-800">محادثة مجموعة WhatsApp · الرد ظاهر لجميع الأعضاء</span><button type="button" onClick={() => void openGroupMembers()} className="rounded-lg bg-white px-3 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100">الأعضاء والإدارة</button></div>}
+             </fieldset>
              {detail.customer?.isBlocked && <div role="status" className="flex shrink-0 items-center gap-2 border-b border-red-100 bg-red-50 px-4 py-2 text-[10px] font-bold text-red-800"><Ban size={14} /> العميل محظور داخل النظام؛ لا يمكن إرسال ردود أو منتجات إليه.</div>}
              <div className="flex shrink-0 justify-end border-b border-stone-100 bg-white px-4 py-1.5"><button type="button" onClick={() => setShowMobileProfile(true)} className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-[10px] font-bold text-[#9b7219] hover:bg-amber-50"><CakeSlice size={13} /> ملف العميل وطلب سريع</button></div>
               {metaChannel && <div className={`flex shrink-0 items-center gap-2 px-4 py-2 text-[10px] font-bold ${!metaWindowOpen ? "bg-red-50 text-red-700" : expiringSoon ? "bg-[#FFC107]/20 text-[#8c650a]" : "bg-emerald-50 text-emerald-700"}`}><Clock3 size={14} />{metaWindowOpen ? `نافذة Meta مفتوحة · متبقي ${formatCountdown(windowRemaining)}` : "انتهت نافذة الـ24 ساعة للرد الحر"}{detail.isComplaint && <span className="mr-auto rounded-full bg-red-100 px-2 py-0.5 text-red-700">شكوى · خدمة العملاء</span>}</div>}
           {watching && <div className="flex h-9 shrink-0 items-center gap-2 border-b border-blue-100 bg-blue-50 px-4 text-[11px] font-semibold text-blue-700"><Users size={14} /> المدير يراقب هذه المحادثة معك الآن</div>}
            {notice && <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-100 bg-amber-50 px-4 py-2 text-[11px] text-amber-900"><span>{notice}</span><button onClick={() => setNotice("")}><span>×</span></button></div>}
-               {detail.readOnly && <div role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[10px] font-bold text-amber-900">للقراءة فقط · لا يمكن الرد على العميل أو تعديل المحادثة</div>}
+              {detail.readOnly && <div role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[10px] font-bold text-amber-900">للقراءة فقط · لا يمكن الرد على العميل أو تعديل المحادثة؛ يمكنك مراسلة زميل سرًا</div>}
              <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-200/70 bg-[#f0f2f5] px-4 text-[10px] text-stone-500"><span>حجم خط الرسائل</span><div className="flex items-center gap-2"><button type="button" aria-label="تصغير خط الرسائل" disabled={chatFontSize <= 12} onClick={() => { const next = Math.max(12, chatFontSize - 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">−</button><b className="min-w-7 text-center">{chatFontSize}</b><button type="button" aria-label="تكبير خط الرسائل" disabled={chatFontSize >= 20} onClick={() => { const next = Math.min(20, chatFontSize + 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">+</button></div><div className="soft-scroll flex max-w-[65%] gap-1 overflow-x-auto">{[{ id: "ALL", label: "الكل" }, { id: "IMAGES", label: "صور" }, { id: "AUDIO", label: "صوت" }, { id: "VIDEO", label: "فيديو" }, { id: "FILES", label: "ملفات" }, { id: "LINKS", label: "روابط" }].map((item) => <button type="button" key={item.id} aria-pressed={messageFilter === item.id} onClick={() => setMessageFilter(item.id)} className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${messageFilter === item.id ? "bg-stone-700 text-white" : "bg-white text-stone-500"}`}>{item.label}</button>)}</div></div>
              <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-7">
               {detail.hasMoreMessages && <button type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlderMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingOlderMessages ? "جارٍ تحميل الرسائل..." : "تحميل الرسائل الأقدم"}</button>}
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
                 {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
              {(detail.whisperNotes || []).map((note: AnyRecord) => <div key={`whisper-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-[#f0d786] bg-[#fff8e1] px-4 py-3 text-xs leading-6 text-[#755916]"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><CakeSlice size={14} /> توجيه سري من {note.author?.name || "المدير"}<span className="mr-auto text-[9px] font-normal text-[#aa8a36]">{ago(note.createdAt)}</span></div>{note.text}</div>)}
-               {(detail.internalNotes || []).map((note: AnyRecord) => <div key={`note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-blue-100 bg-blue-50/80 px-4 py-3 text-xs leading-6 text-blue-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold">ملاحظة داخلية · {note.author?.name || "الفريق"}<span className="mr-auto text-[9px] font-normal text-blue-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
-              {(detail.privateNotes || []).map((note: AnyRecord) => <div key={`private-note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs leading-6 text-violet-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><LockKeyhole size={13} /> رسالة سرية {note.authorId === user?.id ? `إلى ${note.recipient?.name || "زميل"}` : `من ${note.author?.name || "زميل"}`}<span className="mr-auto text-[9px] font-normal text-violet-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
+              {(detail.internalNotes || []).map((note: AnyRecord) => <div key={`note-${note.id}`} className={`mx-auto w-full max-w-xl rounded-xl border px-4 py-3 text-xs leading-6 ${note.recipient ? "border-violet-200 bg-violet-50/80 text-violet-950" : "border-blue-100 bg-blue-50/80 text-blue-950"}`}><div className="mb-1 flex items-center gap-1.5 font-extrabold">{note.recipient ? `رسالة سرية إلى ${note.recipient.name} · ${note.author?.name || "زميل"}` : `ملاحظة داخلية · ${note.author?.name || "الفريق"}`}<span className="mr-auto text-[9px] font-normal opacity-70">{ago(note.createdAt)}</span></div>{note.text}</div>)}
              <div className="mt-auto" /><div ref={messageEndRef} />
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
-            {detail.readOnly ? <div className="shrink-0 border-t border-stone-100 bg-white px-3 py-3 text-center text-xs text-stone-500 sm:px-4"><p className="mb-3">الرد على العميل متاح لمتابع المحادثة فقط، لكن يمكنك مراسلة زميلك سرًا.</p>{privateNoteComposer || <p>لا توجد صلاحية لإرسال رسالة سرية في هذه المحادثة.</p>}</div> : <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
-              {detail.canSendPrivateNote && <div className="mb-3 rounded-xl border border-violet-100 bg-violet-50/50 p-2"><button type="button" onClick={() => setShowPrivateNoteComposer((visible) => !visible)} className="flex w-full items-center gap-2 px-1 py-1 text-right text-[10px] font-bold text-violet-900"><LockKeyhole size={14} />رسالة سرية لزميل<span className="mr-auto text-violet-600">{showPrivateNoteComposer ? "إخفاء" : "كتابة"}</span></button>{showPrivateNoteComposer && <div className="pt-2">{privateNoteComposer}</div>}</div>}
-              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
+            <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
+              <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={secretNoteRecipients} recipientId={secretNoteRecipientId} onRecipientChange={setSecretNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />
+            {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
+             {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
               {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
               {replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
               {detail.channel !== "MESSENGER" && <div className="mb-2 flex justify-end"><button type="button" disabled={!metaWindowOpen || sendingPoll} onClick={() => setShowPollComposer(true)} className="flex items-center gap-1 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[10px] font-bold text-sky-700 disabled:opacity-40"><ListChecks size={14} /> إنشاء استطلاع</button></div>}
               <div className="mb-2 flex justify-start"><button type="button" onClick={() => setShowQuickReplyManager(true)} className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100">إدارة ردودي السريعة</button></div>
             {showCanned && <div className="soft-scroll absolute bottom-[calc(100%-4px)] right-4 z-10 max-h-60 w-[min(340px,calc(100%-32px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply) => <button key={reply.id} onClick={() => { setText(reply.content); setShowCanned(false); }} className="flex w-full flex-col rounded-xl px-3 py-2 text-right hover:bg-[#fff8e9]"><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
-               <form onSubmit={sendReply}><div className="rounded-2xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={2} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void submitReply(); } else if (e.key === "Enter" && !e.shiftKey && !showCanned) { e.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-32 min-h-[62px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
+              <form onSubmit={sendReply}><div className="rounded-2xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={2} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !showCanned) { e.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-32 min-h-[62px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
                 <div className="flex flex-wrap items-center justify-between gap-1 border-t border-stone-100 px-2 py-2"><div className="flex items-center gap-1"><button type="button" disabled={!metaWindowOpen} title="ردود جاهزة" onClick={() => { setText(text.startsWith("/") ? text : "/"); setShowCanned(!showCanned); }} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-[#bd8e21] hover:bg-amber-50 disabled:opacity-40">/ رد جاهز</button><button type="button" disabled={!metaWindowOpen} onClick={() => setShowProducts(true)} className="flex items-center gap-1 rounded-lg bg-[#fff8e9] px-2 py-1.5 text-[10px] font-bold text-[#9b7219] disabled:opacity-40"><CakeSlice size={14} /> إرسال منتج</button><button type="button" title="إرفاق ملف" disabled={!metaWindowOpen || sending} onClick={() => uploadInputRef.current?.click()} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 disabled:opacity-40"><Paperclip size={16} /></button><button type="button" title={recording ? "إيقاف التسجيل وإرساله" : "تسجيل رسالة صوتية"} disabled={!metaWindowOpen || sending} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-400 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button><button type="button" title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-8 w-8 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={16} /> : <BellOff size={16} />}</button><button type="button" title="إرسال موقعي الحالي" aria-label="إرسال موقعي الحالي" disabled={!metaWindowOpen || sending} onClick={shareLocation} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 disabled:opacity-40"><MapPin size={16} /></button></div><button disabled={!text.trim() || !metaWindowOpen || sending} className="flex h-9 items-center gap-2 rounded-xl bg-[#d32f2f] px-4 text-xs font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span className="hidden sm:inline">{sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={15} /></button></div>
-              </div></form><p className="mt-2 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · Ctrl + K للبحث · Alt + ↑/↓ للتنقل بين المحادثات</p>
-           </div>}
+              </div></form><p className="mt-2 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
+            </>}
+            </div>
         </> : activeId ? <div className="grid flex-1 place-items-center text-xs text-stone-400">جارٍ تحميل المحادثة...</div> : <div className="grid flex-1 place-items-center text-center"><div><div className="mx-auto grid h-16 w-16 place-items-center rounded-3xl bg-[#fff2dd] text-[#c38f22]"><MessageCircle size={28} /></div><h2 className="mt-4 font-extrabold">اختر محادثة للبدء</h2><p className="mt-1 text-xs text-stone-400">ستظهر لك الرسائل وتفاصيل العميل هنا.</p></div></div>}
       </section>
 
@@ -1268,11 +992,10 @@ export default function AgentWorkspace() {
          {detail ? <>
             <button type="button" onClick={() => setShowMobileProfile(false)} className="mobile-chat-back"><X size={16} /> إغلاق الملف</button>
             <div inert={Boolean(detail.readOnly)} className="contents">
-            <div className="flex items-center justify-between gap-2"><h2 className="text-sm font-extrabold">{isGroupConversation ? "ملف المجموعة" : "ملف العميل"}</h2><div className="flex items-center gap-1"><button type="button" onClick={() => void togglePin()} className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[10px] font-bold ${pinnedIds.includes(activeId) ? "bg-blue-50 text-blue-700" : "text-stone-400 hover:bg-stone-100"}`} aria-label={pinnedIds.includes(activeId) ? "إلغاء تثبيت المحادثة" : "تثبيت المحادثة"}><Pin size={14} />{pinnedIds.includes(activeId) ? "مثبتة" : "تثبيت"}</button><button type="button" onClick={() => void toggleCustomerFavorite()} disabled={savingCustomerFavorite} className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[10px] font-bold disabled:opacity-50 ${favoriteCustomerIds.includes(detail.customer?.id) ? "bg-amber-50 text-amber-700" : "text-stone-400 hover:bg-stone-100"}`} aria-label={favoriteCustomerIds.includes(detail.customer?.id) ? "إزالة العميل من المفضلة" : "حفظ العميل في المفضلة"}><Star size={14} fill={favoriteCustomerIds.includes(detail.customer?.id) ? "currentColor" : "none"} />{favoriteCustomerIds.includes(detail.customer?.id) ? "مفضل" : "حفظ العميل"}</button></div></div>
-            <div className="rounded-2xl bg-[#fff8e9] p-4 text-center"><AvatarLarge name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} /><h3 className="mt-3 font-extrabold">{customerDisplayName(detail.customer)}</h3><p className="mt-1 text-[10px] text-stone-400">{isGroupConversation ? "مجموعة WhatsApp" : `عميل منذ ${formatCairoDateTime(detail.customer?.createdAt || detail.createdAt, false)}`}</p><div className="mt-3 flex justify-center gap-2"><a href={detail.customer?.phone ? `tel:${String(detail.customer.phone).replace(/[^0-9+*#;]/g, "")}` : undefined} aria-label="الاتصال بالعميل" title="الاتصال بالعميل" className={`grid h-9 w-9 place-items-center rounded-xl bg-white ${detail.customer?.phone ? "text-stone-500 hover:bg-emerald-50 hover:text-emerald-700" : "pointer-events-none text-stone-300"}`}><Phone size={15} /></a><button type="button" onClick={() => replyInputRef.current?.focus()} aria-label="إرسال رسالة للعميل" title="الانتقال إلى مربع الرد" className="grid h-9 w-9 place-items-center rounded-xl bg-white text-stone-500 hover:bg-amber-50 hover:text-amber-700"><MessageCircle size={15} /></button></div></div>
-             {detail.channel === "WHATSAPP" && callTarget && <button type="button" disabled={detail.customer?.isBlocked || Boolean(callConversation)} onClick={() => setCallConversation(detail)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3 py-2.5 text-xs font-extrabold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} />{callConversation ? "أنه المكالمة الحالية أولًا" : "مكالمة WhatsApp داخل النظام"}</button>}
-             {!isGroupConversation && <>
-             <div className="grid grid-cols-2 gap-2"><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isVip")} className={`rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isVip ? "bg-amber-100 text-amber-900" : "bg-stone-100 text-stone-600 hover:bg-amber-50"}`}>{detail.customer?.isVip ? "VIP · إزالة التمييز" : "تمييز العميل VIP"}</button><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isBlocked")} className={`flex items-center justify-center gap-1 rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isBlocked ? "bg-red-100 text-red-800" : "bg-stone-100 text-stone-600 hover:bg-red-50 hover:text-red-700"}`}><Ban size={13} />{detail.customer?.isBlocked ? "إلغاء الحظر" : "حظر داخل النظام"}</button></div>
+           <div className="flex items-center justify-between gap-2"><h2 className="text-sm font-extrabold">ملف العميل</h2><div className="flex items-center gap-1"><button type="button" onClick={() => void togglePin()} className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[10px] font-bold ${pinnedIds.includes(activeId) ? "bg-blue-50 text-blue-700" : "text-stone-400 hover:bg-stone-100"}`} aria-label={pinnedIds.includes(activeId) ? "إلغاء تثبيت المحادثة" : "تثبيت المحادثة"}><Pin size={14} />{pinnedIds.includes(activeId) ? "مثبتة" : "تثبيت"}</button><button type="button" onClick={() => void toggleCustomerFavorite()} disabled={savingCustomerFavorite} className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[10px] font-bold disabled:opacity-50 ${favoriteCustomerIds.includes(detail.customer?.id) ? "bg-amber-50 text-amber-700" : "text-stone-400 hover:bg-stone-100"}`} aria-label={favoriteCustomerIds.includes(detail.customer?.id) ? "إزالة العميل من المفضلة" : "حفظ العميل في المفضلة"}><Star size={14} fill={favoriteCustomerIds.includes(detail.customer?.id) ? "currentColor" : "none"} />{favoriteCustomerIds.includes(detail.customer?.id) ? "مفضل" : "حفظ العميل"}</button></div></div>
+           <div className="rounded-2xl bg-[#fff8e9] p-4 text-center"><AvatarLarge name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} /><h3 className="mt-3 font-extrabold">{customerDisplayName(detail.customer)}</h3><p className="mt-1 text-[10px] text-stone-400">عميل منذ {formatCairoDateTime(detail.customer?.createdAt || detail.createdAt, false)}</p><div className="mt-3 flex justify-center gap-2"><a href={detail.customer?.phone ? `tel:${String(detail.customer.phone).replace(/[^0-9+*#;]/g, "")}` : undefined} aria-label="الاتصال بالعميل" title="الاتصال بالعميل" className={`grid h-9 w-9 place-items-center rounded-xl bg-white ${detail.customer?.phone ? "text-stone-500 hover:bg-emerald-50 hover:text-emerald-700" : "pointer-events-none text-stone-300"}`}><Phone size={15} /></a><button type="button" onClick={() => replyInputRef.current?.focus()} aria-label="إرسال رسالة للعميل" title="الانتقال إلى مربع الرد" className="grid h-9 w-9 place-items-center rounded-xl bg-white text-stone-500 hover:bg-amber-50 hover:text-amber-700"><MessageCircle size={15} /></button></div></div>
+            {detail.channel === "WHATSAPP" && <button type="button" disabled={detail.customer?.isBlocked || !callTarget || Boolean(callConversation)} onClick={() => setCallConversation(detail)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3 py-2.5 text-xs font-extrabold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} />{callConversation ? "أنه المكالمة الحالية أولًا" : "مكالمة WhatsApp داخل النظام"}</button>}
+            <div className="grid grid-cols-2 gap-2"><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isVip")} className={`rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isVip ? "bg-amber-100 text-amber-900" : "bg-stone-100 text-stone-600 hover:bg-amber-50"}`}>{detail.customer?.isVip ? "VIP · إزالة التمييز" : "تمييز العميل VIP"}</button><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isBlocked")} className={`flex items-center justify-center gap-1 rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isBlocked ? "bg-red-100 text-red-800" : "bg-stone-100 text-stone-600 hover:bg-red-50 hover:text-red-700"}`}><Ban size={13} />{detail.customer?.isBlocked ? "إلغاء الحظر" : "حظر داخل النظام"}</button></div>
              <div className="grid grid-cols-2 gap-2"><Info label="الهاتف" value={displayPhoneNumber(detail.customer?.phone)} /><Info label="القناة" value={channelName(detail.channel)} /></div>
             <form onSubmit={saveCustomerProfile} className="space-y-3 rounded-2xl border border-stone-100 bg-white p-3">
               <label className="block text-[10px] font-bold text-stone-500">اسم العميل<input value={customerName} onChange={(event) => setCustomerName(event.target.value)} maxLength={120} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal text-stone-700 outline-none focus:border-amber-300" /></label>
@@ -1280,27 +1003,21 @@ export default function AgentWorkspace() {
               <label className="block text-[10px] font-bold text-stone-500">البريد الإلكتروني<input type="email" value={customerEmail} onChange={(event) => setCustomerEmail(event.target.value)} maxLength={254} dir="ltr" className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal text-stone-700 outline-none focus:border-amber-300" /></label>
               <label className="block text-[10px] font-bold text-stone-500">ملاحظات سريعة<textarea value={customerNotes} onChange={(event) => setCustomerNotes(event.target.value)} maxLength={4000} rows={3} placeholder="مثال: يفضل التواصل مساءً" className="mt-1 w-full resize-y rounded-lg border border-stone-200 px-2 py-2 text-xs font-normal leading-5 text-stone-700 outline-none focus:border-amber-300" /></label>
               <button type="submit" disabled={savingCustomer} className="h-9 w-full rounded-lg bg-[#d32f2f] text-xs font-bold text-white disabled:opacity-60">{savingCustomer ? "جارٍ الحفظ..." : "حفظ بيانات العميل"}</button>
-             </form>
-             </>}
-            {!isGroupConversation && <>
-            <div className="flex items-center justify-between rounded-xl border border-[#f0e7d6] bg-[#fffdf7] px-3 py-2"><div><b className="text-[11px]">أمر تحضير</b><p className="text-[9px] text-stone-400">احفظ الطلب ثم اطبعه أو صدّره PDF</p></div><button type="button" onClick={printOrder} className="flex items-center gap-1 rounded-lg bg-[#d32f2f] px-2.5 py-2 text-[9px] font-bold text-white"><Printer size={13} /> طباعة</button></div>
+            </form>
+            <form onSubmit={addInternalNote} className="space-y-2 rounded-2xl border border-blue-100 bg-blue-50/60 p-3"><label className="block text-[10px] font-bold text-blue-900">ملاحظة داخلية للفريق<textarea value={internalNote} onChange={(event) => setInternalNote(event.target.value)} maxLength={4000} rows={2} placeholder="تظهر لموظفي الفريق فقط، ولا ترسل للعميل" className="mt-1 w-full resize-y rounded-lg border border-blue-100 bg-white px-2 py-2 text-xs font-normal leading-5 text-stone-700 outline-none focus:border-blue-300" /></label><button disabled={!internalNote.trim()} className="h-9 w-full rounded-lg bg-blue-800 text-xs font-bold text-white disabled:opacity-40">إضافة ملاحظة داخلية</button></form>
+           <div className="flex items-center justify-between rounded-xl border border-[#f0e7d6] bg-[#fffdf7] px-3 py-2"><div><b className="text-[11px]">أمر تحضير</b><p className="text-[9px] text-stone-400">احفظ الطلب ثم اطبعه أو صدّره PDF</p></div><button type="button" onClick={printOrder} className="flex items-center gap-1 rounded-lg bg-[#d32f2f] px-2.5 py-2 text-[9px] font-bold text-white"><Printer size={13} /> طباعة</button></div>
              <div className="grid grid-cols-2 gap-2"><label className="block text-[10px] font-bold text-stone-500">الإجمالي بالجنيه<input type="number" min="0" step="0.01" value={order.price} onChange={(e) => setOrder({ ...order, price: e.target.value })} placeholder="اختياري" className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal outline-none" /></label><label className="block text-[10px] font-bold text-stone-500">قيمة العربون<input type="number" min="0" max={order.price || undefined} step="0.01" value={order.deposit} onChange={(e) => setOrder({ ...order, deposit: e.target.value })} placeholder="0.00" className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal outline-none" /></label></div><p className="rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-800">المتبقي للدفع: {Math.max(0, Number(order.price || 0) - Number(order.deposit || 0)).toFixed(2)} ج.م</p>
           <div className="border-t border-stone-100 pt-3"><div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-extrabold">طلب حلويات جديد</h3><span className="rounded-full bg-amber-50 px-2 py-1 text-[9px] font-bold text-amber-700">مسودة</span></div><form onSubmit={saveOrder} className="space-y-2.5"><label className="block text-[10px] font-bold text-stone-500">الصنف<input value={order.product} onChange={(e) => setOrder({ ...order, product: e.target.value })} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal text-stone-700 outline-none focus:border-amber-300" /></label><div className="grid grid-cols-2 gap-2"><label className="text-[10px] font-bold text-stone-500">الحجم<input value={order.size} onChange={(e) => setOrder({ ...order, size: e.target.value })} placeholder="مثال: 2 كجم" className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal outline-none" /></label><label className="text-[10px] font-bold text-stone-500">الحشوة<input value={order.filling} onChange={(e) => setOrder({ ...order, filling: e.target.value })} placeholder="شوكولاتة" className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal outline-none" /></label></div><label className="block text-[10px] font-bold text-stone-500">العبارة على التورتة<input value={order.cakeMessage} onChange={(e) => setOrder({ ...order, cakeMessage: e.target.value })} placeholder="كل عام وأنت بخير" className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal outline-none" /></label><label className="block text-[10px] font-bold text-stone-500">موعد التسليم<input type="datetime-local" value={order.deliveryAt} onChange={(e) => setOrder({ ...order, deliveryAt: e.target.value })} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-[10px] font-normal outline-none" /></label><label className="block text-[10px] font-bold text-stone-500">عنوان التوصيل<input value={order.deliveryAddress} onChange={(e) => setOrder({ ...order, deliveryAddress: e.target.value })} placeholder="المدينة، الشارع..." className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal outline-none" /></label><button className="flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-[#d32f2f] text-xs font-bold text-white hover:bg-[#b71c1c]"><Check size={14} /> حفظ الطلب</button></form></div>
           {!!detail.customer?.orders?.length && <div className="border-t border-stone-100 pt-3"><h3 className="mb-2 text-xs font-extrabold">آخر الطلبات</h3>{detail.customer.orders.slice(0, 3).map((item: AnyRecord) => <div key={item.id} className="mb-2 rounded-xl bg-stone-50 px-3 py-2 text-[10px]"><div className="font-bold">{item.product || "طلب حلويات"}</div><div className="mt-1 flex items-center justify-between gap-2 text-stone-400"><span>{orderStatus(item.status)} · {ago(item.createdAt)}</span>{item.status !== "DELIVERED" && item.status !== "COMPLETED" && item.status !== "CANCELLED" && <select aria-label="تحديث حالة الطلب" value={item.status} onChange={(e) => updateOrderStatus(item.id, e.target.value)} className="max-w-32 rounded-lg border border-stone-200 bg-white px-2 py-1 font-bold text-[#b71c1c]"><option value="DRAFT">مسودة</option><option value="CONFIRMED">مؤكد</option><option value="PREPARING">قيد التجهيز</option><option value="OUT_FOR_DELIVERY">خرج للتوصيل</option><option value="DELIVERED">تم التسليم</option><option value="CANCELLED">إلغاء الطلب</option></select>}</div></div>)}</div>}
-             {!!detail.whatsappCallSessions?.length && <section className="border-t border-stone-100 pt-3"><h3 className="mb-2 flex items-center gap-1.5 text-xs font-extrabold"><PhoneCall size={14} /> سجل المكالمات</h3><div className="space-y-2">{detail.whatsappCallSessions.map((call: AnyRecord) => <div key={call.id} className="rounded-xl bg-stone-50 px-3 py-2 text-[10px]"><div className="flex items-center justify-between gap-2"><b>{call.direction === "INCOMING" ? "مكالمة واردة" : "مكالمة صادرة"}</b><span className="text-stone-500">{callStatusLabel(call.status)}</span></div><div className="mt-1 flex items-center justify-between gap-2 text-stone-400"><span>{formatCairoDateTime(call.createdAt)}</span>{call.endedAt && <span>انتهت {formatCairoTime(call.endedAt)}</span>}</div><div className="mt-1 text-[9px] text-stone-400">{call.transport === "INTERNAL_WEB" ? "اتصال داخل النظام" : "WhatsApp"}{call.recording ? " · التسجيل محفوظ ضمن التقارير المصرح بها" : ""}</div></div>)}</div></section>}
-            </>}
+            {!!detail.whatsappCallSessions?.length && <section className="border-t border-stone-100 pt-3"><h3 className="mb-2 flex items-center gap-1.5 text-xs font-extrabold"><PhoneCall size={14} /> سجل المكالمات</h3><div className="space-y-2">{detail.whatsappCallSessions.map((call: AnyRecord) => <div key={call.id} className="rounded-xl bg-stone-50 px-3 py-2 text-[10px]"><div className="flex items-center justify-between gap-2"><b>{call.direction === "INCOMING" ? "مكالمة واردة" : "مكالمة صادرة"}</b><span className="text-stone-500">{callStatusLabel(call.status)}</span></div><div className="mt-1 flex items-center justify-between gap-2 text-stone-400"><span>{formatCairoDateTime(call.createdAt)}</span>{call.endedAt && <span>انتهت {formatCairoTime(call.endedAt)}</span>}</div><div className="mt-1 text-[9px] text-stone-400">{call.transport === "INTERNAL_WEB" ? "اتصال داخل النظام" : "WhatsApp"}{call.recording ? " · التسجيل محفوظ ضمن التقارير المصرح بها" : ""}</div></div>)}</div></section>}
            <div className="mt-auto flex items-center gap-2 rounded-xl border border-dashed border-stone-200 p-3 text-[10px] leading-5 text-stone-400"><Clock3 size={16} className="shrink-0" /> بيانات العميل وطلباته محفوظة بشكل آمن ضمن سجل المحادثة.</div>
-            </div>
-            {detail.canAddInternalNote && <form onSubmit={addInternalNote} className="space-y-2 rounded-2xl border border-blue-100 bg-blue-50/60 p-3"><label className="block text-[10px] font-bold text-blue-900">ملاحظة داخلية للفريق<textarea value={internalNote} onChange={(event) => setInternalNote(event.target.value)} maxLength={4000} rows={2} placeholder="تظهر لموظفي الفريق فقط، ولا ترسل للعميل" className="mt-1 w-full resize-y rounded-lg border border-blue-100 bg-white px-2 py-2 text-xs font-normal leading-5 text-stone-700 outline-none focus:border-blue-300" /></label><button disabled={!internalNote.trim()} className="h-9 w-full rounded-lg bg-blue-800 text-xs font-bold text-white disabled:opacity-40">إضافة ملاحظة داخلية</button></form>}
+           </div>
         </> : <div className="grid flex-1 place-items-center text-center text-xs text-stone-400"><div><UserRound size={25} className="mx-auto text-stone-300" /><p className="mt-2">ملف العميل سيظهر هنا</p></div></div>}
       </aside>
     </section>
       {incomingCall && <IncomingWhatsAppCallModal call={incomingCall} onReject={rejectIncomingWhatsAppCall} onOpenConversation={openIncomingCallConversation} onDismiss={() => setIncomingCall(null)} />}
       {callConversation && <WhatsAppCallModal conversationId={callConversation.id} customerName={customerDisplayName(callConversation.customer)} phone={callConversation.customer?.phone || callConversation.externalCustomerId || ""} socket={socket} onClose={() => setCallConversation(null)} />}
-      {imageEditor && <div role="dialog" aria-modal="true" aria-labelledby="image-editor-title" className="fixed inset-0 z-[75] grid place-items-center bg-stone-950/80 p-3 backdrop-blur-sm"><section className="panel flex max-h-[94vh] w-full max-w-4xl flex-col overflow-hidden bg-white p-4 sm:p-5"><div className="mb-3 flex items-start justify-between gap-3"><div><h2 id="image-editor-title" className="text-sm font-extrabold">ارسم على الصورة قبل الإرسال</h2><p className="mt-1 text-[10px] text-stone-500">اسحب بإصبعك أو بالفأرة لإضافة علامات توضيحية.</p></div><button type="button" onClick={() => finishImageEditor(false)} aria-label="إلغاء تعديل الصورة" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl bg-stone-50 p-2"><label className="flex items-center gap-2 text-[10px] font-bold text-stone-600">لون القلم<input aria-label="لون الرسم" type="color" value={annotationColor} onChange={(event) => setAnnotationColor(event.target.value)} className="h-8 w-10 cursor-pointer rounded border-0 bg-transparent p-0" /></label><label className="flex min-w-36 flex-1 items-center gap-2 text-[10px] font-bold text-stone-600">سُمك القلم<input aria-label="سُمك القلم" type="range" min="2" max="18" value={annotationSize} onChange={(event) => setAnnotationSize(Number(event.target.value))} className="w-full accent-[#d32f2f]" /></label><button type="button" onClick={clearImageAnnotations} className="flex h-8 items-center gap-1 rounded-lg bg-white px-3 text-[10px] font-bold text-stone-600 hover:bg-red-50 hover:text-red-700"><Trash2 size={13} /> مسح الرسم</button></div><div className="soft-scroll flex min-h-0 flex-1 items-center justify-center overflow-auto rounded-xl bg-stone-100 p-2"><div className="relative inline-block max-h-[64vh] max-w-full"><img src={imageEditor.url} alt="الصورة الجاري تعديلها" className="block max-h-[64vh] max-w-full select-none object-contain" draggable={false} /><canvas ref={imageCanvasRef} aria-label="لوحة الرسم على الصورة" className="absolute inset-0 h-full w-full touch-none cursor-crosshair" onPointerDown={beginImageAnnotation} onPointerMove={drawImageAnnotation} onPointerUp={() => { imageEditorDrawingRef.current = false; imageEditorPointRef.current = null; }} onPointerCancel={() => { imageEditorDrawingRef.current = false; imageEditorPointRef.current = null; }} /></div></div><div className="mt-3 flex justify-end gap-2"><button type="button" onClick={() => finishImageEditor(false)} className="min-h-10 rounded-xl border border-stone-200 px-4 text-xs font-bold text-stone-600">إلغاء الصورة</button><button type="button" onClick={() => finishImageEditor(true)} className="flex min-h-10 items-center gap-2 rounded-xl bg-[#d32f2f] px-5 text-xs font-extrabold text-white hover:bg-[#b71c1c]"><Send size={14} /> اعتماد الرسم وإرسال</button></div></section></div>}
-      {showGroupCreator && <div className="fixed inset-0 z-[65] grid place-items-center bg-stone-900/50 p-3 backdrop-blur-sm" onClick={() => setShowGroupCreator(false)}><form onSubmit={createWhatsAppGroup} role="dialog" aria-modal="true" aria-labelledby="create-group-title" className="panel w-full max-w-md space-y-4 p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="flex items-start justify-between gap-3"><div><h2 id="create-group-title" className="text-base font-extrabold">إنشاء مجموعة WhatsApp</h2><p className="mt-1 text-xs leading-5 text-stone-500">تُنشأ عبر اتصال Baileys الحالي، وتظهر المحادثة في قائمة الجروبات.</p></div><button type="button" onClick={() => setShowGroupCreator(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><label className="block text-xs font-bold text-stone-600">اسم المجموعة<input autoFocus required maxLength={100} value={groupSubject} onChange={(event) => setGroupSubject(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-stone-200 px-3 text-sm outline-none focus:border-emerald-400" /></label><label className="block text-xs font-bold text-stone-600">أرقام الأعضاء<textarea required rows={4} value={groupPhones} onChange={(event) => setGroupPhones(event.target.value)} placeholder="أدخل الأرقام الدولية، مفصولة بفاصلة أو سطر جديد" dir="auto" className="mt-1 w-full rounded-xl border border-stone-200 p-3 text-sm leading-6 outline-none focus:border-emerald-400" /></label><div className="flex justify-end gap-2"><button type="button" onClick={() => setShowGroupCreator(false)} className="rounded-xl border border-stone-200 px-4 py-2 text-xs font-bold text-stone-600">إلغاء</button><button type="submit" disabled={creatingGroup || !groupSubject.trim() || !groupPhones.trim()} className="rounded-xl bg-emerald-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{creatingGroup ? "جارٍ الإنشاء..." : "إنشاء المجموعة"}</button></div></form></div>}
-      {showGroupMembers && groupData && <div className="fixed inset-0 z-[65] grid place-items-center bg-stone-900/50 p-3 backdrop-blur-sm" onClick={() => setShowGroupMembers(false)}><section role="dialog" aria-modal="true" aria-labelledby="group-members-title" className="panel flex max-h-[85vh] w-full max-w-lg flex-col p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="group-members-title" className="text-base font-extrabold">{groupData.subject || "أعضاء المجموعة"}</h2><p className="mt-1 text-xs text-stone-500">{groupData.participants?.length || 0} عضو · تُطبق التغييرات عبر WhatsApp.</p></div><button type="button" onClick={() => setShowGroupMembers(false)} aria-label="إغلاق الأعضاء" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><form onSubmit={(event) => { event.preventDefault(); if (groupMemberPhone.trim()) void updateGroupParticipants("add", [groupMemberPhone.trim()]); }} className="mb-3 flex gap-2"><input value={groupMemberPhone} onChange={(event) => setGroupMemberPhone(event.target.value)} placeholder="رقم دولي لإضافة عضو" dir="ltr" className="h-10 min-w-0 flex-1 rounded-xl border border-stone-200 px-3 text-xs outline-none focus:border-emerald-400" /><button type="submit" disabled={groupActionBusy || !groupMemberPhone.trim()} className="rounded-xl bg-emerald-700 px-4 text-xs font-bold text-white disabled:opacity-50">إضافة</button></form><div className="soft-scroll min-h-24 flex-1 space-y-2 overflow-y-auto">{(groupData.participants || []).map((member: AnyRecord) => { const target = member.phone || (String(member.id || "").endsWith("@s.whatsapp.net") ? member.id : ""); const superAdmin = member.admin === "superadmin"; return <div key={member.id} className="flex items-center gap-2 rounded-xl border border-stone-100 bg-white px-3 py-2"><span className="min-w-0 flex-1"><b dir="ltr" className="block truncate text-xs">{target ? displayPhoneNumber(target) : member.id}</b><span className="text-[10px] text-stone-400">{superAdmin ? "مشرف رئيسي" : member.admin === "admin" ? "مشرف" : "عضو"}</span></span>{target && !superAdmin && <><button type="button" disabled={groupActionBusy} onClick={() => void updateGroupParticipants(member.admin ? "demote" : "promote", [target])} className="rounded-lg bg-amber-50 px-2.5 py-2 text-[9px] font-bold text-amber-800 disabled:opacity-40">{member.admin ? "إلغاء الإشراف" : "ترقية لمشرف"}</button><button type="button" disabled={groupActionBusy} onClick={() => { if (window.confirm("إزالة هذا العضو من مجموعة WhatsApp؟")) void updateGroupParticipants("remove", [target]); }} className="rounded-lg bg-red-50 px-2.5 py-2 text-[9px] font-bold text-red-700 disabled:opacity-40">إزالة</button></>}</div>; })}{!groupData.participants?.length && <p className="py-8 text-center text-xs text-stone-400">تعذر عرض أعضاء المجموعة.</p>}</div></section></div>}
-      {lightboxImage && <div role="dialog" aria-modal="true" aria-label="معاينة الصورة" onClick={() => setLightboxImage("")} className="fixed inset-0 z-[70] grid place-items-center bg-black/90 p-4"><button type="button" aria-label="إغلاق معاينة الصورة" onClick={() => setLightboxImage("")} className="absolute right-4 top-4 grid h-11 w-11 place-items-center rounded-full bg-white/15 text-2xl text-white hover:bg-white/25">×</button><img src={lightboxImage} alt="معاينة مكبرة" onClick={(event) => event.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-lg object-contain shadow-2xl" /></div>}
+     {lightboxImage && <div role="dialog" aria-modal="true" aria-label="معاينة الصورة" onClick={() => setLightboxImage("")} className="fixed inset-0 z-[70] grid place-items-center bg-black/90 p-4"><button type="button" aria-label="إغلاق معاينة الصورة" onClick={() => setLightboxImage("")} className="absolute right-4 top-4 grid h-11 w-11 place-items-center rounded-full bg-white/15 text-2xl text-white hover:bg-white/25">×</button><img src={lightboxImage} alt="معاينة مكبرة" onClick={(event) => event.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-lg object-contain shadow-2xl" /></div>}
      {showContacts && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowContacts(false)}><section role="dialog" aria-modal="true" aria-labelledby="contacts-title" className="panel flex max-h-[85vh] w-full max-w-lg flex-col p-5" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="contacts-title" className="text-base font-extrabold">جهات الاتصال</h2><p className="mt-1 text-xs text-stone-500">اختر اسمًا لفتح محادثة WhatsApp داخل النظام.</p></div><button type="button" onClick={() => setShowContacts(false)} aria-label="إغلاق جهات الاتصال" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><label className="mb-3 flex h-10 items-center gap-2 rounded-xl bg-stone-50 px-3"><Search size={15} className="text-stone-400" /><input autoFocus value={contactQuery} onChange={(event) => setContactQuery(event.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف" className="w-full bg-transparent text-xs outline-none" /></label><div className="soft-scroll min-h-32 flex-1 overflow-y-auto">{loadingContacts ? <p className="py-8 text-center text-xs text-stone-400">جارٍ البحث...</p> : contactResults.map((contact) => <button key={contact.id} type="button" disabled={!contact.phone} onClick={() => void startChatFromContact(contact)} className="flex w-full items-center gap-3 border-b border-stone-100 px-2 py-3 text-right hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><Avatar name={customerDisplayName(contact)} src={contact.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(contact)}</b><span dir="ltr" className="mt-1 block text-right text-[10px] text-stone-400">{contact.phone || "أضف رقم هاتف لبدء محادثة"}</span></span><MessageCircle size={16} className="text-emerald-700" /></button>)}{!loadingContacts && !contactResults.length && <p className="py-8 text-center text-xs text-stone-400">لا توجد جهة اتصال مطابقة.</p>}</div><p className="mt-3 text-[9px] leading-4 text-stone-400">في وضع WhatsApp Business API قد يتطلب بدء مراسلة جديدة استخدام قالب معتمد من Meta.</p></section></div>}
      {forwardMessage && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setForwardMessage(null); setForwardQuery(""); }}><section role="dialog" aria-modal="true" aria-labelledby="forward-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="forward-title" className="text-base font-extrabold">تحويل الرسالة</h2><p className="mt-1 text-xs leading-5 text-stone-500">ستُرسل نسخة من الرسالة إلى محادثة أخرى.</p></div><button type="button" onClick={() => { setForwardMessage(null); setForwardQuery(""); }} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><input autoFocus value={forwardQuery} onChange={(event) => setForwardQuery(event.target.value)} placeholder="ابحث عن محادثة" className="mb-3 h-10 w-full rounded-xl border border-stone-200 px-3 text-xs outline-none focus:border-amber-400" /><div className="max-h-[55vh] space-y-2 overflow-y-auto">{conversations.filter((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())).map((target) => <button key={target.id} type="button" onClick={() => void forwardMessageTo(target)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50"><Avatar name={customerDisplayName(target.customer)} src={target.customer?.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(target.customer)}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-stone-400"><ChannelIcon channel={target.channel} />{channelName(target.channel)}</span></span><Forward size={15} className="text-stone-400" /></button>)}{!conversations.some((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())) && <p className="rounded-xl bg-stone-50 p-5 text-center text-xs text-stone-500">لا توجد محادثات مطابقة ضمن المحادثات المحمّلة.</p>}</div></section></div>}
      {showHandoff && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowHandoff(false)}><section role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="handoff-title" className="text-base font-extrabold">تحويل المحادثة لزميل</h2><p className="mt-1 text-xs leading-5 text-stone-500">اختر موظفًا متاحًا من خدمة العملاء ليتابع مع العميل.</p></div><button type="button" onClick={() => setShowHandoff(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><div className="max-h-[55vh] space-y-2 overflow-y-auto">{handoffColleagues.map((colleague) => <button key={colleague.id} type="button" disabled={Boolean(handoffBusyId)} onClick={() => void handoffToColleague(colleague.id, colleague.name)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50 disabled:opacity-60"><Avatar name={colleague.name} /><span className="min-w-0 flex-1"><b className="block truncate text-sm">{colleague.name}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متاح الآن</span></span><span className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">{handoffBusyId === colleague.id ? "جارٍ التحويل..." : "تحويل"}</span></button>)}{!handoffColleagues.length && <div className="rounded-xl bg-stone-50 p-5 text-center text-xs leading-6 text-stone-500">لا يوجد زميل متاح الآن في خدمة العملاء. جرّب لاحقًا أو أبقِ المحادثة لديك.</div>}</div></section></div>}
@@ -1337,8 +1054,7 @@ function ChannelIcon({ channel }: { channel: string }) { const config: Record<st
   const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
   const deliveryLabel = message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
     return <div className={`flex ${outgoing ? "justify-start" : "justify-end"}`}><div className={`agent-message-bubble ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-[82%] rounded-2xl px-4 py-3 shadow-sm`}>
-     {message.quotedMessage && <div className="mb-2 rounded-lg border-r-2 border-[#d32f2f] bg-stone-50/80 px-2.5 py-1.5 text-[10px] text-stone-500"><b>{message.quotedMessage.author?.name || "رسالة مقتبسة"}</b><p className="mt-0.5 line-clamp-2">{message.quotedMessage.text || (message.quotedMessage.kind === "IMAGE" ? "صورة" : "مرفق")}</p></div>}
-     {!outgoing && (metadata.groupParticipantName || metadata.groupParticipantPhone) && <p className="mb-1 text-[10px] font-extrabold text-emerald-800">{metadata.groupParticipantName || displayPhoneNumber(String(metadata.groupParticipantPhone))}</p>}
+    {message.quotedMessage && <div className="mb-2 rounded-lg border-r-2 border-[#d32f2f] bg-stone-50/80 px-2.5 py-1.5 text-[10px] text-stone-500"><b>{message.quotedMessage.author?.name || "رسالة مقتبسة"}</b><p className="mt-0.5 line-clamp-2">{message.quotedMessage.text || (message.quotedMessage.kind === "IMAGE" ? "صورة" : "مرفق")}</p></div>}
     {hasMedia && (message.localPreviewUrl ? ["IMAGE", "STICKER"].includes(message.kind) ? <button type="button" onClick={() => onOpenImage?.(message.localPreviewUrl)} className="mb-2 block"><img src={message.localPreviewUrl} alt={message.kind === "STICKER" ? "ملصق قيد الإرسال" : "صورة قيد الإرسال"} className="max-h-56 rounded-xl object-contain" /></button> : message.kind === "AUDIO" ? <audio controls src={message.localPreviewUrl} className="mb-2 max-w-full" /> : message.kind === "VIDEO" ? <video controls src={message.localPreviewUrl} className="mb-2 max-h-56 max-w-full rounded-xl" /> : <span className="mb-2 block text-xs">ملف مرفق قيد الإرسال</span> : message.mediaAssetId ? <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} /> : message.kind === "IMAGE" && outgoing && message.mediaUrl ? <button type="button" onClick={() => onOpenImage?.(message.mediaUrl)} className="mb-2 block"><img src={message.mediaUrl} alt="منتج حلواني بندق" className="max-h-56 rounded-xl object-cover" /></button> : <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} />)}
     {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
       {editing ? <div className="my-2 min-w-[230px]"><textarea autoFocus rows={3} maxLength={4000} value={editingText} onChange={(event) => onEditingTextChange?.(event.target.value)} className="w-full resize-y rounded-xl border border-amber-200 bg-white p-2 text-sm leading-6 outline-none focus:border-amber-400" /><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={onCancelEdit} className="rounded-lg bg-stone-100 px-3 py-1.5 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" disabled={savingEdit || !editingText.trim()} onClick={onSaveEdit} className="rounded-lg bg-[#d32f2f] px-3 py-1.5 text-[10px] font-bold text-white disabled:opacity-50">{savingEdit ? "جارٍ الحفظ..." : "حفظ التعديل"}</button></div></div> : message.kind === "POLL" ? <div className="min-w-[220px] rounded-xl border border-sky-100 bg-sky-50/60 p-3"><div className="mb-1 text-[9px] font-extrabold uppercase tracking-wide text-sky-700">استطلاع</div><p className="whitespace-pre-wrap text-sm font-bold leading-6">{message.text}</p><div className="mt-2 space-y-1.5">{(Array.isArray(metadata.pollOptions) ? metadata.pollOptions : []).map((option: string, index: number) => <div key={`${option}-${index}`} className="rounded-lg border border-sky-100 bg-white px-2.5 py-1.5 text-xs">{option}</div>)}</div><p className="mt-2 text-[9px] text-stone-400">التصويت والنتائج متاحان على المنصة الأصلية.</p></div> : message.kind === "LOCATION" ? <a className="flex items-center gap-2 text-sm text-blue-700 underline" href={`https://maps.google.com/?q=${message.latitude},${message.longitude}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} /> فتح موقع العميل</a> : message.text && <p className="message-body whitespace-pre-wrap text-sm leading-7">{splitMessageTextLinks(message.text).map((part, index) => part.href ? <a key={index} href={part.href} target="_blank" rel="noopener noreferrer" dir="ltr" className="text-blue-700 underline decoration-blue-300 underline-offset-2">{part.text}</a> : <span key={index}>{part.text}</span>)}</p>}
@@ -1356,3 +1072,20 @@ function orderStatus(value: string) { return ({ DRAFT: "مسودة", CONFIRMED: 
 function categoryLabel(value: string) { return productCategoryLabel[value] || value; }
 function formatCountdown(milliseconds: number) { const seconds = Math.max(0, Math.floor(milliseconds / 1000)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); const rest = seconds % 60; return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`; }
 function callStatusLabel(value: string) { return ({ INITIATING: "جارٍ الاتصال", RINGING: "يرن", CONNECTED: "تم الاتصال", TERMINATED: "انتهت", REJECTED: "مرفوضة", FAILED: "فشلت" } as Record<string, string>)[value] || value; }
+
+function SecretNoteComposer({ text, onTextChange, recipients, recipientId, onRecipientChange, sending, onSubmit }: { text: string; onTextChange: (value: string) => void; recipients: AnyRecord[]; recipientId: string; onRecipientChange: (value: string) => void; sending: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <details className="mb-3 rounded-xl border border-violet-200 bg-violet-50/60 p-3" open>
+    <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية لزميل <span className="mr-auto text-[9px] font-normal text-violet-600">داخلية فقط · لا تظهر للعميل</span></summary>
+    <form onSubmit={onSubmit} className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-stretch">
+      <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
+        <select aria-label="مستلم الرسالة السرية" value={recipientId} onChange={(event) => onRecipientChange(event.target.value)} disabled={sending || recipients.length === 0} className="h-10 shrink-0 rounded-lg border border-violet-200 bg-white px-2 text-[11px] text-stone-700 outline-none focus:border-violet-400 sm:max-w-48">
+          <option value="" disabled>اختر الزميل</option>
+          {recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.role === "BRANCH_USER" ? " · موظف فرع" : ""}</option>)}
+        </select>
+        <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة داخلية لزميلك..." disabled={!recipients.length || sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
+      </div>
+      <button type="submit" disabled={sending || !recipientId || !text.trim()} className="flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-4 text-[10px] font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><Send size={13} />{sending ? "جارٍ الإرسال..." : "إرسال سري"}</button>
+    </form>
+    {!recipients.length && <p className="mt-2 text-[10px] text-violet-700">لا يوجد زملاء متاحون لإرسال رسالة إليهم.</p>}
+  </details>;
+}
