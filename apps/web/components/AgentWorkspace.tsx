@@ -208,7 +208,7 @@ export default function AgentWorkspace() {
         const queuedMessages = loadingMessagesRef.current.get(id) || [];
         loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
         setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) }); setSavedOrder(null);
-        void api(`/api/conversations/${id}/secret-note-recipients`).then((result) => {
+        void api(`/api/conversations/${id}/private-note-recipients`).then((result) => {
           if (request !== detailRequest.current) return;
           setSecretNoteRecipients(result.recipients || []);
           setSecretNoteRecipientId(result.defaultRecipientId || "");
@@ -358,8 +358,8 @@ export default function AgentWorkspace() {
     if (!conversationId || !noteText || !secretNoteRecipientId || sendingSecretNote) return;
     setSendingSecretNote(true);
     try {
-      const note = await api(`/api/conversations/${conversationId}/secret-notes`, { method: "POST", body: JSON.stringify({ text: noteText, recipientId: secretNoteRecipientId }) });
-      setDetail((current: AnyRecord) => current?.id === conversationId && !current.internalNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...current, internalNotes: [...(current.internalNotes || []), note] } : current);
+      const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ text: noteText, recipientId: secretNoteRecipientId }) });
+      setDetail((current: AnyRecord) => current?.id === conversationId && !current.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...current, privateNotes: [...(current.privateNotes || []), note] } : current);
       setSecretNote("");
       setNotice(`تم إرسال رسالة سرية إلى ${note.recipient?.name || "الزميل"}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال الرسالة السرية"); }
@@ -546,11 +546,14 @@ export default function AgentWorkspace() {
       });
       connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
         connection.on("whisper:new", (note) => { setDetail((old: AnyRecord) => old?.id === note.conversationId ? { ...old, whisperNotes: [...(old.whisperNotes || []), note] } : old); setNotice("أرسل المدير توجيهًا سريًا جديدًا"); });
-        connection.on("conversation:secret-note:new", (event) => {
-          setDetail((old: AnyRecord) => old?.id === event.conversationId && !old.internalNotes?.some((item: AnyRecord) => item.id === event.note.id) ? { ...old, internalNotes: [...(old.internalNotes || []), event.note] } : old);
-          if (event.recipientId === profile.id && event.note.authorId !== profile.id) {
-            setIncomingNotice({ isSecretNote: true, conversationId: event.conversationId, customerName: event.note.author?.name || "زميل", preview: `رسالة سرية: ${event.note.text}`, createdAt: event.note.createdAt });
+        connection.on("conversation-private-note:new", (event) => {
+          const note = event.note;
+          if (!event.conversationId || !note) return;
+          setDetail((old: AnyRecord) => old?.id === event.conversationId && !old.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...old, privateNotes: [...(old.privateNotes || []), note] } : old);
+          if (note.recipientId === profile.id && activeIdRef.current !== event.conversationId) {
             playIncomingMessageTone();
+            const chat = conversationsRef.current.find((item) => item.id === event.conversationId);
+            setIncomingNotice({ isPrivateNote: true, conversationId: event.conversationId, customerName: note.author?.name || "زميل", channel: event.channel || chat?.channel, authorName: note.author?.name, preview: `رسالة سرية: ${note.text}` });
           }
         });
       connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
@@ -967,12 +970,12 @@ export default function AgentWorkspace() {
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
                 {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
              {(detail.whisperNotes || []).map((note: AnyRecord) => <div key={`whisper-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-[#f0d786] bg-[#fff8e1] px-4 py-3 text-xs leading-6 text-[#755916]"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><CakeSlice size={14} /> توجيه سري من {note.author?.name || "المدير"}<span className="mr-auto text-[9px] font-normal text-[#aa8a36]">{ago(note.createdAt)}</span></div>{note.text}</div>)}
-              {(detail.internalNotes || []).map((note: AnyRecord) => <div key={`note-${note.id}`} className={`mx-auto w-full max-w-xl rounded-xl border px-4 py-3 text-xs leading-6 ${note.recipient ? "border-violet-200 bg-violet-50/80 text-violet-950" : "border-blue-100 bg-blue-50/80 text-blue-950"}`}><div className="mb-1 flex items-center gap-1.5 font-extrabold">{note.recipient ? `رسالة سرية إلى ${note.recipient.name} · ${note.author?.name || "زميل"}` : `ملاحظة داخلية · ${note.author?.name || "الفريق"}`}<span className="mr-auto text-[9px] font-normal opacity-70">{ago(note.createdAt)}</span></div>{note.text}</div>)}
+              {(detail.privateNotes || []).map((note: AnyRecord) => <div key={`private-note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs leading-6 text-violet-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><LockKeyhole size={13} /> رسالة سرية {note.authorId === user?.id ? `إلى ${note.recipient?.name || "زميل"}` : `من ${note.author?.name || "زميل"}`}<span className="mr-auto text-[9px] font-normal text-violet-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
              <div className="mt-auto" /><div ref={messageEndRef} />
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
             <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
-              <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={secretNoteRecipients} recipientId={secretNoteRecipientId} onRecipientChange={setSecretNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />
+              {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={secretNoteRecipients} recipientId={secretNoteRecipientId} onRecipientChange={setSecretNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
             {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
               {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
@@ -1075,14 +1078,14 @@ function callStatusLabel(value: string) { return ({ INITIATING: "جارٍ الا
 
 function SecretNoteComposer({ text, onTextChange, recipients, recipientId, onRecipientChange, sending, onSubmit }: { text: string; onTextChange: (value: string) => void; recipients: AnyRecord[]; recipientId: string; onRecipientChange: (value: string) => void; sending: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   return <details className="mb-3 rounded-xl border border-violet-200 bg-violet-50/60 p-3" open>
-    <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية لزميل <span className="mr-auto text-[9px] font-normal text-violet-600">داخلية فقط · لا تظهر للعميل</span></summary>
+    <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية لزميل <span className="mr-auto text-[9px] font-normal text-violet-600">للمرسل والمستلم والإدارة المخوّلة فقط</span></summary>
     <form onSubmit={onSubmit} className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-stretch">
       <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
         <select aria-label="مستلم الرسالة السرية" value={recipientId} onChange={(event) => onRecipientChange(event.target.value)} disabled={sending || recipients.length === 0} className="h-10 shrink-0 rounded-lg border border-violet-200 bg-white px-2 text-[11px] text-stone-700 outline-none focus:border-violet-400 sm:max-w-48">
           <option value="" disabled>اختر الزميل</option>
           {recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.role === "BRANCH_USER" ? " · موظف فرع" : ""}</option>)}
         </select>
-        <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة داخلية لزميلك..." disabled={!recipients.length || sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
+        <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." disabled={!recipients.length || sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
       </div>
       <button type="submit" disabled={sending || !recipientId || !text.trim()} className="flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-4 text-[10px] font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><Send size={13} />{sending ? "جارٍ الإرسال..." : "إرسال سري"}</button>
     </form>
