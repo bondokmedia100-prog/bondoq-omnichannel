@@ -25,3 +25,15 @@ export function chooseRoundRobinAgent<T extends { id: string }>(agents: T[], rou
   const index = ((roundRobinTurn % agents.length) + agents.length) % agents.length;
   return agents[index];
 }
+
+export function shouldReassignUnansweredConversation(conversation: {
+  status: string;
+  assignedAgentId: string | null;
+  lastInboundAt: Date | null;
+  lastAgentResponseAt: Date | null;
+}, expected: { assignedAgentId: string; inboundAt: Date }) {
+  const active = ["OPEN", "PENDING", "QUEUED"].includes(conversation.status);
+  return active && conversation.assignedAgentId === expected.assignedAgentId
+    && conversation.lastInboundAt?.getTime() === expected.inboundAt.getTime()
+    && (!conversation.lastAgentResponseAt || conversation.lastAgentResponseAt < expected.inboundAt);
+}
