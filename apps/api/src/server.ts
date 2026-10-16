@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { z } from "zod";
-import { Channel, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
+import { Channel, ConversationHandoffStatus, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
 import { config } from "./config";
 import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
@@ -26,6 +26,7 @@ import { createPasswordResetToken, hashPasswordResetToken } from "./passwordRese
 import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
 import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
 import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
+import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
 
 const app = express();
 const server = http.createServer(app);
@@ -1197,9 +1198,10 @@ app.post("/api/conversations/:id/notes", agentGuard, async (req: AuthedRequest, 
 });
 
 app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConversations"), async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ agentId: z.string().nullable(), branchId: z.string().nullable().optional() }).safeParse(req.body);
+  const parsed = z.object({ agentId: z.string().nullable(), branchId: z.string().nullable().optional(), keepQueued: z.boolean().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اختر الموظف الجديد" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
+  if (parsed.data.keepQueued && parsed.data.agentId) return res.status(400).json({ error: "لا يمكن إبقاء المحادثة في الطابور مع إسنادها لموظف" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { assignedAgent: { select: { id: true, name: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية لتحويل هذه المحادثة" });
   if (parsed.data.agentId) {
@@ -1215,13 +1217,30 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
     const branch = await prisma.branch.findFirst({ where: { id: branchId, isActive: true }, select: { id: true } });
     if (!branch) return res.status(400).json({ error: "الفرع المحدد غير موجود أو متوقف" });
   }
+  if (conversation.assignedAgentId !== parsed.data.agentId) {
+    const pendingRequest = await prisma.conversationHandoffRequest.findUnique({ where: { conversationId: conversation.id } });
+    if (pendingRequest?.status === ConversationHandoffStatus.PENDING) {
+      const cancelled = await prisma.conversationHandoffRequest.updateMany({ where: { id: pendingRequest.id, status: ConversationHandoffStatus.PENDING }, data: { status: ConversationHandoffStatus.CANCELLED, resolvedAt: new Date() } });
+      if (cancelled.count) {
+        await audit(req.user!.id, "CONVERSATION_HANDOFF_CANCELLED", conversation.id, { from: pendingRequest.fromAgentId, to: pendingRequest.toAgentId, reason: "ADMIN_REASSIGNMENT" });
+        io.to(`agent:${pendingRequest.toAgentId}`).emit("conversation:handoff-cancelled", { conversationId: conversation.id });
+        io.to("admins").emit("handoff:updated", { conversationId: conversation.id, decision: "CANCELLED" });
+      }
+    }
+  }
   let updated = await prisma.conversation.update({ where: { id: conversation.id }, data: { assignedAgentId: parsed.data.agentId, branchId, routingDepartment: branchId ? Department.BRANCH : conversation.routingDepartment === Department.BRANCH ? null : conversation.routingDepartment, status: parsed.data.agentId ? ConversationStatus.OPEN : ConversationStatus.QUEUED, awaitingRouting: false } });
   const historyAgentIds = [...new Set([conversation.assignedAgentId, parsed.data.agentId].filter((id): id is string => Boolean(id)))];
   if (historyAgentIds.length) await prisma.conversationAssignment.createMany({ data: historyAgentIds.map((agentId) => ({ conversationId: conversation.id, agentId })), skipDuplicates: true });
-  await audit(req.user!.id, "CONVERSATION_REASSIGNED", conversation.id, { from: conversation.assignedAgentId, to: parsed.data.agentId });
-  if (conversation.assignedAgentId && conversation.assignedAgentId !== parsed.data.agentId) io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:unassigned", updated);
-  if (!parsed.data.agentId) updated = await assignConversation(conversation.id, branchId ? Department.BRANCH : undefined);
+  await audit(req.user!.id, "CONVERSATION_REASSIGNED", conversation.id, { from: conversation.assignedAgentId, to: parsed.data.agentId, by: req.user!.id, keepQueued: parsed.data.keepQueued || false });
+  if (!parsed.data.agentId && !parsed.data.keepQueued) updated = await assignConversation(conversation.id, branchId ? Department.BRANCH : undefined);
   updated = await prisma.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } } } });
+  if (conversation.assignedAgentId && conversation.assignedAgentId !== updated.assignedAgentId) {
+    const managerTitle = req.user!.role === Role.ADMIN ? "مدير النظام" : "المشرف";
+    const body = updated.assignedAgent?.name ? `سحب ${managerTitle} (${req.user!.name}) المحادثة من متابعتك وأسندها إلى ${updated.assignedAgent.name}.` : `سحب ${managerTitle} (${req.user!.name}) المحادثة من متابعتك.`;
+    io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:unassigned", { ...updated, adminReassigned: true, managerName: req.user!.name });
+    io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:admin-reassigned", { conversationId: conversation.id, customerName: updated.customer?.displayName || updated.customer?.name || "عميل", managerName: req.user!.name, nextAgentName: updated.assignedAgent?.name || null, body });
+    void sendPushNotification([conversation.assignedAgentId], { title: "تغيير إسناد محادثة", body, url: "/agent/workspace", tag: `admin-reassigned-${conversation.id}` }).catch((error) => console.warn("Admin reassignment push notification failed", error));
+  }
   if (parsed.data.agentId) io.to(`agent:${parsed.data.agentId}`).emit("conversation:assigned", updated);
   io.to("admins").emit("conversation:updated", updated);
   res.json(updated);
@@ -1234,6 +1253,16 @@ app.get("/api/agents/customer-care-colleagues", agentGuard, async (req: AuthedRe
     select: { id: true, name: true, presence: true }, orderBy: { name: "asc" }
   });
   res.json(colleagues);
+});
+
+app.get("/api/agents/handoff-requests", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "طلبات التحويل متاحة لموظفي خدمة العملاء فقط" });
+  const requests = await prisma.conversationHandoffRequest.findMany({
+    where: { toAgentId: req.user!.id, status: ConversationHandoffStatus.PENDING },
+    include: { fromAgent: { select: { id: true, name: true } }, conversation: { include: { customer: { select: { name: true, displayName: true } } } } },
+    orderBy: { createdAt: "desc" }
+  });
+  res.json(requests);
 });
 
 app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -1249,19 +1278,68 @@ app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest
     select: { id: true, name: true }
   });
   if (!colleague) return res.status(409).json({ error: "الزميل المحدد لم يعد متاحًا" });
-  const moved = await prisma.conversation.updateMany({
-    where: { id: conversation.id, assignedAgentId: req.user!.id, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
-    data: { assignedAgentId: colleague.id, status: ConversationStatus.OPEN, awaitingRouting: false }
-  });
-  if (!moved.count) return res.status(409).json({ error: "تغيّر إسناد المحادثة. حدّث الصفحة وحاول مجددًا" });
-  const updated = await prisma.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: { customer: true, assignedAgent: { select: { id: true, name: true } } } });
-  await prisma.conversationAssignment.createMany({ data: [req.user!.id, colleague.id].map((agentId) => ({ conversationId: conversation.id, agentId })), skipDuplicates: true });
-  await audit(req.user!.id, "CONVERSATION_HANDOFF", conversation.id, { from: req.user!.id, to: colleague.id });
-  io.to(`agent:${req.user!.id}`).emit("conversation:unassigned", updated);
-  io.to(`agent:${colleague.id}`).emit("conversation:assigned", updated);
-  io.to(`agent:${colleague.id}`).emit("conversation:handoff", { conversation: updated, fromAgentName: req.user!.name });
+  const existing = await prisma.conversationHandoffRequest.findUnique({ where: { conversationId: conversation.id } });
+  if (existing?.status === ConversationHandoffStatus.PENDING) return res.status(409).json({ error: "يوجد طلب تحويل بانتظار رد الزميل" });
+  const handoffData = { fromAgentId: req.user!.id, toAgentId: colleague.id, status: ConversationHandoffStatus.PENDING, createdAt: new Date(), resolvedAt: null };
+  let handoff;
+  try {
+    if (existing) {
+      const changed = await prisma.conversationHandoffRequest.updateMany({ where: { id: existing.id, status: existing.status }, data: handoffData });
+      if (!changed.count) return res.status(409).json({ error: "تغيّر طلب التحويل. حدّث الصفحة وحاول مجددًا" });
+      handoff = await prisma.conversationHandoffRequest.findUniqueOrThrow({ where: { id: existing.id } });
+    } else handoff = await prisma.conversationHandoffRequest.create({ data: { conversationId: conversation.id, ...handoffData } });
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "يوجد طلب تحويل بانتظار رد الزميل" });
+    throw error;
+  }
+  const request = await prisma.conversationHandoffRequest.findUniqueOrThrow({ where: { id: handoff.id }, include: { fromAgent: { select: { id: true, name: true } }, toAgent: { select: { id: true, name: true } }, conversation: { include: { customer: { select: { name: true, displayName: true } } } } } });
+  await audit(req.user!.id, "CONVERSATION_HANDOFF_REQUESTED", conversation.id, { from: req.user!.id, to: colleague.id });
+  io.to(`agent:${colleague.id}`).emit("conversation:handoff-requested", request);
+  io.to("admins").emit("handoff:updated", { conversationId: conversation.id });
+  const customerName = request.conversation.customer.displayName || request.conversation.customer.name || "عميل";
+  void sendPushNotification([colleague.id], { title: "طلب استلام محادثة", body: `يريد ${req.user!.name} تحويل محادثة ${customerName} إليك. اقبل الطلب أو ارفضه من مساحة العمل.`, url: "/agent/workspace", tag: `handoff-${conversation.id}` }).catch((error) => console.warn("Handoff request push notification failed", error));
+  res.status(202).json({ ...request, status: ConversationHandoffStatus.PENDING });
+});
+
+app.post("/api/conversations/:id/handoff-response", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "الرد على طلبات التحويل متاح لموظفي خدمة العملاء فقط" });
+  const parsed = z.object({ decision: z.enum(["ACCEPT", "DECLINE"]) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اختر قبول الطلب أو رفضه" });
+  const request = await prisma.conversationHandoffRequest.findUnique({ where: { conversationId: req.params.id }, include: { fromAgent: { select: { id: true, name: true } }, conversation: { include: { customer: true } } } });
+  if (!request || request.status !== ConversationHandoffStatus.PENDING) return res.status(409).json({ error: "طلب التحويل لم يعد متاحًا" });
+  if (request.toAgentId !== req.user!.id) return res.status(403).json({ error: "هذا الطلب موجّه إلى موظف آخر" });
+
+  if (parsed.data.decision === "DECLINE") {
+    const declined = await prisma.conversationHandoffRequest.updateMany({ where: { id: request.id, toAgentId: req.user!.id, status: ConversationHandoffStatus.PENDING }, data: { status: ConversationHandoffStatus.DECLINED, resolvedAt: new Date() } });
+    if (!declined.count) return res.status(409).json({ error: "تمت معالجة طلب التحويل بالفعل" });
+    await audit(req.user!.id, "CONVERSATION_HANDOFF_DECLINED", request.conversationId, { from: request.fromAgentId, to: request.toAgentId });
+    const event = { conversationId: request.conversationId, decision: "DECLINED", agentName: req.user!.name };
+    io.to(`agent:${request.fromAgentId}`).emit("conversation:handoff-declined", event);
+    io.to("admins").emit("handoff:updated", event);
+    void sendPushNotification([request.fromAgentId], { title: "رُفض طلب تحويل المحادثة", body: `رفض ${req.user!.name} استلام محادثة ${request.conversation.customer.displayName || request.conversation.customer.name || "العميل"}؛ بقيت المحادثة لديك.`, url: "/agent/workspace", tag: `handoff-declined-${request.conversationId}` }).catch((error) => console.warn("Handoff decline push notification failed", error));
+    return res.json({ status: ConversationHandoffStatus.DECLINED, conversationId: request.conversationId });
+  }
+
+  let updated;
+  try {
+    updated = await prisma.$transaction(async (transaction) => {
+      const accepted = await transaction.conversationHandoffRequest.updateMany({ where: { id: request.id, toAgentId: req.user!.id, status: ConversationHandoffStatus.PENDING }, data: { status: ConversationHandoffStatus.ACCEPTED, resolvedAt: new Date() } });
+      if (!accepted.count) throw new Error("HANDOFF_ALREADY_RESOLVED");
+      const moved = await transaction.conversation.updateMany({ where: { id: request.conversationId, assignedAgentId: request.fromAgentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } }, data: { assignedAgentId: request.toAgentId, status: ConversationStatus.OPEN, awaitingRouting: false } });
+      if (!moved.count) throw new Error("HANDOFF_CONVERSATION_CHANGED");
+      await transaction.conversationAssignment.createMany({ data: [request.fromAgentId, request.toAgentId].map((agentId) => ({ conversationId: request.conversationId, agentId })), skipDuplicates: true });
+      return transaction.conversation.findUniqueOrThrow({ where: { id: request.conversationId }, include: { customer: true, assignedAgent: { select: { id: true, name: true } } } });
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("HANDOFF_")) return res.status(409).json({ error: "تغيّر إسناد المحادثة. حدّث الصفحة وحاول مجددًا" });
+    throw error;
+  }
+  await audit(req.user!.id, "CONVERSATION_HANDOFF_ACCEPTED", request.conversationId, { from: request.fromAgentId, to: request.toAgentId });
+  io.to(`agent:${request.fromAgentId}`).emit("conversation:unassigned", updated);
+  io.to(`agent:${request.toAgentId}`).emit("conversation:assigned", updated);
   io.to("admins").emit("conversation:updated", updated);
-  void sendPushNotification([colleague.id], { title: "محادثة محولة إليك", body: `حوّل لك ${req.user!.name} محادثة ${updated.customer?.name || "عميل"} للمتابعة.`, url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag: `handoff-${conversation.id}` }).catch((error) => console.warn("Handoff push notification failed", error));
+  io.to("admins").emit("handoff:updated", { conversationId: request.conversationId, decision: "ACCEPTED" });
+  void sendPushNotification([request.fromAgentId], { title: "تم قبول طلب التحويل", body: `قبل ${req.user!.name} استلام المحادثة؛ لم تعد مسندة إليك.`, url: "/agent/workspace", tag: `handoff-accepted-${request.conversationId}` }).catch((error) => console.warn("Handoff acceptance push notification failed", error));
   res.json(updated);
 });
 
@@ -1271,6 +1349,17 @@ app.patch("/api/conversations/:id/status", agentGuard, async (req: AuthedRequest
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { isBlocked: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل المحادثة" });
+  if (terminalStatuses.includes(parsed.data.status)) {
+    const pendingRequest = await prisma.conversationHandoffRequest.findUnique({ where: { conversationId: conversation.id } });
+    if (pendingRequest?.status === ConversationHandoffStatus.PENDING) {
+      const cancelled = await prisma.conversationHandoffRequest.updateMany({ where: { id: pendingRequest.id, status: ConversationHandoffStatus.PENDING }, data: { status: ConversationHandoffStatus.CANCELLED, resolvedAt: new Date() } });
+      if (cancelled.count) {
+        await audit(req.user!.id, "CONVERSATION_HANDOFF_CANCELLED", conversation.id, { from: pendingRequest.fromAgentId, to: pendingRequest.toAgentId, reason: "CONVERSATION_CLOSED" });
+        io.to(`agent:${pendingRequest.toAgentId}`).emit("conversation:handoff-cancelled", { conversationId: conversation.id });
+        io.to("admins").emit("handoff:updated", { conversationId: conversation.id, decision: "CANCELLED" });
+      }
+    }
+  }
   const updated = await prisma.conversation.update({ where: { id: conversation.id }, data: { status: parsed.data.status, closedAt: terminalStatuses.includes(parsed.data.status) ? new Date() : null } });
   await audit(req.user!.id, parsed.data.status === ConversationStatus.CLOSED ? "CONVERSATION_CLOSED" : "CONVERSATION_STATUS_CHANGED", conversation.id, { status: parsed.data.status });
   io.to("admins").emit("conversation:updated", updated);
@@ -2050,7 +2139,8 @@ app.post("/api/admin/integrations/telegram/webhook", adminGuard, async (req: Aut
 
 app.get("/api/admin/dashboard", permissionGuard("canViewReports"), async (_req: express.Request, res: express.Response) => {
   const today = startOfCairoDay();
-  const [openChats, queue, slaBreached, agents, todayResponses, closedToday, recentAudit, allRatings] = await Promise.all([
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const [openChats, queue, slaBreached, agents, todayResponses, closedToday, recentAudit, allRatings, weeklyReplyCounts, weeklyConversationTouches, pendingHandoffs] = await Promise.all([
     prisma.conversation.count({ where: { status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } } }),
     prisma.conversation.count({ where: { status: ConversationStatus.QUEUED } }),
     prisma.conversation.count({ where: { slaBreachedAt: { not: null }, status: { not: ConversationStatus.CLOSED } } }),
@@ -2058,8 +2148,12 @@ app.get("/api/admin/dashboard", permissionGuard("canViewReports"), async (_req: 
     prisma.conversation.findMany({ where: { firstResponseAt: { gte: today } }, select: { createdAt: true, firstResponseAt: true, assignedAgentId: true } }),
     prisma.conversation.count({ where: { status: { in: [ConversationStatus.CLOSED, ConversationStatus.RESOLVED] }, closedAt: { gte: today } } }),
     prisma.auditLog.findMany({ orderBy: { createdAt: "desc" }, take: 12, include: { actor: { select: { name: true } } } }),
-    prisma.csatSurvey.findMany({ where: { rating: { not: null } }, select: { rating: true } })
+    prisma.csatSurvey.findMany({ where: { rating: { not: null } }, select: { rating: true } }),
+    prisma.message.groupBy({ by: ["authorId"], where: { authorId: { not: null }, createdAt: { gte: weekAgo }, direction: MessageDirection.OUTBOUND }, _count: { _all: true } }),
+    prisma.message.findMany({ where: { authorId: { not: null }, createdAt: { gte: weekAgo }, direction: MessageDirection.OUTBOUND }, distinct: ["authorId", "conversationId"], select: { authorId: true, conversationId: true } }),
+    prisma.conversationHandoffRequest.findMany({ where: { status: ConversationHandoffStatus.PENDING }, include: { fromAgent: { select: { id: true, name: true } }, toAgent: { select: { id: true, name: true } }, conversation: { include: { customer: { select: { name: true, displayName: true } } } } }, orderBy: { createdAt: "desc" } })
   ]);
+  const weeklyStats = weeklyAgentPerformance(agents.map((agent) => agent.id), weeklyReplyCounts.map((row) => ({ authorId: row.authorId, count: row._count._all })), weeklyConversationTouches);
   const durations = todayResponses.flatMap((row) => row.firstResponseAt ? [row.firstResponseAt.getTime() - row.createdAt.getTime()] : []);
   const employeeStats = await Promise.all(agents.map(async (agent) => {
     const [activeChats, slaBreachedChats, responses, ratings] = await Promise.all([
@@ -2072,10 +2166,10 @@ app.get("/api/admin/dashboard", permissionGuard("canViewReports"), async (_req: 
     const sessionMinutes = agent.sessions.reduce((sum, session) => sum + ((session.endedAt || new Date()).getTime() - session.startedAt.getTime()) / 60000, 0);
      const closedOrders = await prisma.orderDetails.count({ where: { status: { in: [OrderStatus.DELIVERED, OrderStatus.COMPLETED] }, updatedAt: { gte: today }, conversation: { is: { assignedAgentId: agent.id } } } });
     const validRatings = ratings.flatMap((row) => row.rating === null ? [] : [row.rating]);
-    return { ...agent, activeChats, slaBreachedChats, avgResponseSeconds: seconds.length ? Math.round(seconds.reduce((a, b) => a + b, 0) / seconds.length) : null, avgCsat: validRatings.length ? Number((validRatings.reduce((a, b) => a + b, 0) / validRatings.length).toFixed(1)) : null, csatCount: validRatings.length, closedOrders, sessionMinutes: Math.round(sessionMinutes) };
+    return { ...agent, ...weeklyStats[agent.id], activeChats, slaBreachedChats, avgResponseSeconds: seconds.length ? Math.round(seconds.reduce((a, b) => a + b, 0) / seconds.length) : null, avgCsat: validRatings.length ? Number((validRatings.reduce((a, b) => a + b, 0) / validRatings.length).toFixed(1)) : null, csatCount: validRatings.length, closedOrders, sessionMinutes: Math.round(sessionMinutes) };
   }));
   const ratings = allRatings.flatMap((row) => row.rating === null ? [] : [row.rating]);
-  res.json({ kpis: { openChats, queue, slaBreached, avgResponseSeconds: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length / 1000) : null, closedToday, avgCsat: ratings.length ? Number((ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)) : null, csatCount: ratings.length }, agents: employeeStats, recentAudit });
+  res.json({ kpis: { openChats, queue, slaBreached, avgResponseSeconds: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length / 1000) : null, closedToday, avgCsat: ratings.length ? Number((ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)) : null, csatCount: ratings.length }, agents: employeeStats, recentAudit, pendingHandoffs });
 });
 
 app.get("/api/admin/branches", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => {

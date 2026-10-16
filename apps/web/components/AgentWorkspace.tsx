@@ -93,6 +93,8 @@ export default function AgentWorkspace() {
   const [showHandoff, setShowHandoff] = useState(false);
   const [handoffColleagues, setHandoffColleagues] = useState<AnyRecord[]>([]);
   const [handoffBusyId, setHandoffBusyId] = useState("");
+  const [incomingHandoffs, setIncomingHandoffs] = useState<AnyRecord[]>([]);
+  const [handoffResponseBusyId, setHandoffResponseBusyId] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [sendingProducts, setSendingProducts] = useState(false);
   const sendingRef = useRef(false);
@@ -234,17 +236,28 @@ export default function AgentWorkspace() {
     try {
       await api(`/api/conversations/${conversationId}/handoff`, { method: "POST", body: JSON.stringify({ agentId }) });
       setShowHandoff(false);
-      socketRef.current?.emit("conversation:leave", conversationId);
-      activeIdRef.current = "";
-      setActiveId("");
-      setDetail(null);
-      setIncomingNotice({ isHandoffSent: true, conversationId, customerName: customerDisplayName(detail?.customer), channel: detail?.channel, preview: `يتابع ${agentName} هذه المحادثة الآن.` });
-      void loadChats();
+      setNotice(`أُرسل طلب التحويل إلى ${agentName}. ستبقى المحادثة لديك حتى يقبله الزميل.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "تعذر تحويل المحادثة للزميل");
       void api("/api/agents/customer-care-colleagues").then(setHandoffColleagues).catch(() => {});
     }
     finally { setHandoffBusyId(""); }
+  }
+
+  async function respondToHandoff(request: AnyRecord, decision: "ACCEPT" | "DECLINE") {
+    const conversationId = request.conversationId;
+    if (handoffResponseBusyId) return;
+    setHandoffResponseBusyId(conversationId);
+    try {
+      await api(`/api/conversations/${conversationId}/handoff-response`, { method: "POST", body: JSON.stringify({ decision }) });
+      setIncomingHandoffs((current) => current.filter((item) => item.conversationId !== conversationId));
+      if (decision === "ACCEPT") {
+        setNotice("قبلت طلب التحويل وأصبحت المحادثة ضمن محادثاتك.");
+        await loadChats();
+        void openChat(conversationId);
+      } else setNotice("رُفض طلب التحويل؛ بقيت المحادثة لدى زميلك.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر الرد على طلب التحويل"); }
+    finally { setHandoffResponseBusyId(""); }
   }
 
   async function toggleFavorite() {
@@ -428,6 +441,20 @@ export default function AgentWorkspace() {
         void loadChats();
         setIncomingNotice({ isHandoff: true, conversationId: event.conversation.id, customerName: customerDisplayName(event.conversation.customer), channel: event.conversation.channel, preview: `حوّلها إليك ${event.fromAgentName || "زميلك"}.` });
       });
+      connection.on("conversation:handoff-requested", (request) => {
+        setIncomingHandoffs((current) => [request, ...current.filter((item) => item.conversationId !== request.conversationId)]);
+        playIncomingMessageTone();
+      });
+      connection.on("conversation:handoff-declined", (event) => {
+        setNotice(`رفض ${event.agentName || "الزميل"} استلام المحادثة؛ بقيت لديك.`);
+        void loadChats();
+      });
+      connection.on("conversation:handoff-cancelled", (event) => {
+        setIncomingHandoffs((current) => current.filter((item) => item.conversationId !== event.conversationId));
+      });
+      connection.on("conversation:admin-reassigned", (event) => {
+        setIncomingNotice({ isHandoffSent: true, isAdminReassignment: true, conversationId: event.conversationId, customerName: event.customerName, preview: event.body });
+      });
       connection.on("conversation:unassigned", (event) => {
         void loadChats();
         if (!historyModeRef.current) setConversations((current) => {
@@ -469,14 +496,15 @@ export default function AgentWorkspace() {
       connection.on("admin:viewing", (event) => setWatching(Boolean(event.viewing)));
       connection.on("sla:breached", () => setNotice("تنبيه: تجاوزت هذه المحادثة مهلة الرد المحددة."));
         const initialChatsRequest = ++chatLoadRequest.current;
-        const [chatPage, replies, catalog, favorites, customerFavorites, pins] = await Promise.all([api("/api/conversations?limit=50"), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins")]);
+        const handoffRequests = profile.role === "AGENT" && profile.department === "CUSTOMER_CARE" ? api("/api/agents/handoff-requests") : Promise.resolve([]);
+        const [chatPage, replies, catalog, favorites, customerFavorites, pins, requests] = await Promise.all([api("/api/conversations?limit=50"), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins"), handoffRequests]);
          if (!current) return;
          const chats = initialChatsRequest === chatLoadRequest.current ? chatPage.items || [] : conversationsRef.current;
          if (initialChatsRequest === chatLoadRequest.current && !historyModeRef.current) {
            conversationsRef.current = chats; chatScopeRef.current = false; loadedExtraChatsRef.current = false;
            setConversations(chats); setChatCursor(chatPage.nextCursor || null); setHasMoreChats(Boolean(chatPage.hasMore)); setChatLoadError("");
          }
-        setCanned(replies); setProducts(catalog); setFavoriteIds(favorites.map((item: AnyRecord) => item.id)); setPinnedIds(pins.map((item: AnyRecord) => item.id)); setFavoriteCustomerIds(customerFavorites.ids || []);
+        setCanned(replies); setProducts(catalog); setFavoriteIds(favorites.map((item: AnyRecord) => item.id)); setPinnedIds(pins.map((item: AnyRecord) => item.id)); setFavoriteCustomerIds(customerFavorites.ids || []); setIncomingHandoffs((current) => [...requests, ...current.filter((item) => !requests.some((request: AnyRecord) => request.conversationId === item.conversationId))]);
       if (chats.length && !activeIdRef.current) {
         const requestedId = new URLSearchParams(window.location.search).get("conversation");
         const requestedChat = requestedId && chats.find((chat: AnyRecord) => chat.id === requestedId);
@@ -812,7 +840,8 @@ export default function AgentWorkspace() {
       <div className="flex items-center gap-1 sm:gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><PushNotificationsButton /><InstallAppButton /><button type="button" onClick={() => router.push("/contacts")} title="جهات الاتصال ودليل الشركة" aria-label="جهات الاتصال ودليل الشركة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-500 hover:bg-amber-50 hover:text-amber-700"><BookUser size={17} /></button><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-9 w-9 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={17} /> : <BellOff size={17} />}</button><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
     </header>
 
-      {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "رسالة واردة"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
+      {incomingHandoffs.length > 0 && <div className="fixed left-3 right-3 top-[76px] z-[60] ml-auto max-h-[60vh] max-w-sm space-y-2 overflow-y-auto sm:left-auto sm:right-6">{incomingHandoffs.slice(0, 4).map((request) => <article key={request.conversationId} role="status" className="rounded-2xl border border-amber-200 bg-white p-4 shadow-xl"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-xs font-extrabold text-amber-900">طلب استلام محادثة</p><p className="mt-1 truncate text-xs font-bold text-stone-700">{request.conversation?.customer?.displayName || request.conversation?.customer?.name || "عميل"}</p><p className="mt-1 text-[10px] text-stone-500">حوّلها إليك {request.fromAgent?.name || "زميل"}. اقبل لتصبح مسؤولًا عنها أو ارفض لتبقى لدى زميلك.</p></div><button type="button" onClick={() => setIncomingHandoffs((current) => current.filter((item) => item.conversationId !== request.conversationId))} aria-label="إخفاء طلب التحويل" className="rounded-md p-1 text-stone-400 hover:bg-stone-100">×</button></div><div className="mt-3 flex gap-2"><button type="button" disabled={handoffResponseBusyId === request.conversationId} onClick={() => void respondToHandoff(request, "DECLINE")} className="min-h-9 flex-1 rounded-lg border border-stone-200 px-3 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">رفض</button><button type="button" disabled={handoffResponseBusyId === request.conversationId} onClick={() => void respondToHandoff(request, "ACCEPT")} className="min-h-9 flex-1 rounded-lg bg-emerald-700 px-3 text-[10px] font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{handoffResponseBusyId === request.conversationId ? "جارٍ الرد..." : "قبول واستلام"}</button></div></article>)}</div>}
+      {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isAdminReassignment ? "تم سحب المحادثة بواسطة الإدارة" : incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "إشعار من المدير"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
 
     <section data-chat-open={Boolean(activeId)} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
        <aside className="workspace-list panel flex min-h-0 flex-col overflow-hidden">

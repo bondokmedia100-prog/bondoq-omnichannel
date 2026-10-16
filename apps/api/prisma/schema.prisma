@@ -53,6 +53,13 @@ enum ConversationStatus {
   CLOSED
 }
 
+enum ConversationHandoffStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
 enum ConversationBotState {
   BOT_MENU
   ASSIGNED_TO_AGENT
@@ -120,6 +127,8 @@ model User {
   updatedAt                DateTime               @updatedAt
   assignedChats            Conversation[]         @relation("AssignedAgent")
   conversationAssignmentHistory ConversationAssignment[]
+  sentHandoffRequests      ConversationHandoffRequest[] @relation("HandoffRequestFrom")
+  receivedHandoffRequests  ConversationHandoffRequest[] @relation("HandoffRequestTo")
   sessions                 AgentSession[]
   auditLogs                AuditLog[]
   whisperNotes             WhisperNote[]
@@ -250,6 +259,7 @@ model Conversation {
   csatSurvey             CsatSurvey?
   whatsappCallSessions   WhatsAppCallSession[]
   assignmentHistory      ConversationAssignment[]
+  handoffRequest         ConversationHandoffRequest?
 
   @@unique([channel, externalConversationId])
   @@index([assignedAgentId, status, lastMessageAt])
@@ -267,6 +277,22 @@ model ConversationAssignment {
 
   @@id([conversationId, agentId])
   @@index([agentId, lastAssignedAt])
+}
+
+model ConversationHandoffRequest {
+  id             String                     @id @default(cuid())
+  conversationId String                     @unique
+  fromAgentId    String
+  toAgentId      String
+  status         ConversationHandoffStatus  @default(PENDING)
+  createdAt      DateTime                   @default(now())
+  resolvedAt     DateTime?
+  conversation   Conversation               @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  fromAgent      User                       @relation("HandoffRequestFrom", fields: [fromAgentId], references: [id], onDelete: Cascade)
+  toAgent        User                       @relation("HandoffRequestTo", fields: [toAgentId], references: [id], onDelete: Cascade)
+
+  @@index([toAgentId, status, createdAt])
+  @@index([fromAgentId, status, createdAt])
 }
 
 model Message {
