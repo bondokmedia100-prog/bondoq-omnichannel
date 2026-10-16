@@ -18,6 +18,7 @@ export type NormalizedInbound = {
   latitude?: number;
   longitude?: number;
   externalId: string;
+  direction?: "INBOUND" | "OUTBOUND";
   metadata?: Record<string, unknown>;
   routingDepartment?: Department;
   isComplaint?: boolean;

@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Archive, ArrowDown, ArrowLeft, Ban, Bell, BellOff, BookUser, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, Forward, ListChecks, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, Paperclip, Pencil, Phone, PhoneCall, Pin, Printer, Reply as ReplyIcon, Search, Send, Star, Trash2, UserPlus, UserRound, Users, X } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, Ban, Bell, BellOff, BookUser, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, Forward, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, Paperclip, Pencil, Phone, PhoneCall, Pin, Printer, Reply as ReplyIcon, Search, Send, Star, Trash2, UserPlus, UserRound, Users, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
-import { displayPhoneNumber, normalizePhoneNumber } from "@/lib/egyptianPhoneFormatter";
+import { displayPhoneNumber, normalizePhoneNumber, phoneNumbersMatch } from "@/lib/egyptianPhoneFormatter";
 import AccountSettingsModal from "./AccountSettingsModal";
 import PushNotificationsButton from "./PushNotificationsButton";
 import InstallAppButton from "./InstallAppButton";
@@ -73,6 +73,11 @@ export default function AgentWorkspace() {
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [internalNote, setInternalNote] = useState("");
+  const [privateNoteText, setPrivateNoteText] = useState("");
+  const [privateNoteRecipientId, setPrivateNoteRecipientId] = useState("");
+  const [privateNoteRecipients, setPrivateNoteRecipients] = useState<AnyRecord[]>([]);
+  const [sendingPrivateNote, setSendingPrivateNote] = useState(false);
+  const [showPrivateNoteComposer, setShowPrivateNoteComposer] = useState(false);
   const [replyingTo, setReplyingTo] = useState<AnyRecord | null>(null);
   const [editingMessageId, setEditingMessageId] = useState("");
   const [editingText, setEditingText] = useState("");
@@ -91,6 +96,9 @@ export default function AgentWorkspace() {
   const [loadingMoreChats, setLoadingMoreChats] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState("");
+  const [imageEditor, setImageEditor] = useState<{ file: File; url: string } | null>(null);
+  const [annotationColor, setAnnotationColor] = useState("#d32f2f");
+  const [annotationSize, setAnnotationSize] = useState(7);
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -132,12 +140,34 @@ export default function AgentWorkspace() {
   const messageEndRef = useRef<HTMLDivElement>(null);
   const headerOptionsRef = useRef<HTMLDivElement>(null);
   const replyInputRef = useRef<HTMLTextAreaElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const imageCanvasRef = useRef<HTMLCanvasElement>(null);
+  const imageEditorImageRef = useRef<HTMLImageElement | null>(null);
+  const imageEditorResolverRef = useRef<((file: File | null) => void) | null>(null);
+  const imageEditorDrawingRef = useRef(false);
+  const imageEditorPointRef = useRef<{ x: number; y: number } | null>(null);
   const stickToBottom = useRef(true);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingCancelledRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
   const [order, setOrder] = useState({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" });
+
+  useEffect(() => {
+    const conversationId = detail?.id;
+    setPrivateNoteRecipients([]);
+    setPrivateNoteRecipientId("");
+    setPrivateNoteText("");
+    setShowPrivateNoteComposer(false);
+    if (!conversationId || !detail.canSendPrivateNote) return;
+    let current = true;
+    void api(`/api/conversations/${conversationId}/private-note-recipients`).then((recipients: AnyRecord[]) => {
+      if (!current) return;
+      setPrivateNoteRecipients(recipients);
+      setPrivateNoteRecipientId((selected) => recipients.some((recipient) => recipient.id === selected) ? selected : recipients[0]?.id || "");
+    }).catch(() => { if (current) setPrivateNoteRecipients([]); });
+    return () => { current = false; };
+  }, [detail?.id, detail?.canSendPrivateNote]);
 
   async function loadChats(history = historyModeRef.current, team = teamModeRef.current, query = searchRef.current, groups = groupModeRef.current) {
     const trimmedQuery = query.trim();
@@ -409,6 +439,22 @@ export default function AgentWorkspace() {
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ الملاحظة الداخلية"); }
   }
 
+  async function sendPrivateConversationNote(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const conversationId = activeId;
+    const noteText = privateNoteText.trim();
+    if (!conversationId || !privateNoteRecipientId || !noteText || sendingPrivateNote) return;
+    const recipientName = privateNoteRecipients.find((recipient) => recipient.id === privateNoteRecipientId)?.name || "الزميل";
+    setSendingPrivateNote(true);
+    try {
+      const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ recipientId: privateNoteRecipientId, text: noteText }) });
+      setDetail((old: AnyRecord) => old?.id === conversationId && !old.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...old, privateNotes: [...(old.privateNotes || []), note] } : old);
+      setPrivateNoteText("");
+      setNotice(`أُرسلت الرسالة السرية إلى ${recipientName}.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال الرسالة السرية"); }
+    finally { setSendingPrivateNote(false); }
+  }
+
   async function reactToMessage(message: AnyRecord, emoji: string) {
     if (!activeId) return;
     const existing = message.reactions?.find((item: AnyRecord) => item.userId === user?.id);
@@ -497,6 +543,16 @@ export default function AgentWorkspace() {
       connection.on("conversation-note:new", (event) => {
         if (event.conversationId) setDetail((old: AnyRecord) => old?.id === event.conversationId && !old.internalNotes?.some((note: AnyRecord) => note.id === event.note.id) ? { ...old, internalNotes: [...(old.internalNotes || []), event.note] } : old);
       });
+      connection.on("conversation-private-note:new", (event) => {
+        const note = event.note;
+        if (!event.conversationId || !note) return;
+        setDetail((old: AnyRecord) => old?.id === event.conversationId && !old.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...old, privateNotes: [...(old.privateNotes || []), note] } : old);
+        if (note.recipientId === profile.id && activeIdRef.current !== event.conversationId) {
+          const chat = conversationsRef.current.find((item) => item.id === event.conversationId);
+          playIncomingMessageTone();
+          setIncomingNotice({ isPrivateNote: true, conversationId: event.conversationId, customerName: event.customerName || customerDisplayName(chat?.customer), channel: event.channel || chat?.channel, authorName: note.author?.name, preview: note.text });
+        }
+      });
       connection.on("whatsapp:group-updated", (event) => {
         if (event.conversationId) setGroupData((old: AnyRecord) => old?.id === event.group?.id ? event.group : old);
       });
@@ -571,6 +627,15 @@ export default function AgentWorkspace() {
           loadingMessagesRef.current.set(conversationId, mergeMessages(loadingMessagesRef.current.get(conversationId) || [], event.message));
         }
         if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: event.customer || old.customer } : old);
+      });
+      connection.on("whatsapp:history-synced", ({ conversationIds }: { conversationIds?: string[] }) => {
+        void loadChats();
+        const conversationId = activeIdRef.current;
+        if (conversationId && conversationIds?.includes(conversationId)) {
+          void api(`/api/conversations/${conversationId}?messageLimit=50`).then((conversation) => {
+            setDetail((current: AnyRecord) => current?.id === conversationId ? conversation : current);
+          }).catch(() => {});
+        }
       });
       connection.on("conversation:access-revoked", ({ conversationId }) => {
         if (activeIdRef.current === conversationId) {
@@ -682,6 +747,22 @@ export default function AgentWorkspace() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [lightboxImage]);
+
+  useEffect(() => {
+    if (!imageEditor) return;
+    const image = new Image();
+    image.onload = () => {
+      const canvas = imageCanvasRef.current;
+      const context = canvas?.getContext("2d");
+      if (!canvas || !context) return;
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      context.drawImage(image, 0, 0);
+      imageEditorImageRef.current = image;
+    };
+    image.src = imageEditor.url;
+    return () => { imageEditorImageRef.current = null; };
+  }, [imageEditor?.url]);
 
   useEffect(() => {
     if (!showHeaderOptions) return;
@@ -854,7 +935,86 @@ export default function AgentWorkspace() {
     }
   }
   async function uploadSelectedFiles(files: File[]) {
-    for (const file of files) await uploadAndSend(file);
+    for (const file of files) {
+      const prepared = file.type.startsWith("image/") ? await editImageBeforeSend(file) : file;
+      if (prepared) await uploadAndSend(prepared);
+    }
+  }
+  function editImageBeforeSend(file: File): Promise<File | null> {
+    return new Promise((resolve) => {
+      imageEditorResolverRef.current = resolve;
+      setImageEditor({ file, url: URL.createObjectURL(file) });
+    });
+  }
+  function finishImageEditor(save: boolean) {
+    const editor = imageEditor;
+    const resolve = imageEditorResolverRef.current;
+    if (!editor || !resolve) return;
+    imageEditorResolverRef.current = null;
+    setImageEditor(null);
+    imageEditorDrawingRef.current = false;
+    if (!save) {
+      resolve(null);
+      URL.revokeObjectURL(editor.url);
+      return;
+    }
+    const canvas = imageCanvasRef.current;
+    if (!canvas) {
+      resolve(editor.file);
+      URL.revokeObjectURL(editor.url);
+      return;
+    }
+    canvas.toBlob((blob) => {
+      if (!blob) { resolve(editor.file); URL.revokeObjectURL(editor.url); return; }
+      const extension = blob.type === "image/jpeg" ? "jpg" : blob.type === "image/webp" ? "webp" : "png";
+      const name = `${editor.file.name.replace(/\.[^.]+$/, "")}-annotated.${extension}`;
+      resolve(new File([blob], name, { type: blob.type }));
+      URL.revokeObjectURL(editor.url);
+    }, editor.file.type);
+  }
+  function imageEditorPosition(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const canvas = imageCanvasRef.current;
+    const bounds = canvas?.getBoundingClientRect();
+    if (!canvas || !bounds) return null;
+    return { x: (event.clientX - bounds.left) * canvas.width / bounds.width, y: (event.clientY - bounds.top) * canvas.height / bounds.height };
+  }
+  function beginImageAnnotation(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const canvas = event.currentTarget;
+    const context = canvas.getContext("2d");
+    const point = imageEditorPosition(event);
+    if (!context || !point) return;
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    imageEditorDrawingRef.current = true;
+    imageEditorPointRef.current = point;
+    context.strokeStyle = annotationColor;
+    context.lineWidth = annotationSize * (canvas.width / Math.max(1, canvas.clientWidth));
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.beginPath();
+    context.arc(point.x, point.y, context.lineWidth / 2, 0, Math.PI * 2);
+    context.stroke();
+  }
+  function drawImageAnnotation(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (!imageEditorDrawingRef.current) return;
+    const canvas = event.currentTarget;
+    const context = canvas.getContext("2d");
+    const point = imageEditorPosition(event);
+    const previous = imageEditorPointRef.current;
+    if (!context || !point || !previous) return;
+    context.strokeStyle = annotationColor;
+    context.lineWidth = annotationSize * (canvas.width / Math.max(1, canvas.clientWidth));
+    context.beginPath();
+    context.moveTo(previous.x, previous.y);
+    context.lineTo(point.x, point.y);
+    context.stroke();
+    imageEditorPointRef.current = point;
+  }
+  function clearImageAnnotations() {
+    const canvas = imageCanvasRef.current;
+    const context = canvas?.getContext("2d");
+    const image = imageEditorImageRef.current;
+    if (canvas && context && image) { context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(image, 0, 0); }
   }
    async function startRecording() {
       if (recorderRef.current || !activeId || sendingRef.current) return;
@@ -979,7 +1139,8 @@ export default function AgentWorkspace() {
   });
   let unsavedPhone = "";
   try { if (search.trim()) unsavedPhone = normalizePhoneNumber(search.trim()); } catch {}
-  const hasPhoneConversation = Boolean(unsavedPhone && visible.some((chat) => chat.customer?.phone && (() => { try { return normalizePhoneNumber(chat.customer.phone) === unsavedPhone; } catch { return false; } })()));
+  const hasPhoneConversation = Boolean(unsavedPhone && visible.some((chat) => [chat.customer?.phone, chat.externalCustomerId, chat.externalConversationId]
+    .some((value) => typeof value === "string" && phoneNumbersMatch(value, unsavedPhone))));
   const availableChannels = user
     ? channels.filter((item) => {
       if (item.id === "ALL") return true;
@@ -989,8 +1150,54 @@ export default function AgentWorkspace() {
       return false;
     })
     : channels.filter((item) => item.id === "ALL");
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const typing = target instanceof HTMLElement && (target.matches("input, textarea, select") || target.isContentEditable);
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+      if (event.key === "Escape" && imageEditor) {
+        finishImageEditor(false);
+        return;
+      }
+      if (event.key === "Escape" && editingMessageId) {
+        setEditingMessageId("");
+        setEditingText("");
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey && target instanceof HTMLTextAreaElement && target.closest(".agent-message-bubble") && editingMessageId) {
+        event.preventDefault();
+        const message = detail?.messages?.find((item: AnyRecord) => item.id === editingMessageId);
+        if (message) void saveMessageEdit(message);
+        return;
+      }
+      if (typing || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && visible.length) {
+        event.preventDefault();
+        const current = visible.findIndex((chat) => chat.id === activeId);
+        const next = current < 0 ? 0 : (current + (event.key === "ArrowDown" ? 1 : -1) + visible.length) % visible.length;
+        void openChat(visible[next].id);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [activeId, detail, editingMessageId, imageEditor, visible]);
   const filteredCanned = [...agentQuickReplies, ...canned].filter((item) => !text.startsWith("/") || item.shortcut.toLowerCase().includes(text.toLowerCase()) || item.title.includes(text.slice(1)));
   const visibleProducts = products.filter((product) => (productFilter === "ALL" || product.category === productFilter) && `${product.name || ""} ${product.sku || ""}`.toLocaleLowerCase().includes(productSearch.trim().toLocaleLowerCase()));
+  const privateNoteComposer = detail?.canSendPrivateNote && <form onSubmit={sendPrivateConversationNote} className="space-y-2 rounded-xl border border-violet-200 bg-violet-50/80 p-3 text-right">
+    <label className="block text-[10px] font-bold text-violet-950">إلى زميل العمل
+      <select required value={privateNoteRecipientId} onChange={(event) => setPrivateNoteRecipientId(event.target.value)} disabled={!privateNoteRecipients.length || sendingPrivateNote} className="mt-1 h-9 w-full rounded-lg border border-violet-200 bg-white px-2 text-xs font-normal outline-none focus:border-violet-400 disabled:bg-violet-50">
+        <option value="">{privateNoteRecipients.length ? "اختر الزميل" : "لا يوجد زملاء ضمن صلاحية هذه المحادثة"}</option>
+        {privateNoteRecipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.branch?.name ? ` · ${recipient.branch.name}` : ""}</option>)}
+      </select>
+    </label>
+    <textarea value={privateNoteText} onChange={(event) => setPrivateNoteText(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." className="w-full resize-y rounded-lg border border-violet-200 bg-white px-2 py-2 text-xs leading-5 outline-none focus:border-violet-400" />
+    <div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1 text-[9px] text-violet-700"><LockKeyhole size={12} /> يراها أنت والزميل والإدارة المخوّلة فقط</span><button disabled={sendingPrivateNote || !privateNoteRecipientId || !privateNoteText.trim()} className="flex h-9 items-center gap-1.5 rounded-lg bg-violet-800 px-3 text-[10px] font-bold text-white hover:bg-violet-900 disabled:opacity-40"><Send size={13} />{sendingPrivateNote ? "جارٍ الإرسال..." : "إرسال سرّي"}</button></div>
+  </form>;
 
   return <main style={{ "--chat-font-size": `${chatFontSize}px` } as CSSProperties} className="agent-app h-screen min-h-[700px] overflow-hidden bg-[#f0f2f5] text-stone-800">
     <header className="flex h-[68px] items-center justify-between border-b border-stone-200 bg-white px-4 sm:px-6">
@@ -999,11 +1206,11 @@ export default function AgentWorkspace() {
     </header>
 
       {incomingHandoffs.length > 0 && <div className="fixed left-3 right-3 top-[76px] z-[60] ml-auto max-h-[60vh] max-w-sm space-y-2 overflow-y-auto sm:left-auto sm:right-6">{incomingHandoffs.slice(0, 4).map((request) => <article key={request.conversationId} role="status" className="rounded-2xl border border-amber-200 bg-white p-4 shadow-xl"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-xs font-extrabold text-amber-900">طلب استلام محادثة</p><p className="mt-1 truncate text-xs font-bold text-stone-700">{request.conversation?.customer?.displayName || request.conversation?.customer?.name || "عميل"}</p><p className="mt-1 text-[10px] text-stone-500">حوّلها إليك {request.fromAgent?.name || "زميل"}. اقبل لتصبح مسؤولًا عنها أو ارفض لتبقى لدى زميلك.</p></div><button type="button" onClick={() => setIncomingHandoffs((current) => current.filter((item) => item.conversationId !== request.conversationId))} aria-label="إخفاء طلب التحويل" className="rounded-md p-1 text-stone-400 hover:bg-stone-100">×</button></div><div className="mt-3 flex gap-2"><button type="button" disabled={handoffResponseBusyId === request.conversationId} onClick={() => void respondToHandoff(request, "DECLINE")} className="min-h-9 flex-1 rounded-lg border border-stone-200 px-3 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">رفض</button><button type="button" disabled={handoffResponseBusyId === request.conversationId} onClick={() => void respondToHandoff(request, "ACCEPT")} className="min-h-9 flex-1 rounded-lg bg-emerald-700 px-3 text-[10px] font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{handoffResponseBusyId === request.conversationId ? "جارٍ الرد..." : "قبول واستلام"}</button></div></article>)}</div>}
-       {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isAutoReassignment ? "محادثة أُعيد إسنادها إليك" : incomingNotice.isAdminReassignment ? "تم سحب المحادثة بواسطة الإدارة" : incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "إشعار من المدير"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
+        {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isPrivateNote ? `رسالة سرية من ${incomingNotice.authorName || "زميل"}` : incomingNotice.isAutoReassignment ? "محادثة أُعيد إسنادها إليك" : incomingNotice.isAdminReassignment ? "تم سحب المحادثة بواسطة الإدارة" : incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : incomingNotice.isPrivateNote ? `محادثة مع ${incomingNotice.customerName}` : "إشعار من المدير"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
 
     <section data-chat-open={Boolean(activeId)} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
        <aside className="workspace-list panel flex min-h-0 flex-col overflow-hidden">
-            <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{search.trim() ? `نتائج البحث · ${conversations.length}` : statusFilter === "GROUPS" ? `${conversations.length} مجموعة WhatsApp` : statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف..." className="w-full bg-transparent text-xs outline-none" /></label>
+             <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{search.trim() ? `نتائج البحث · ${conversations.length}` : statusFilter === "GROUPS" ? `${conversations.length} مجموعة WhatsApp` : statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input ref={searchInputRef} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف..." className="w-full bg-transparent text-xs outline-none" /></label>
             <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
               <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "GROUPS", label: "الجروبات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
               {statusFilter === "GROUPS" && <button type="button" onClick={() => { setGroupSubject(""); setGroupPhones(""); setShowGroupCreator(true); }} className="mb-3 flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#e7f5ed] text-xs font-bold text-[#187a4a] hover:bg-[#d6eddf]"><UserPlus size={15} /> إنشاء مجموعة WhatsApp</button>}
@@ -1030,27 +1237,29 @@ export default function AgentWorkspace() {
               {metaChannel && <div className={`flex shrink-0 items-center gap-2 px-4 py-2 text-[10px] font-bold ${!metaWindowOpen ? "bg-red-50 text-red-700" : expiringSoon ? "bg-[#FFC107]/20 text-[#8c650a]" : "bg-emerald-50 text-emerald-700"}`}><Clock3 size={14} />{metaWindowOpen ? `نافذة Meta مفتوحة · متبقي ${formatCountdown(windowRemaining)}` : "انتهت نافذة الـ24 ساعة للرد الحر"}{detail.isComplaint && <span className="mr-auto rounded-full bg-red-100 px-2 py-0.5 text-red-700">شكوى · خدمة العملاء</span>}</div>}
           {watching && <div className="flex h-9 shrink-0 items-center gap-2 border-b border-blue-100 bg-blue-50 px-4 text-[11px] font-semibold text-blue-700"><Users size={14} /> المدير يراقب هذه المحادثة معك الآن</div>}
            {notice && <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-100 bg-amber-50 px-4 py-2 text-[11px] text-amber-900"><span>{notice}</span><button onClick={() => setNotice("")}><span>×</span></button></div>}
-              {detail.readOnly && <div role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[10px] font-bold text-amber-900">للقراءة فقط · لا يمكن إرسال رسائل أو تعديل المحادثة</div>}
+               {detail.readOnly && <div role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[10px] font-bold text-amber-900">للقراءة فقط · لا يمكن الرد على العميل أو تعديل المحادثة</div>}
              <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-200/70 bg-[#f0f2f5] px-4 text-[10px] text-stone-500"><span>حجم خط الرسائل</span><div className="flex items-center gap-2"><button type="button" aria-label="تصغير خط الرسائل" disabled={chatFontSize <= 12} onClick={() => { const next = Math.max(12, chatFontSize - 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">−</button><b className="min-w-7 text-center">{chatFontSize}</b><button type="button" aria-label="تكبير خط الرسائل" disabled={chatFontSize >= 20} onClick={() => { const next = Math.min(20, chatFontSize + 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">+</button></div><div className="soft-scroll flex max-w-[65%] gap-1 overflow-x-auto">{[{ id: "ALL", label: "الكل" }, { id: "IMAGES", label: "صور" }, { id: "AUDIO", label: "صوت" }, { id: "VIDEO", label: "فيديو" }, { id: "FILES", label: "ملفات" }, { id: "LINKS", label: "روابط" }].map((item) => <button type="button" key={item.id} aria-pressed={messageFilter === item.id} onClick={() => setMessageFilter(item.id)} className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${messageFilter === item.id ? "bg-stone-700 text-white" : "bg-white text-stone-500"}`}>{item.label}</button>)}</div></div>
              <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-7">
               {detail.hasMoreMessages && <button type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlderMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingOlderMessages ? "جارٍ تحميل الرسائل..." : "تحميل الرسائل الأقدم"}</button>}
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
                 {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
              {(detail.whisperNotes || []).map((note: AnyRecord) => <div key={`whisper-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-[#f0d786] bg-[#fff8e1] px-4 py-3 text-xs leading-6 text-[#755916]"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><CakeSlice size={14} /> توجيه سري من {note.author?.name || "المدير"}<span className="mr-auto text-[9px] font-normal text-[#aa8a36]">{ago(note.createdAt)}</span></div>{note.text}</div>)}
-              {(detail.internalNotes || []).map((note: AnyRecord) => <div key={`note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-blue-100 bg-blue-50/80 px-4 py-3 text-xs leading-6 text-blue-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold">ملاحظة داخلية · {note.author?.name || "الفريق"}<span className="mr-auto text-[9px] font-normal text-blue-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
+               {(detail.internalNotes || []).map((note: AnyRecord) => <div key={`note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-blue-100 bg-blue-50/80 px-4 py-3 text-xs leading-6 text-blue-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold">ملاحظة داخلية · {note.author?.name || "الفريق"}<span className="mr-auto text-[9px] font-normal text-blue-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
+              {(detail.privateNotes || []).map((note: AnyRecord) => <div key={`private-note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs leading-6 text-violet-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><LockKeyhole size={13} /> رسالة سرية {note.authorId === user?.id ? `إلى ${note.recipient?.name || "زميل"}` : `من ${note.author?.name || "زميل"}`}<span className="mr-auto text-[9px] font-normal text-violet-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
              <div className="mt-auto" /><div ref={messageEndRef} />
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
-           {detail.readOnly ? <div className="shrink-0 border-t border-stone-100 bg-white px-4 py-4 text-center text-xs text-stone-500">لإرسال رد، افتح محادثة نشطة مسندة إليك.</div> : <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
-             {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
+            {detail.readOnly ? <div className="shrink-0 border-t border-stone-100 bg-white px-3 py-3 text-center text-xs text-stone-500 sm:px-4"><p className="mb-3">الرد على العميل متاح لمتابع المحادثة فقط، لكن يمكنك مراسلة زميلك سرًا.</p>{privateNoteComposer || <p>لا توجد صلاحية لإرسال رسالة سرية في هذه المحادثة.</p>}</div> : <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
+              {detail.canSendPrivateNote && <div className="mb-3 rounded-xl border border-violet-100 bg-violet-50/50 p-2"><button type="button" onClick={() => setShowPrivateNoteComposer((visible) => !visible)} className="flex w-full items-center gap-2 px-1 py-1 text-right text-[10px] font-bold text-violet-900"><LockKeyhole size={14} />رسالة سرية لزميل<span className="mr-auto text-violet-600">{showPrivateNoteComposer ? "إخفاء" : "كتابة"}</span></button>{showPrivateNoteComposer && <div className="pt-2">{privateNoteComposer}</div>}</div>}
+              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
               {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
               {replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
               {detail.channel !== "MESSENGER" && <div className="mb-2 flex justify-end"><button type="button" disabled={!metaWindowOpen || sendingPoll} onClick={() => setShowPollComposer(true)} className="flex items-center gap-1 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[10px] font-bold text-sky-700 disabled:opacity-40"><ListChecks size={14} /> إنشاء استطلاع</button></div>}
               <div className="mb-2 flex justify-start"><button type="button" onClick={() => setShowQuickReplyManager(true)} className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100">إدارة ردودي السريعة</button></div>
             {showCanned && <div className="soft-scroll absolute bottom-[calc(100%-4px)] right-4 z-10 max-h-60 w-[min(340px,calc(100%-32px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply) => <button key={reply.id} onClick={() => { setText(reply.content); setShowCanned(false); }} className="flex w-full flex-col rounded-xl px-3 py-2 text-right hover:bg-[#fff8e9]"><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
-              <form onSubmit={sendReply}><div className="rounded-2xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={2} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !showCanned) { e.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-32 min-h-[62px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
+               <form onSubmit={sendReply}><div className="rounded-2xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={2} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void submitReply(); } else if (e.key === "Enter" && !e.shiftKey && !showCanned) { e.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-32 min-h-[62px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
                 <div className="flex flex-wrap items-center justify-between gap-1 border-t border-stone-100 px-2 py-2"><div className="flex items-center gap-1"><button type="button" disabled={!metaWindowOpen} title="ردود جاهزة" onClick={() => { setText(text.startsWith("/") ? text : "/"); setShowCanned(!showCanned); }} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-[#bd8e21] hover:bg-amber-50 disabled:opacity-40">/ رد جاهز</button><button type="button" disabled={!metaWindowOpen} onClick={() => setShowProducts(true)} className="flex items-center gap-1 rounded-lg bg-[#fff8e9] px-2 py-1.5 text-[10px] font-bold text-[#9b7219] disabled:opacity-40"><CakeSlice size={14} /> إرسال منتج</button><button type="button" title="إرفاق ملف" disabled={!metaWindowOpen || sending} onClick={() => uploadInputRef.current?.click()} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 disabled:opacity-40"><Paperclip size={16} /></button><button type="button" title={recording ? "إيقاف التسجيل وإرساله" : "تسجيل رسالة صوتية"} disabled={!metaWindowOpen || sending} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-400 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button><button type="button" title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-8 w-8 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={16} /> : <BellOff size={16} />}</button><button type="button" title="إرسال موقعي الحالي" aria-label="إرسال موقعي الحالي" disabled={!metaWindowOpen || sending} onClick={shareLocation} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 disabled:opacity-40"><MapPin size={16} /></button></div><button disabled={!text.trim() || !metaWindowOpen || sending} className="flex h-9 items-center gap-2 rounded-xl bg-[#d32f2f] px-4 text-xs font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span className="hidden sm:inline">{sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={15} /></button></div>
-              </div></form><p className="mt-2 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
+              </div></form><p className="mt-2 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · Ctrl + K للبحث · Alt + ↑/↓ للتنقل بين المحادثات</p>
            </div>}
         </> : activeId ? <div className="grid flex-1 place-items-center text-xs text-stone-400">جارٍ تحميل المحادثة...</div> : <div className="grid flex-1 place-items-center text-center"><div><div className="mx-auto grid h-16 w-16 place-items-center rounded-3xl bg-[#fff2dd] text-[#c38f22]"><MessageCircle size={28} /></div><h2 className="mt-4 font-extrabold">اختر محادثة للبدء</h2><p className="mt-1 text-xs text-stone-400">ستظهر لك الرسائل وتفاصيل العميل هنا.</p></div></div>}
       </section>
@@ -1088,6 +1297,7 @@ export default function AgentWorkspace() {
     </section>
       {incomingCall && <IncomingWhatsAppCallModal call={incomingCall} onReject={rejectIncomingWhatsAppCall} onOpenConversation={openIncomingCallConversation} onDismiss={() => setIncomingCall(null)} />}
       {callConversation && <WhatsAppCallModal conversationId={callConversation.id} customerName={customerDisplayName(callConversation.customer)} phone={callConversation.customer?.phone || callConversation.externalCustomerId || ""} socket={socket} onClose={() => setCallConversation(null)} />}
+      {imageEditor && <div role="dialog" aria-modal="true" aria-labelledby="image-editor-title" className="fixed inset-0 z-[75] grid place-items-center bg-stone-950/80 p-3 backdrop-blur-sm"><section className="panel flex max-h-[94vh] w-full max-w-4xl flex-col overflow-hidden bg-white p-4 sm:p-5"><div className="mb-3 flex items-start justify-between gap-3"><div><h2 id="image-editor-title" className="text-sm font-extrabold">ارسم على الصورة قبل الإرسال</h2><p className="mt-1 text-[10px] text-stone-500">اسحب بإصبعك أو بالفأرة لإضافة علامات توضيحية.</p></div><button type="button" onClick={() => finishImageEditor(false)} aria-label="إلغاء تعديل الصورة" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl bg-stone-50 p-2"><label className="flex items-center gap-2 text-[10px] font-bold text-stone-600">لون القلم<input aria-label="لون الرسم" type="color" value={annotationColor} onChange={(event) => setAnnotationColor(event.target.value)} className="h-8 w-10 cursor-pointer rounded border-0 bg-transparent p-0" /></label><label className="flex min-w-36 flex-1 items-center gap-2 text-[10px] font-bold text-stone-600">سُمك القلم<input aria-label="سُمك القلم" type="range" min="2" max="18" value={annotationSize} onChange={(event) => setAnnotationSize(Number(event.target.value))} className="w-full accent-[#d32f2f]" /></label><button type="button" onClick={clearImageAnnotations} className="flex h-8 items-center gap-1 rounded-lg bg-white px-3 text-[10px] font-bold text-stone-600 hover:bg-red-50 hover:text-red-700"><Trash2 size={13} /> مسح الرسم</button></div><div className="soft-scroll flex min-h-0 flex-1 items-center justify-center overflow-auto rounded-xl bg-stone-100 p-2"><div className="relative inline-block max-h-[64vh] max-w-full"><img src={imageEditor.url} alt="الصورة الجاري تعديلها" className="block max-h-[64vh] max-w-full select-none object-contain" draggable={false} /><canvas ref={imageCanvasRef} aria-label="لوحة الرسم على الصورة" className="absolute inset-0 h-full w-full touch-none cursor-crosshair" onPointerDown={beginImageAnnotation} onPointerMove={drawImageAnnotation} onPointerUp={() => { imageEditorDrawingRef.current = false; imageEditorPointRef.current = null; }} onPointerCancel={() => { imageEditorDrawingRef.current = false; imageEditorPointRef.current = null; }} /></div></div><div className="mt-3 flex justify-end gap-2"><button type="button" onClick={() => finishImageEditor(false)} className="min-h-10 rounded-xl border border-stone-200 px-4 text-xs font-bold text-stone-600">إلغاء الصورة</button><button type="button" onClick={() => finishImageEditor(true)} className="flex min-h-10 items-center gap-2 rounded-xl bg-[#d32f2f] px-5 text-xs font-extrabold text-white hover:bg-[#b71c1c]"><Send size={14} /> اعتماد الرسم وإرسال</button></div></section></div>}
       {showGroupCreator && <div className="fixed inset-0 z-[65] grid place-items-center bg-stone-900/50 p-3 backdrop-blur-sm" onClick={() => setShowGroupCreator(false)}><form onSubmit={createWhatsAppGroup} role="dialog" aria-modal="true" aria-labelledby="create-group-title" className="panel w-full max-w-md space-y-4 p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="flex items-start justify-between gap-3"><div><h2 id="create-group-title" className="text-base font-extrabold">إنشاء مجموعة WhatsApp</h2><p className="mt-1 text-xs leading-5 text-stone-500">تُنشأ عبر اتصال Baileys الحالي، وتظهر المحادثة في قائمة الجروبات.</p></div><button type="button" onClick={() => setShowGroupCreator(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><label className="block text-xs font-bold text-stone-600">اسم المجموعة<input autoFocus required maxLength={100} value={groupSubject} onChange={(event) => setGroupSubject(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-stone-200 px-3 text-sm outline-none focus:border-emerald-400" /></label><label className="block text-xs font-bold text-stone-600">أرقام الأعضاء<textarea required rows={4} value={groupPhones} onChange={(event) => setGroupPhones(event.target.value)} placeholder="أدخل الأرقام الدولية، مفصولة بفاصلة أو سطر جديد" dir="auto" className="mt-1 w-full rounded-xl border border-stone-200 p-3 text-sm leading-6 outline-none focus:border-emerald-400" /></label><div className="flex justify-end gap-2"><button type="button" onClick={() => setShowGroupCreator(false)} className="rounded-xl border border-stone-200 px-4 py-2 text-xs font-bold text-stone-600">إلغاء</button><button type="submit" disabled={creatingGroup || !groupSubject.trim() || !groupPhones.trim()} className="rounded-xl bg-emerald-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{creatingGroup ? "جارٍ الإنشاء..." : "إنشاء المجموعة"}</button></div></form></div>}
       {showGroupMembers && groupData && <div className="fixed inset-0 z-[65] grid place-items-center bg-stone-900/50 p-3 backdrop-blur-sm" onClick={() => setShowGroupMembers(false)}><section role="dialog" aria-modal="true" aria-labelledby="group-members-title" className="panel flex max-h-[85vh] w-full max-w-lg flex-col p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="group-members-title" className="text-base font-extrabold">{groupData.subject || "أعضاء المجموعة"}</h2><p className="mt-1 text-xs text-stone-500">{groupData.participants?.length || 0} عضو · تُطبق التغييرات عبر WhatsApp.</p></div><button type="button" onClick={() => setShowGroupMembers(false)} aria-label="إغلاق الأعضاء" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><form onSubmit={(event) => { event.preventDefault(); if (groupMemberPhone.trim()) void updateGroupParticipants("add", [groupMemberPhone.trim()]); }} className="mb-3 flex gap-2"><input value={groupMemberPhone} onChange={(event) => setGroupMemberPhone(event.target.value)} placeholder="رقم دولي لإضافة عضو" dir="ltr" className="h-10 min-w-0 flex-1 rounded-xl border border-stone-200 px-3 text-xs outline-none focus:border-emerald-400" /><button type="submit" disabled={groupActionBusy || !groupMemberPhone.trim()} className="rounded-xl bg-emerald-700 px-4 text-xs font-bold text-white disabled:opacity-50">إضافة</button></form><div className="soft-scroll min-h-24 flex-1 space-y-2 overflow-y-auto">{(groupData.participants || []).map((member: AnyRecord) => { const target = member.phone || (String(member.id || "").endsWith("@s.whatsapp.net") ? member.id : ""); const superAdmin = member.admin === "superadmin"; return <div key={member.id} className="flex items-center gap-2 rounded-xl border border-stone-100 bg-white px-3 py-2"><span className="min-w-0 flex-1"><b dir="ltr" className="block truncate text-xs">{target ? displayPhoneNumber(target) : member.id}</b><span className="text-[10px] text-stone-400">{superAdmin ? "مشرف رئيسي" : member.admin === "admin" ? "مشرف" : "عضو"}</span></span>{target && !superAdmin && <><button type="button" disabled={groupActionBusy} onClick={() => void updateGroupParticipants(member.admin ? "demote" : "promote", [target])} className="rounded-lg bg-amber-50 px-2.5 py-2 text-[9px] font-bold text-amber-800 disabled:opacity-40">{member.admin ? "إلغاء الإشراف" : "ترقية لمشرف"}</button><button type="button" disabled={groupActionBusy} onClick={() => { if (window.confirm("إزالة هذا العضو من مجموعة WhatsApp؟")) void updateGroupParticipants("remove", [target]); }} className="rounded-lg bg-red-50 px-2.5 py-2 text-[9px] font-bold text-red-700 disabled:opacity-40">إزالة</button></>}</div>; })}{!groupData.participants?.length && <p className="py-8 text-center text-xs text-stone-400">تعذر عرض أعضاء المجموعة.</p>}</div></section></div>}
       {lightboxImage && <div role="dialog" aria-modal="true" aria-label="معاينة الصورة" onClick={() => setLightboxImage("")} className="fixed inset-0 z-[70] grid place-items-center bg-black/90 p-4"><button type="button" aria-label="إغلاق معاينة الصورة" onClick={() => setLightboxImage("")} className="absolute right-4 top-4 grid h-11 w-11 place-items-center rounded-full bg-white/15 text-2xl text-white hover:bg-white/25">×</button><img src={lightboxImage} alt="معاينة مكبرة" onClick={(event) => event.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-lg object-contain shadow-2xl" /></div>}

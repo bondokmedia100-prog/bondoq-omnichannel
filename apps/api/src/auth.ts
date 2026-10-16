@@ -89,5 +89,19 @@ export function canWorkOnConversation(user: SessionUser, conversation: { assigne
   return conversation.assignedAgentId === user.id;
 }
 
+export function canViewAllPrivateConversationNotes(user: SessionUser) {
+  return user.role === Role.ADMIN || user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations");
+}
+
+export function canViewPrivateConversationNote(user: SessionUser, note: { authorId: string; recipientId: string }) {
+  return canViewAllPrivateConversationNotes(user) || note.authorId === user.id || note.recipientId === user.id;
+}
+
+export function canReceivePrivateConversationNote(recipient: { role: Role; branchId: string | null; isActive: boolean }, conversation: { branchId: string | null }) {
+  if (!recipient.isActive) return false;
+  if (recipient.role === Role.AGENT) return true;
+  return recipient.role === Role.BRANCH_USER && Boolean(recipient.branchId) && recipient.branchId === conversation.branchId;
+}
+
 export const adminGuard: RequestHandler[] = [authenticate as RequestHandler, allowRoles(Role.ADMIN, Role.SUPERVISOR) as RequestHandler];
 export const agentGuard: RequestHandler[] = [authenticate as RequestHandler, allowRoles(Role.AGENT, Role.BRANCH_USER, Role.ADMIN, Role.SUPERVISOR) as RequestHandler];

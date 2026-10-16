@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatEgyptianPhone, normalizePhoneNumber } from "./egyptianPhoneFormatter";
+import { formatEgyptianPhone, normalizePhoneNumber, phoneNumbersMatch } from "./egyptianPhoneFormatter";
 import { parseKalemlyWebhook } from "./kalemlyWebhookParser";
 
 test("normalizes Egyptian local numbers without changing their stored identity", () => {
@@ -18,6 +18,12 @@ test("accepts international E.164 numbers and WhatsApp JIDs", () => {
 test("accepts international numbers with different country-code lengths", () => {
   assert.equal(normalizePhoneNumber("+1 415 555 2671"), "14155552671");
   assert.equal(normalizePhoneNumber("+91 98765 43210"), "919876543210");
+});
+
+test("matches international WhatsApp IDs and differently formatted phone values", () => {
+  assert.equal(phoneNumbersMatch("+20 10 1234 5678", "201012345678@s.whatsapp.net"), true);
+  assert.equal(phoneNumbersMatch("0044 7911 123456", "+44 (0) 7911 123456"), true);
+  assert.equal(phoneNumbersMatch("unknown@lid", "+968 9123 4567"), false);
 });
 
 test("rejects ambiguous non-Egyptian local numbers and non-person JIDs", () => {

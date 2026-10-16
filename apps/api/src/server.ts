@@ -8,7 +8,7 @@ import IORedis from "ioredis";
 import { z } from "zod";
 import { Channel, ConversationBotState, ConversationHandoffStatus, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
 import { config } from "./config";
-import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canWorkOnConversation, hasPermission, isWhatsAppGroupConversation, permissionGuard, signToken } from "./auth";
+import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, isWhatsAppGroupConversation, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
 import { broadcastPresence, initRealtime, io, revokeConversationRoomAccess } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations, scheduleUnansweredReassignment, withConversationAssignmentLock, withInboundConversationLock } from "./routing";
@@ -29,7 +29,7 @@ import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken 
 import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
 import { channelEligibilityWhere } from "./routingSelection";
 import { formatAgentHandoffGreeting } from "./autoReplies";
-import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
+import { normalizePhoneNumber, phoneNumbersMatch } from "./egyptianPhoneFormatter";
 
 const app = express();
 const server = http.createServer(app);
@@ -80,6 +80,31 @@ function phoneSearchDigits(value: string) {
   return value.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
     .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
     .replace(/\D/g, "");
+}
+function phoneSearchTerms(value: string) {
+  const digits = phoneSearchDigits(value);
+  const terms = new Set(digits ? [digits] : []);
+  let canonicalPhone = "";
+  try { canonicalPhone = normalizePhoneNumber(value); } catch {}
+  if (canonicalPhone) {
+    terms.add(canonicalPhone);
+    if (canonicalPhone.startsWith("20")) terms.add(`0${canonicalPhone.slice(2)}`);
+    for (const length of [8, 6, 4]) if (canonicalPhone.length > length) terms.add(canonicalPhone.slice(-length));
+  }
+  return [...terms];
+}
+async function findWhatsAppConversationByPhone(phone: string, branchId?: string | null) {
+  const suffixes = [...new Set([phone.slice(-8), phone.slice(-6), phone.slice(-4)])];
+  const candidates = await prisma.conversation.findMany({
+    where: { channel: Channel.WHATSAPP, ...(branchId ? { branchId } : {}), OR: suffixes.flatMap((suffix) => [
+      { externalCustomerId: { contains: suffix } }, { externalConversationId: { contains: suffix } },
+      { customer: { is: { phone: { contains: suffix } } } }
+    ]) },
+    select: { id: true, externalCustomerId: true, externalConversationId: true, assignedAgentId: true, branchId: true, status: true, customer: { select: { phone: true } } },
+    orderBy: { lastMessageAt: "desc" }
+  });
+  return candidates.find((conversation) => [conversation.externalCustomerId, conversation.externalConversationId, conversation.customer.phone]
+    .some((candidate) => candidate && phoneNumbersMatch(candidate, phone))) || null;
 }
 function callIceServers(subject: string) {
   return createIceServers({ stunUrls: config.webRtcStunUrls, turnUrls: config.webRtcTurnUrls, turnSharedSecret: config.webRtcTurnSharedSecret, subject });
@@ -427,10 +452,7 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
   const queryFilters: Prisma.ConversationWhereInput[] = [...scope];
   if (cursor) queryFilters.push({ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] });
   if (q) {
-    const digits = phoneSearchDigits(q);
-    let canonicalPhone = "";
-    try { canonicalPhone = normalizePhoneNumber(q); } catch {}
-    const phoneTerms = [...new Set([digits, canonicalPhone].filter(Boolean))];
+    const phoneTerms = phoneSearchTerms(q);
     const customerSearch: Prisma.CustomerWhereInput[] = [
       { displayName: { contains: q, mode: "insensitive" } }, { name: { contains: q, mode: "insensitive" } },
       { phone: { contains: q } }, ...phoneTerms.map((term) => ({ phone: { contains: term } }))
@@ -509,15 +531,18 @@ app.put("/api/conversations/:id/pin", agentGuard, async (req: AuthedRequest, res
 
 app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const messageLimit = req.query.messageLimit === undefined ? null : pageLimit(req.query.messageLimit);
+  const canViewAllPrivateNotes = canViewAllPrivateConversationNotes(req.user!);
   let conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: {
     customer: { include: { orders: { orderBy: { createdAt: "desc" }, take: 10 }, tags: { include: { tag: true } } } }, assignedAgent: { select: { id: true, name: true } },
     messages: { include: { author: { select: { id: true, name: true } }, mediaAsset: { select: { fileName: true, contentType: true, size: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: messageLimit ? messageLimit + 1 : 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "desc" }, take: 100 }, internalNotes: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" }, take: 100 },
+    privateNotes: { ...(canViewAllPrivateNotes ? {} : { where: { OR: [{ authorId: req.user!.id }, { recipientId: req.user!.id }] } }), include: { author: { select: { id: true, name: true } }, recipient: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" }, take: 100 },
     whatsappCallSessions: { orderBy: { createdAt: "desc" }, take: 50, select: { id: true, direction: true, transport: true, status: true, createdAt: true, endedAt: true, recording: { select: { durationSeconds: true } } } }
   } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   const readOnly = !canWorkOnConversation(req.user!, conversation);
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   const canAddInternalNote = canReadConversation(req.user!, conversation) || canReadTeamConversations(req.user!, conversation);
+  conversation.privateNotes = conversation.privateNotes.filter((note) => canViewPrivateConversationNote(req.user!, note));
   if (!canReadConversation(req.user!, conversation)) conversation.whisperNotes = [];
   if (readOnly) conversation.customer.orders = conversation.customer.orders.filter((order) => order.conversationId === conversation!.id);
   const openedConversation = conversation;
@@ -580,8 +605,9 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   conversation.messages.reverse();
   conversation.whisperNotes.reverse();
   conversation.internalNotes.reverse();
+  conversation.privateNotes.reverse();
   if (!readOnly) void markBaileysMessagesRead(conversation.messages.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
-  res.json(messageLimit ? { ...conversation, hasMoreMessages, readOnly, canAddInternalNote } : { ...conversation, readOnly, canAddInternalNote });
+  res.json(messageLimit ? { ...conversation, hasMoreMessages, readOnly, canAddInternalNote, canSendPrivateNote: true } : { ...conversation, readOnly, canAddInternalNote, canSendPrivateNote: true });
 });
 
 app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -737,19 +763,14 @@ app.post("/api/whatsapp/conversations/by-phone", agentGuard, async (req: AuthedR
   catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "أدخل رقمًا دوليًا صالحًا" }); }
   const canReceive = await prisma.user.findFirst({ where: { id: req.user!.id, canReceiveWhatsApp: true }, select: { id: true } });
   if (!canReceive) return res.status(403).json({ error: "حسابك غير مخصص لاستقبال محادثات WhatsApp" });
-  const branchScope = req.user!.role === Role.BRANCH_USER ? { branchId: req.user!.branchId || "" } : {};
-  const existing = await prisma.conversation.findFirst({
-    where: { channel: Channel.WHATSAPP, ...branchScope, OR: [
-      { externalCustomerId: phone }, { externalConversationId: phone }, { externalConversationId: `${phone}@s.whatsapp.net` },
-      { customer: { is: { phone: { contains: phone } } } }
-    ] }, orderBy: { lastMessageAt: "desc" }
-  });
+  const existing = await findWhatsAppConversationByPhone(phone, req.user!.role === Role.BRANCH_USER ? req.user!.branchId : null);
   if (existing) {
     if (!await canReadConversationOrHistory(req.user!, existing)) return res.status(403).json({ error: "المحادثة لهذا الرقم خارج نطاق صلاحياتك" });
     return res.json({ conversationId: existing.id, created: false });
   }
   if (req.user!.role === Role.BRANCH_USER && !req.user!.branchId) return res.status(409).json({ error: "اربط حسابك بفرع قبل بدء محادثة" });
-  let customer = await prisma.customer.findFirst({ where: { phone: { contains: phone } }, orderBy: { updatedAt: "desc" } });
+  let customer = await prisma.customer.findFirst({ where: { phone: { contains: phone.slice(-4) } }, orderBy: { updatedAt: "desc" } });
+  if (customer && !phoneNumbersMatch(customer.phone || "", phone)) customer = null;
   if (!customer) customer = await prisma.customer.upsert({
     where: { id: `external_whatsapp_${phone}` },
     update: { phone },
@@ -779,12 +800,11 @@ app.post("/api/contacts/:id/whatsapp-conversation", agentGuard, async (req: Auth
   if (!canReceiveWhatsApp) return res.status(403).json({ error: "حسابك غير مخصص لاستقبال محادثات WhatsApp" });
   const customer = await prisma.customer.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, displayName: true, phone: true } });
   if (!customer) return res.status(404).json({ error: "جهة الاتصال غير موجودة" });
-  const phone = customer.phone?.replace(/[^0-9]/g, "") || "";
-  if (phone.length < 8 || phone.length > 15) return res.status(409).json({ error: "أضف رقم واتساب دوليًا صالحًا لجهة الاتصال أولًا" });
-  const existing = await prisma.conversation.findFirst({
-    where: { channel: Channel.WHATSAPP, OR: [{ customerId: customer.id }, { externalCustomerId: phone }] },
-    orderBy: { lastMessageAt: "desc" }, select: { id: true, assignedAgentId: true, branchId: true }
-  });
+  let phone: string;
+  try { phone = normalizePhoneNumber(customer.phone || ""); }
+  catch { return res.status(409).json({ error: "أضف رقم واتساب دوليًا صالحًا لجهة الاتصال أولًا" }); }
+  const existing = await findWhatsAppConversationByPhone(phone, req.user!.role === Role.BRANCH_USER ? req.user!.branchId : null)
+    || await prisma.conversation.findFirst({ where: { channel: Channel.WHATSAPP, customerId: customer.id }, orderBy: { lastMessageAt: "desc" }, select: { id: true, assignedAgentId: true, branchId: true } });
   if (existing) {
     if (!canWorkOnConversation(req.user!, existing)) return res.status(403).json({ error: "المحادثة الحالية ليست ضمن صلاحياتك" });
     return res.json({ conversationId: existing.id, created: false });
@@ -1370,6 +1390,37 @@ app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest
   const note = await prisma.whisperNote.create({ data: { conversationId: conversation.id, authorId: req.user!.id, text: parsed.data.text } });
   await audit(req.user!.id, "WHISPER_SENT", conversation.id);
   io.to(`agent:${conversation.assignedAgentId}`).to("admins").emit("whisper:new", note);
+  res.status(201).json(note);
+});
+
+app.get("/api/conversations/:id/private-note-recipients", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
+  const recipientFilters: Prisma.UserWhereInput[] = [{ role: Role.AGENT }];
+  if (conversation.branchId) recipientFilters.push({ role: Role.BRANCH_USER, branchId: conversation.branchId });
+  const recipients = await prisma.user.findMany({
+    where: { id: { not: req.user!.id }, isActive: true, OR: recipientFilters },
+    select: { id: true, name: true, role: true, department: true, branch: { select: { name: true } } },
+    orderBy: { name: "asc" }
+  });
+  res.json(recipients);
+});
+
+app.post("/api/conversations/:id/private-notes", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ recipientId: z.string().min(1).max(100), text: z.string().trim().min(1).max(4000) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اختر زميلًا واكتب رسالة سرية لا تتجاوز 4000 حرف" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, customer: { select: { displayName: true, name: true } } } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
+  const recipient = await prisma.user.findUnique({ where: { id: parsed.data.recipientId }, select: { id: true, name: true, role: true, branchId: true, isActive: true } });
+  if (!recipient || recipient.id === req.user!.id || !canReceivePrivateConversationNote(recipient, conversation)) return res.status(400).json({ error: "الزميل المحدد غير متاح لهذه المحادثة" });
+  const note = await prisma.conversationPrivateNote.create({
+    data: { conversationId: conversation.id, authorId: req.user!.id, recipientId: recipient.id, text: parsed.data.text },
+    include: { author: { select: { id: true, name: true } }, recipient: { select: { id: true, name: true } } }
+  });
+  await audit(req.user!.id, "PRIVATE_CONVERSATION_NOTE_SENT", conversation.id, { noteId: note.id, recipientId: recipient.id });
+  io.to(`user:${req.user!.id}`).to(`user:${recipient.id}`).to("admins").emit("conversation-private-note:new", { conversationId: conversation.id, customerName: conversation.customer.displayName || conversation.customer.name || "عميل جديد", channel: conversation.channel, note });
   res.status(201).json(note);
 });
 

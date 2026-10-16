@@ -353,8 +353,8 @@ export async function sendBaileysWhatsAppMessage(input: { to: string; message: s
   return socket.sendMessage(jid, { document: media.buffer, fileName, mimetype: media.contentType, caption: input.message || undefined });
 }
 
-async function handleIncomingMessage(message: any) {
-  if (!message?.message || message.key?.fromMe) return;
+async function handleIncomingMessage(message: any, historySync = false) {
+  if (!message?.message || message.key?.fromMe && !historySync) return;
   const content = unwrapMessage(message);
   const remoteJid = String(message.key?.remoteJid || "");
   if (!remoteJid || remoteJid === "status@broadcast") return;
@@ -375,7 +375,7 @@ async function handleIncomingMessage(message: any) {
   const participantJid = String(message.key?.participant || message.key?.participantAlt || "");
   const phoneNumber = isGroup ? "" : phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
   const externalCustomerId = isGroup ? remoteJid : phoneNumber || remoteJid;
-  const profilePictureUrl = !isGroup && currentSocket && state.status === "CONNECTED"
+  const profilePictureUrl = !historySync && !isGroup && currentSocket && state.status === "CONNECTED"
     ? await customerProfilePicture(currentSocket, remoteJid, phoneNumber)
     : undefined;
   const audio = content.audioMessage;
@@ -397,9 +397,14 @@ async function handleIncomingMessage(message: any) {
       reuploadRequest: (staleMessage: any) => currentSocket.updateMediaMessage(staleMessage),
       logger: { info: () => undefined } as any
     } : undefined;
-    mediaBuffer = Buffer.from(await downloadMediaMessage(message, "buffer", {}, retrieval));
-    if (!mediaBuffer.length) throw new Error("WhatsApp returned an empty media file");
-    if (mediaBuffer.length > inboundMediaLimit) throw new Error("رسالة واتساب الواردة تتجاوز حد التخزين البالغ 12 ميجابايت");
+    try {
+      mediaBuffer = Buffer.from(await downloadMediaMessage(message, "buffer", {}, retrieval));
+      if (!mediaBuffer.length) throw new Error("WhatsApp returned an empty media file");
+      if (mediaBuffer.length > inboundMediaLimit) throw new Error("رسالة واتساب الواردة تتجاوز حد التخزين البالغ 12 ميجابايت");
+    } catch (error) {
+      if (!historySync) throw error;
+      console.warn("Historical WhatsApp media is unavailable", idForMessage(message));
+    }
   }
   const id = String(message.key?.id || `${remoteJid}:${Date.now()}`);
   const inbound = {
@@ -411,6 +416,7 @@ async function handleIncomingMessage(message: any) {
     profilePictureUrl,
     text: String(text || ""),
     kind,
+    ...(historySync ? { direction: message.key?.fromMe ? "OUTBOUND" as const : "INBOUND" as const } : {}),
     latitude: location?.degreesLatitude,
     longitude: location?.degreesLongitude,
     externalId: `baileys:${remoteJid}:${id}`,
@@ -427,12 +433,34 @@ async function handleIncomingMessage(message: any) {
       } : {}),
       voiceNote: Boolean(audio?.ptt),
       mediaMimeType: mediaContentType,
+      ...(historySync ? { historySync: true } : {}),
       pollOptions: Array.isArray(poll?.options) ? poll.options.map((option: any) => String(option.optionName || option.name || "")).filter(Boolean) : undefined,
       messageTimestamp: Number(message.messageTimestamp || 0)
     }
   };
   const { ingestMessage } = await import("./ingestion");
-  await ingestMessage(inbound);
+  return ingestMessage(inbound);
+}
+
+function idForMessage(message: any) { return String(message?.key?.id || "unknown"); }
+
+async function importHistoricalMessages(currentSocket: WASocket, messages: any[]) {
+  let imported = 0;
+  const conversationIds = new Set<string>();
+  for (let offset = 0; offset < messages.length; offset += 20) {
+    if (socket !== currentSocket) return;
+    const batch = messages.slice(offset, offset + 20);
+    const results = await Promise.allSettled(batch.map((message) => handleIncomingMessage(message, true)));
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        imported++;
+        const value = result.value as { conversationId?: string } | undefined;
+        if (value?.conversationId) conversationIds.add(value.conversationId);
+      } else console.warn("Historical WhatsApp message could not be stored", result.reason);
+    }
+  }
+  console.info("WhatsApp history sync processed", { received: messages.length, imported });
+  if (conversationIds.size) io?.emit("whatsapp:history-synced", { conversationIds: [...conversationIds] });
 }
 
 async function handleIncomingCall(currentSocket: WASocket, call: any) {
@@ -530,7 +558,7 @@ async function startSocket() {
   await Promise.all(authFiles.filter((entry) => entry.isFile()).map((entry) => chmod(path.join(authDir, entry.name), 0o600)));
   await saveState({ mode: "BAILEYS", status: "CONNECTING", qrDataUrl: "", lastError: "" });
   const { state: auth, saveCreds } = await useMultiFileAuthState(authDir);
-  const current = makeWASocket({ auth, printQRInTerminal: false, syncFullHistory: false, markOnlineOnConnect: false, browser: ["Bondoq CRM", "Chrome", "1.0.0"] });
+  const current = makeWASocket({ auth, printQRInTerminal: false, syncFullHistory: true, markOnlineOnConnect: false, browser: ["Bondoq CRM", "Chrome", "1.0.0"] });
   socket = current;
   current.ev.on("creds.update", saveCreds);
   current.ev.on("connection.update", (update) => {
@@ -564,9 +592,13 @@ async function startSocket() {
     })().catch((error) => console.warn("WhatsApp connection status update failed", error));
   });
   current.ev.on("messages.upsert", ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const message of messages) void handleIncomingMessage(message).catch((error) => console.warn("Baileys inbound message could not be stored", error));
+    if (type === "notify") {
+      for (const message of messages) void handleIncomingMessage(message).catch((error) => console.warn("Baileys inbound message could not be stored", error));
+      return;
+    }
+    if (type === "append") void importHistoricalMessages(current, messages);
   });
+  current.ev.on("messaging-history.set", ({ messages }) => { void importHistoricalMessages(current, messages); });
   current.ev.on("messages.update", (updates) => {
     for (const update of updates) void persistBaileysReceipt(update).catch((error) => console.warn("Baileys delivery update could not be stored", error));
   });

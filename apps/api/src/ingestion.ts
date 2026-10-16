@@ -12,48 +12,84 @@ import { sendPushNotification } from "./pushNotifications";
 import { detectImageContentType, safeFileName } from "./mediaStorage";
 import { isWithinBusinessHours } from "./businessHours";
 import { startOfCairoDay } from "./cairoTime";
+import { normalizePhoneNumber, phoneNumbersMatch } from "./egyptianPhoneFormatter";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
-  return withInboundConversationLock(inbound.channel, inbound.externalConversationId, () => ingestMessageLocked(inbound));
+  let lockKey = inbound.externalConversationId;
+  if (inbound.channel === "WHATSAPP" && inbound.customerPhone) {
+    try { lockKey = normalizePhoneNumber(inbound.customerPhone); } catch {}
+  }
+  return withInboundConversationLock(inbound.channel, lockKey, () => ingestMessageLocked(inbound));
+}
+
+async function findWhatsAppConversationByPhone(phone: string) {
+  const suffixes = [...new Set([phone.slice(-8), phone.slice(-6), phone.slice(-4)])];
+  const candidates = await prisma.conversation.findMany({
+    where: { channel: "WHATSAPP", OR: suffixes.flatMap((suffix) => [
+      { externalCustomerId: { contains: suffix } }, { externalConversationId: { contains: suffix } },
+      { customer: { is: { phone: { contains: suffix } } } }
+    ]) },
+    include: { customer: { select: { phone: true } } },
+    orderBy: { lastMessageAt: "desc" }
+  });
+  return candidates.find((conversation) => [conversation.externalCustomerId, conversation.externalConversationId, conversation.customer.phone]
+    .some((candidate) => phoneNumbersMatch(candidate || "", phone))) || null;
 }
 
 async function ingestMessageLocked(inbound: NormalizedInbound) {
   const metadata = (inbound.metadata || {}) as Record<string, unknown>;
+  const historySync = metadata.historySync === true;
+  const direction = historySync && inbound.direction === "OUTBOUND" ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
+  const historyTimestamp = Number(metadata.messageTimestamp);
+  const messageAt = historySync && Number.isFinite(historyTimestamp) && historyTimestamp > 0
+    ? new Date(historyTimestamp * 1000)
+    : new Date();
+  const timestampValid = Number.isFinite(messageAt.getTime()) && messageAt.getTime() <= Date.now() + 5 * 60_000;
+  const createdAt = historySync && timestampValid ? messageAt : new Date();
   const isWhatsAppGroup = metadata.isWhatsAppGroup === true && inbound.channel === "WHATSAPP";
   const groupSubject = isWhatsAppGroup ? String(metadata.groupSubject || inbound.customerName || "مجموعة WhatsApp") : undefined;
-  const customer = await prisma.customer.upsert({
-    where: { id: `external_${inbound.channel.toLowerCase()}_${inbound.externalCustomerId}` },
-    update: {
-      ...(inbound.customerName ? { name: inbound.customerName } : {}),
-      ...(isWhatsAppGroup ? { displayName: groupSubject } : {}),
-      ...(inbound.profilePictureUrl ? { avatarUrl: inbound.profilePictureUrl } : {}),
-      ...(isWhatsAppGroup ? { phone: null } : inbound.customerPhone ? { phone: inbound.customerPhone } : {}),
-      ...(inbound.latitude === undefined ? {} : { lastLatitude: inbound.latitude }),
-      ...(inbound.longitude === undefined ? {} : { lastLongitude: inbound.longitude }),
-      channelIdentifiers: isWhatsAppGroup
-        ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
-        : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
-    },
-    create: {
-      id: `external_${inbound.channel.toLowerCase()}_${inbound.externalCustomerId}`,
-      name: groupSubject || inbound.customerName,
-      ...(isWhatsAppGroup ? { displayName: groupSubject } : {}),
-      phone: inbound.customerPhone || (inbound.channel === "WHATSAPP" && !isWhatsAppGroup ? inbound.externalCustomerId : null),
-      avatarUrl: inbound.profilePictureUrl,
-      lastLatitude: inbound.latitude,
-      lastLongitude: inbound.longitude,
-      channelIdentifiers: isWhatsAppGroup
-        ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
-        : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
-    }
-  });
   let conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: inbound.channel, externalConversationId: inbound.externalConversationId } } });
+  if (!conversation && inbound.channel === "WHATSAPP" && inbound.customerPhone) {
+    try { conversation = await findWhatsAppConversationByPhone(normalizePhoneNumber(inbound.customerPhone)); } catch {}
+  }
+  const customerId = `external_${inbound.channel.toLowerCase()}_${inbound.externalCustomerId}`;
+  const customerUpdate = {
+    ...(inbound.customerName ? { name: inbound.customerName } : {}),
+    ...(isWhatsAppGroup ? { displayName: groupSubject } : {}),
+    ...(inbound.profilePictureUrl ? { avatarUrl: inbound.profilePictureUrl } : {}),
+    ...(isWhatsAppGroup ? { phone: null } : inbound.customerPhone ? { phone: inbound.customerPhone } : {}),
+    ...(inbound.latitude === undefined ? {} : { lastLatitude: inbound.latitude }),
+    ...(inbound.longitude === undefined ? {} : { lastLongitude: inbound.longitude }),
+    channelIdentifiers: isWhatsAppGroup
+      ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
+      : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
+  };
+  const customer = conversation
+    ? await prisma.customer.update({ where: { id: conversation.customerId }, data: customerUpdate })
+    : await prisma.customer.upsert({
+      where: { id: customerId },
+      update: customerUpdate,
+      create: {
+        id: customerId,
+        name: groupSubject || inbound.customerName,
+        ...(isWhatsAppGroup ? { displayName: groupSubject } : {}),
+        phone: inbound.customerPhone || (inbound.channel === "WHATSAPP" && !isWhatsAppGroup ? inbound.externalCustomerId : null),
+        avatarUrl: inbound.profilePictureUrl,
+        lastLatitude: inbound.latitude,
+        lastLongitude: inbound.longitude,
+        channelIdentifiers: isWhatsAppGroup
+          ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
+          : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
+      }
+    });
   if (!conversation) {
     try {
       conversation = await prisma.conversation.create({ data: {
         customerId: customer.id, channel: inbound.channel, externalConversationId: inbound.externalConversationId,
         externalCustomerId: inbound.externalCustomerId, ...(groupSubject ? { subject: groupSubject } : {}),
-        status: ConversationStatus.QUEUED, awaitingRouting: !isWhatsAppGroup
+        status: historySync ? ConversationStatus.CLOSED : ConversationStatus.QUEUED,
+        awaitingRouting: !historySync && !isWhatsAppGroup,
+        ...(historySync ? { createdAt, lastMessageAt: createdAt } : {})
       } });
     } catch (error) {
       if ((error as { code?: string }).code !== "P2002") throw error;
@@ -65,6 +101,16 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const storedExternalId = `${inbound.channel}:${inbound.externalId}`;
   const existingMessage = await prisma.message.findUnique({ where: { externalId: storedExternalId }, select: { id: true, conversationId: true } });
   if (existingMessage) return { duplicate: true, conversationId: existingMessage.conversationId };
+  if (historySync && inbound.channel === "WHATSAPP" && metadata.provider === "baileys") {
+    const baileysId = inbound.externalId.slice(inbound.externalId.lastIndexOf(":") + 1);
+    if (baileysId) {
+      const sameProviderMessage = await prisma.message.findFirst({
+        where: { conversationId, direction, externalId: { startsWith: "WHATSAPP:baileys:", endsWith: `:${baileysId}` } },
+        select: { id: true }
+      });
+      if (sameProviderMessage) return { duplicate: true, conversationId, messageId: sameProviderMessage.id };
+    }
+  }
   const previousInboundAt = conversation.lastInboundAt || (await prisma.message.findFirst({
     where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true }
   }))?.createdAt || null;
@@ -72,7 +118,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     ? { body: inbound.mediaBuffer, contentType: inbound.mediaContentType || String(metadata.mediaMimeType || "application/octet-stream") }
     : undefined;
   const hasMedia = inbound.kind === MessageKind.IMAGE || inbound.kind === MessageKind.AUDIO || inbound.kind === MessageKind.VIDEO || inbound.kind === MessageKind.FILE || inbound.kind === MessageKind.STICKER;
-  if (!cachedMedia && hasMedia) {
+  if (!cachedMedia && hasMedia && !historySync) {
     try {
       cachedMedia = await fetchInboundMedia(inbound.channel, metadata, inbound.mediaUrl);
     } catch (error) {
@@ -96,14 +142,24 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
         fileName: safeFileName(fileName), contentType, size: mediaToCache.body.length, data: Uint8Array.from(mediaToCache.body)
       }, select: { id: true } }) : null;
       return tx.message.create({ data: {
-        conversationId, direction: MessageDirection.INBOUND, kind: inbound.kind || MessageKind.TEXT,
+        conversationId, direction, kind: inbound.kind || MessageKind.TEXT,
         text: inbound.text, mediaUrl: asset ? null : inbound.mediaUrl, mediaAssetId: asset?.id, latitude: inbound.latitude, longitude: inbound.longitude,
-        externalId: storedExternalId, metadata: metadata as Prisma.InputJsonValue
+        externalId: storedExternalId, metadata: metadata as Prisma.InputJsonValue,
+        ...(historySync ? { createdAt } : {})
       } });
     });
   } catch (error) {
     if ((error as { code?: string }).code === "P2002") return { duplicate: true, conversationId: conversation.id };
     throw error;
+  }
+  if (historySync) {
+    const update: Prisma.ConversationUpdateInput = {};
+    if (createdAt > conversation.lastMessageAt) update.lastMessageAt = createdAt;
+    if (createdAt < conversation.createdAt) update.createdAt = createdAt;
+    if (direction === MessageDirection.INBOUND && (!conversation.lastInboundAt || createdAt > conversation.lastInboundAt)) update.lastInboundAt = createdAt;
+    if (groupSubject) update.subject = groupSubject;
+    if (Object.keys(update).length) await prisma.conversation.update({ where: { id: conversationId }, data: update });
+    return { conversationId, messageId: message.id, historySync: true };
   }
   if (customer.isBlocked) {
     const previousAssignedAgentId = conversation.assignedAgentId;

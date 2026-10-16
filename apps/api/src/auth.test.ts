@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import jwt from "jsonwebtoken";
 import { Department, Role } from "@prisma/client";
-import { canReadConversation, canReadTeamConversations, canWorkOnConversation, hasPermission, signToken, type SessionUser } from "./auth";
+import { canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, signToken, type SessionUser } from "./auth";
 
 function user(overrides: Partial<SessionUser> = {}): SessionUser {
   return {
@@ -57,6 +57,25 @@ test("frontline staff can work shared WhatsApp groups inside their branch scope"
   assert.equal(canWorkOnConversation(branchUser, { ...group, branchId: "branch-a" }), true);
   assert.equal(canWorkOnConversation(branchUser, { ...group, branchId: "branch-b" }), false);
   assert.equal(canWorkOnConversation(user({ role: Role.SUPERVISOR, canViewAllConversations: false }), group), false);
+});
+
+test("private conversation notes are limited to participants and conversation-wide admins", () => {
+  const note = { authorId: "author", recipientId: "recipient" };
+  assert.equal(canViewPrivateConversationNote(user({ id: "author" }), note), true);
+  assert.equal(canViewPrivateConversationNote(user({ id: "recipient" }), note), true);
+  assert.equal(canViewPrivateConversationNote(user({ id: "other" }), note), false);
+  assert.equal(canViewPrivateConversationNote(user({ id: "admin", role: Role.ADMIN }), note), true);
+  assert.equal(canViewPrivateConversationNote(user({ id: "manager", role: Role.SUPERVISOR }), note), true);
+  assert.equal(canViewAllPrivateConversationNotes(user({ id: "restricted-manager", role: Role.SUPERVISOR, canViewAllConversations: false })), false);
+});
+
+test("private conversation note recipients must be active and inside the conversation branch", () => {
+  const conversation = { branchId: "branch-a" };
+  assert.equal(canReceivePrivateConversationNote({ role: Role.AGENT, branchId: null, isActive: true }, conversation), true);
+  assert.equal(canReceivePrivateConversationNote({ role: Role.BRANCH_USER, branchId: "branch-a", isActive: true }, conversation), true);
+  assert.equal(canReceivePrivateConversationNote({ role: Role.BRANCH_USER, branchId: "branch-b", isActive: true }, conversation), false);
+  assert.equal(canReceivePrivateConversationNote({ role: Role.BRANCH_USER, branchId: "branch-a", isActive: false }, conversation), false);
+  assert.equal(canReceivePrivateConversationNote({ role: Role.SUPERVISOR, branchId: null, isActive: true }, conversation), false);
 });
 
 test("login tokens do not expire automatically", () => {

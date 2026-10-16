@@ -10,8 +10,9 @@ export function normalizePhoneNumber(phone: string): string {
   if (!normalized || /@(?:g\.us|lid)$/i.test(normalized)) throw new RangeError("أدخل رقمًا دوليًا صحيحًا");
 
   const atIndex = normalized.indexOf("@");
-  const subscriber = (atIndex < 0 ? normalized : normalized.slice(0, atIndex)).replace(/:\d+$/, "");
+  let subscriber = (atIndex < 0 ? normalized : normalized.slice(0, atIndex)).replace(/:\d+$/, "");
   const hasInternationalPrefix = subscriber.startsWith("+") || subscriber.startsWith("00");
+  if (hasInternationalPrefix) subscriber = subscriber.replace(/\(\s*0\s*\)/g, "");
   const isWhatsAppJid = atIndex >= 0 && /@(?:s\.whatsapp\.net|c\.us)$/i.test(normalized);
   let digits = subscriber.replace(/\D/g, "");
 
@@ -24,6 +25,11 @@ export function normalizePhoneNumber(phone: string): string {
 
   if (!/^[1-9]\d{6,14}$/.test(digits)) throw new RangeError("أدخل رقمًا دوليًا بصيغة E.164");
   return digits;
+}
+
+export function phoneNumbersMatch(left: string, right: string): boolean {
+  try { return normalizePhoneNumber(left) === normalizePhoneNumber(right); }
+  catch { return false; }
 }
 
 export function formatEgyptianPhone(phone: string): string {
