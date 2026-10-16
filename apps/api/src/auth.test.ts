@@ -42,6 +42,9 @@ test("team conversation browsing is enabled for frontline staff only", () => {
   assert.equal(canReadTeamConversations(branchUser), true);
   assert.equal(canReadTeamConversations(branchUser, { branchId: "branch-a" }), true);
   assert.equal(canReadTeamConversations(branchUser, { branchId: "branch-b" }), false);
+  assert.equal(canReadConversation(branchUser, { assignedAgentId: branchUser.id, branchId: "branch-b" }), false);
+  assert.equal(canWorkOnConversation(branchUser, { assignedAgentId: branchUser.id, branchId: "branch-b" }), false);
+  assert.equal(canReadConversation(branchUser, { assignedAgentId: branchUser.id, branchId: "branch-a" }), true);
   assert.equal(canReadTeamConversations(user({ role: Role.BRANCH_USER }), { branchId: "branch-a" }), false);
   assert.equal(canReadTeamConversations(user({ role: Role.SUPERVISOR })), false);
   assert.equal(canReadTeamConversations(user({ role: Role.ADMIN })), false);
