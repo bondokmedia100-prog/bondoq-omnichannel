@@ -36,7 +36,7 @@ html[data-crm-theme="dark"] .agent-app,
 html[data-crm-theme="dark"] .workspace-chat,
 html[data-crm-theme="dark"] .workspace-chat > .flex-1 { background-color: #111b17 !important; }
 html[data-crm-theme="dark"] .panel,
-html[data-crm-theme="dark"] .bg-white { background-color: #1b2520 !important; color: #eee9e1; }
+html[data-crm-theme="dark"] [class*="bg-white"] { background-color: #1b2520 !important; color: #eee9e1; }
 html[data-crm-theme="dark"] [class*="bg-stone-50"],
 html[data-crm-theme="dark"] [class*="bg-stone-100"] { background-color: #202b26 !important; }
 html[data-crm-theme="dark"] [class*="bg-stone-200"] { background-color: #2a3630 !important; }
@@ -64,7 +64,7 @@ html[data-crm-theme="dark"] input::placeholder,
 html[data-crm-theme="dark"] textarea::placeholder { color: #8b9790; }
 html[data-crm-theme="dark"] .workspace-list > div:first-child,
 html[data-crm-theme="dark"] .workspace-chat header,
-html[data-crm-theme="dark"] .workspace-chat .bg-white { background-color: #1b2520 !important; }
+html[data-crm-theme="dark"] .workspace-chat [class*="bg-white"] { background-color: #1b2520 !important; }
 html[data-crm-theme="dark"] .soft-scroll { scrollbar-color: #536159 transparent; }
 html[data-crm-theme="dark"] .soft-scroll::-webkit-scrollbar-thumb { background: #536159; }
 html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #2a3630 !important; }
