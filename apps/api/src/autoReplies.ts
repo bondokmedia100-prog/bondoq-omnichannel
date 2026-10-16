@@ -5,6 +5,7 @@ export type AutoReplyRuleMatch = {
 };
 
 export type BotState = "BOT_MENU" | "ASSIGNED_TO_AGENT";
+export const BOT_MENU_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 export type ChatbotSettings = {
   enabled: boolean;
   welcomeText: string;
@@ -29,18 +30,18 @@ export type ChatbotSettings = {
 
 export const DEFAULT_CHATBOT_SETTINGS: ChatbotSettings = {
   enabled: true,
-  welcomeText: "أهلاً بك في حلواني بندق.",
+  welcomeText: "برجاء اختيار الاختيار المناسب لحضرتك",
   invalidChoiceText: "عذرًا، يرجى إرسال رقم الاختيار المطلوب فقط (من 1 إلى 5) لنتمكن من توجيهك للقسم الصحيح.",
-  option1Label: "الفروع ومواعيد العمل",
+  option1Label: "الفروع",
   option2Label: "خدمة العملاء",
-  option3Label: "طلبات الجملة",
-  option4Label: "الشكاوى والاقتراحات",
+  option3Label: "طلبات الجمله",
+  option4Label: "الشكاوي والاقتراحات",
   option5Label: "غير ذلك",
-  option1ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
+  option1ReplyText: "برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء المختص بالفروع ومواعيد العمل.",
   option2ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
-  option3ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
-  option4ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
-  option5ReplyText: "برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.",
+  option3ReplyText: "برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء المختص بطلبات الجملة.",
+  option4ReplyText: "برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء المختص بالشكاوي والاقتراحات.",
+  option5ReplyText: "برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء لمساعدتك.",
   businessHoursEnabled: false,
   businessDays: ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY"],
   businessStart: "09:00",
@@ -82,7 +83,14 @@ function normalizeArabic(value: string) {
 }
 
 export function buildRoutingMenuText(settings: ChatbotSettings = DEFAULT_CHATBOT_SETTINGS) {
-  return `${settings.welcomeText.trim() || DEFAULT_CHATBOT_SETTINGS.welcomeText}\nيرجى اختيار رقم الخدمة المطلوبة:\n1. ${settings.option1Label}\n2. ${settings.option2Label}\n3. ${settings.option3Label}\n4. ${settings.option4Label}\n5. ${settings.option5Label}`;
+  return [
+    settings.welcomeText.trim() || DEFAULT_CHATBOT_SETTINGS.welcomeText,
+    `1 ${settings.option1Label}`,
+    `2 ${settings.option2Label}`,
+    `3 ${settings.option3Label}`,
+    `4 ${settings.option4Label}`,
+    `5 ${settings.option5Label}`
+  ].join("\n");
 }
 
 export function getServiceChoice(value?: string | null, settings: ChatbotSettings = DEFAULT_CHATBOT_SETTINGS): ServiceChoice | undefined {
@@ -112,6 +120,11 @@ export function decideBotAction(input: { enabled: boolean; state: BotState; star
   const choice = getServiceChoice(input.text, input.settings);
   if (!choice) return { action: "INVALID", nextState: "BOT_MENU" };
   return { action: "HANDOFF", nextState: "ASSIGNED_TO_AGENT", choice };
+}
+
+export function isBotMenuIdleExpired(state: BotState, lastInboundAt: Date | null | undefined, currentAt: Date) {
+  if (state !== "BOT_MENU" || !lastInboundAt) return false;
+  return currentAt.getTime() - lastInboundAt.getTime() >= BOT_MENU_IDLE_TIMEOUT_MS;
 }
 
 export function findMatchingAutoReply<T extends AutoReplyRuleMatch>(rules: T[], text?: string) {

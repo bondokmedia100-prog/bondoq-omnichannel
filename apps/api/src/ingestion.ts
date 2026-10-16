@@ -6,7 +6,7 @@ import { io } from "./realtime";
 import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
-import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, type BotState } from "./autoReplies";
+import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, isBotMenuIdleExpired, type BotState } from "./autoReplies";
 import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
 import { detectImageContentType, publicMediaUrl, safeFileName } from "./mediaStorage";
@@ -125,8 +125,8 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     metadata: { path: ["automation"], equals: "off-hours-reply" }
   }, select: { id: true } }) : null;
   const shouldSendOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled && !priorOffHoursReply;
-  const starting = !isRatingReply && (isNewConversation || isTerminal);
   const currentBotState: BotState = conversation.awaitingRouting ? "BOT_MENU" : conversation.botState;
+  const starting = !isRatingReply && (isNewConversation || isTerminal || isBotMenuIdleExpired(currentBotState, conversation.lastInboundAt, message.createdAt));
   const decision = decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
   const serviceChoice = decision.action === "HANDOFF" ? decision.choice : undefined;
   const autoRules = decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text

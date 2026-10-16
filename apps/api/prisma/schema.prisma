@@ -613,18 +613,18 @@ model AutoReplyRule {
 model ChatbotSettings {
   id                String   @id @default("default")
   enabled           Boolean  @default(true)
-  welcomeText       String   @default("أهلاً بك في حلواني بندق.") @db.Text
+  welcomeText       String   @default("برجاء اختيار الاختيار المناسب لحضرتك") @db.Text
   invalidChoiceText String   @default("عذرًا، يرجى إرسال رقم الاختيار المطلوب فقط (من 1 إلى 5) لنتمكن من توجيهك للقسم الصحيح.") @db.Text
-  option1Label      String   @default("الفروع ومواعيد العمل")
+  option1Label      String   @default("الفروع")
   option2Label      String   @default("خدمة العملاء")
-  option3Label      String   @default("طلبات الجملة")
-  option4Label      String   @default("الشكاوى والاقتراحات")
+  option3Label      String   @default("طلبات الجمله")
+  option4Label      String   @default("الشكاوي والاقتراحات")
   option5Label      String   @default("غير ذلك")
-  option1ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
+  option1ReplyText  String   @default("برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء المختص بالفروع ومواعيد العمل.") @db.Text
   option2ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
-  option3ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
-  option4ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
-  option5ReplyText  String   @default("برجاء الانتظار لحظات، سيتم تحويلك إلى ممثل خدمة العملاء المختص.") @db.Text
+  option3ReplyText  String   @default("برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء المختص بطلبات الجملة.") @db.Text
+  option4ReplyText  String   @default("برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء المختص بالشكاوي والاقتراحات.") @db.Text
+  option5ReplyText  String   @default("برجاء الانتظار لحظات، سيتم توجيهك إلى ممثل خدمة العملاء لمساعدتك.") @db.Text
   businessHoursEnabled Boolean @default(false)
   businessDays String[] @default(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY"])
   businessStart String @default("09:00")
