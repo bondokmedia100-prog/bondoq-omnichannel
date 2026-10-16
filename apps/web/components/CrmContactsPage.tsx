@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, BookUser, Mail, Pencil, Phone, Plus, Save, Search, Star, Tag, Trash2, Users, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { parseContactsFile } from "@/lib/contactsImport";
+import CrmThemeToggle from "./CrmThemeToggle";
 
 type Row = Record<string, any>;
 type Profile = { role: string; canManageCatalog?: boolean | null; canManageTeam?: boolean | null };
@@ -186,7 +187,7 @@ export default function CrmContactsPage() {
   const inputClass = "h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-amber-400";
   return <main dir="rtl" className="min-h-screen bg-[#f7f5f1] p-4 text-stone-800 sm:p-7">
     <div className="mx-auto max-w-7xl">
-      <header className="mb-6 flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-3"><button onClick={() => router.back()} aria-label="رجوع" className="grid h-10 w-10 place-items-center rounded-xl bg-white text-stone-500 shadow-sm"><ArrowRight size={18} /></button><div className="grid h-11 w-11 place-items-center rounded-2xl bg-[#d32f2f] text-white"><Users size={20} /></div><div><p className="text-xs font-bold text-[#b88718]">مركز خدمة العملاء - CRM</p><h1 className="text-xl font-extrabold">العملاء ودليل الشركة</h1></div></div><span className="rounded-full bg-white px-4 py-2 text-xs font-bold text-stone-500">{profile ? "متصل" : "جارٍ التحميل"}</span></header>
+      <header className="mb-6 flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-3"><button onClick={() => router.back()} aria-label="رجوع" className="grid h-10 w-10 place-items-center rounded-xl bg-white text-stone-500 shadow-sm"><ArrowRight size={18} /></button><div className="grid h-11 w-11 place-items-center rounded-2xl bg-[#d32f2f] text-white"><Users size={20} /></div><div><p className="text-xs font-bold text-[#b88718]">مركز خدمة العملاء - CRM</p><h1 className="text-xl font-extrabold">العملاء ودليل الشركة</h1></div></div><div className="flex items-center gap-2"><span className="rounded-full bg-white px-4 py-2 text-xs font-bold text-stone-500">{profile ? "متصل" : "جارٍ التحميل"}</span><CrmThemeToggle /></div></header>
       {notice && <div role="status" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{notice}</div>}
       <nav className="mb-4 flex gap-2"><button onClick={() => setTab("customers")} className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-bold ${tab === "customers" ? "bg-[#d32f2f] text-white" : "bg-white text-stone-500"}`}><Users size={16} /> العملاء <span className="rounded-full bg-black/10 px-2 py-0.5 text-xs">{customerCount}</span></button><button onClick={() => setTab("directory")} className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-bold ${tab === "directory" ? "bg-[#d32f2f] text-white" : "bg-white text-stone-500"}`}><BookUser size={16} /> دليل الشركة</button></nav>
       {tab === "customers" ? <section className="grid min-h-[70vh] gap-4 lg:grid-cols-[minmax(0,1fr)_390px]">

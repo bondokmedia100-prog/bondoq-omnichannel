@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Bell, BellRing } from "lucide-react";
 import { api } from "@/lib/api";
+import CrmThemeToggle from "./CrmThemeToggle";
 
 function decodeVapidKey(value: string) {
   const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -72,10 +73,11 @@ export default function PushNotificationsButton() {
   }
 
   const label = !supported ? "إشعارات غير مدعومة" : enabled ? "إيقاف إشعارات الرسائل" : configured ? "تفعيل إشعارات الرسائل" : "مفاتيح إشعارات الخادم غير مهيأة";
-  return <div className="relative">
+  return <div className="relative flex items-center gap-1">
     <button type="button" onClick={() => void toggle()} disabled={busy} aria-label={label} title={label} className={`grid h-9 w-9 place-items-center rounded-lg disabled:cursor-wait disabled:opacity-50 ${enabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>
       {enabled ? <BellRing size={17} /> : <Bell size={17} />}
     </button>
+    <CrmThemeToggle />
     {notice && <div role="status" className="absolute left-0 top-11 z-50 w-64 rounded-xl border border-stone-200 bg-white p-3 text-[11px] leading-5 text-stone-700 shadow-xl">{notice}</div>}
   </div>;
 }
