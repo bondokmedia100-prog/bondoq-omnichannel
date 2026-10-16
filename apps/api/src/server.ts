@@ -1228,12 +1228,12 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
       }
     }
   }
-  let updated = await prisma.conversation.update({ where: { id: conversation.id }, data: { assignedAgentId: parsed.data.agentId, branchId, routingDepartment: branchId ? Department.BRANCH : conversation.routingDepartment === Department.BRANCH ? null : conversation.routingDepartment, status: parsed.data.agentId ? ConversationStatus.OPEN : ConversationStatus.QUEUED, awaitingRouting: false } });
+  await prisma.conversation.update({ where: { id: conversation.id }, data: { assignedAgentId: parsed.data.agentId, branchId, routingDepartment: branchId ? Department.BRANCH : conversation.routingDepartment === Department.BRANCH ? null : conversation.routingDepartment, status: parsed.data.agentId ? ConversationStatus.OPEN : ConversationStatus.QUEUED, awaitingRouting: false } });
   const historyAgentIds = [...new Set([conversation.assignedAgentId, parsed.data.agentId].filter((id): id is string => Boolean(id)))];
   if (historyAgentIds.length) await prisma.conversationAssignment.createMany({ data: historyAgentIds.map((agentId) => ({ conversationId: conversation.id, agentId })), skipDuplicates: true });
   await audit(req.user!.id, "CONVERSATION_REASSIGNED", conversation.id, { from: conversation.assignedAgentId, to: parsed.data.agentId, by: req.user!.id, keepQueued: parsed.data.keepQueued || false });
-  if (!parsed.data.agentId && !parsed.data.keepQueued) updated = await assignConversation(conversation.id, branchId ? Department.BRANCH : undefined);
-  updated = await prisma.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } } } });
+  if (!parsed.data.agentId && !parsed.data.keepQueued) await assignConversation(conversation.id, branchId ? Department.BRANCH : undefined);
+  const updated = await prisma.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } } } });
   if (conversation.assignedAgentId && conversation.assignedAgentId !== updated.assignedAgentId) {
     const managerTitle = req.user!.role === Role.ADMIN ? "مدير النظام" : "المشرف";
     const body = updated.assignedAgent?.name ? `سحب ${managerTitle} (${req.user!.name}) المحادثة من متابعتك وأسندها إلى ${updated.assignedAgent.name}.` : `سحب ${managerTitle} (${req.user!.name}) المحادثة من متابعتك.`;
