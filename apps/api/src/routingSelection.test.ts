@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canReceiveChannel, channelEligibilityWhere, chooseRoundRobinAgent } from "./routingSelection";
+import { canReceiveChannel, channelEligibilityWhere, chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
 
 test("round-robins across every online agent in order", () => {
   const agents = [{ id: "a" }, { id: "b" }, { id: "c" }];
@@ -22,4 +22,15 @@ test("maps supported channels to the matching agent eligibility field", () => {
   assert.equal(canReceiveChannel(agent, "MESSENGER"), false);
   assert.equal(canReceiveChannel(agent, "TELEGRAM"), true);
   assert.equal(canReceiveChannel({}, "WHATSAPP"), false);
+});
+
+test("reassigns only the same active conversation when its latest inbound is unanswered", () => {
+  const inboundAt = new Date("2026-10-16T00:00:00.000Z");
+  const expected = { assignedAgentId: "agent-a", inboundAt };
+  const conversation = { status: "OPEN", assignedAgentId: "agent-a", lastInboundAt: inboundAt, lastAgentResponseAt: null };
+  assert.equal(shouldReassignUnansweredConversation(conversation, expected), true);
+  assert.equal(shouldReassignUnansweredConversation({ ...conversation, assignedAgentId: "agent-b" }, expected), false);
+  assert.equal(shouldReassignUnansweredConversation({ ...conversation, lastInboundAt: new Date(inboundAt.getTime() + 1) }, expected), false);
+  assert.equal(shouldReassignUnansweredConversation({ ...conversation, lastAgentResponseAt: inboundAt }, expected), false);
+  assert.equal(shouldReassignUnansweredConversation({ ...conversation, status: "RESOLVED" }, expected), false);
 });

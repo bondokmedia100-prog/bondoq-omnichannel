@@ -65,12 +65,20 @@ export function permissionGuard(permission: PermissionName): RequestHandler[] {
 }
 
 export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+  if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
   return conversation.assignedAgentId === user.id;
 }
 
+export function canReadTeamConversations(user: SessionUser, conversation?: { branchId?: string | null }) {
+  if (user.role === Role.AGENT) return true;
+  return user.role === Role.BRANCH_USER && Boolean(user.branchId)
+    && (!conversation || conversation.branchId === user.branchId);
+}
+
 export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+  if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
   return conversation.assignedAgentId === user.id;

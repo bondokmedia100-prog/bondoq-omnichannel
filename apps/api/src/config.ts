@@ -35,6 +35,7 @@ export const config = {
   webRtcTurnSharedSecret: process.env.WEBRTC_TURN_SHARED_SECRET || "",
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || "",
   redisUrl: process.env.REDIS_URL || "redis://localhost:6379",
+  unansweredReassignMinutes: Math.max(1, Number.parseInt(process.env.UNANSWERED_REASSIGN_MINUTES || "10", 10) || 10),
   openaiApiKey: process.env.OPENAI_API_KEY || "",
   openaiTranscriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL || "whisper-1",
   openaiSummaryModel: process.env.OPENAI_SUMMARY_MODEL || "gpt-4o-mini",
