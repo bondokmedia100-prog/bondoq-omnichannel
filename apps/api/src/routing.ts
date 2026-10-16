@@ -19,7 +19,7 @@ type AssignmentOptions = {
 };
 
 export function withInboundConversationLock<T>(channel: string, externalConversationId: string, work: () => Promise<T>) {
-  return withRedisLock(connection, `inbound:${channel}:${externalConversationId}`, work, { leaseMs: 120_000 });
+  return withRedisLock(connection, `inbound:${channel}:${externalConversationId}`, work, { leaseMs: 120_000, waitMs: 120_000 });
 }
 
 export function withConversationAssignmentLock<T>(conversationId: string, work: () => Promise<T>) {
