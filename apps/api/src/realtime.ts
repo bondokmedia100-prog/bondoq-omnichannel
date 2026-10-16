@@ -15,6 +15,19 @@ export function broadcastPresence(userId: string, presence: Presence, department
   recipients.emit("presence:updated", { userId, presence });
 }
 
+export async function revokeConversationRoomAccess(conversationId: string, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+  if (!io) return;
+  const room = `conversation:${conversationId}`;
+  const sockets = await io.in(room).fetchSockets();
+  for (const socket of sockets) {
+    const user = socket.data.user as SessionUser | undefined;
+    if (!user || !canReadConversation(user, conversation) && !canReadTeamConversations(user, conversation)) {
+      socket.emit("conversation:access-revoked", { conversationId });
+      await socket.leave(room);
+    }
+  }
+}
+
 export function initRealtime(server: HttpServer) {
   io = new Server(server, { cors: { origin: config.webOrigin, credentials: true } });
   io.use(async (socket, next) => {
