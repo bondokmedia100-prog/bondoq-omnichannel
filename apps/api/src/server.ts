@@ -11,7 +11,7 @@ import { config } from "./config";
 import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
 import { broadcastPresence, initRealtime, io } from "./realtime";
-import { assignConversation, dispatchQueued, releaseAgentConversations } from "./routing";
+import { assignConversation, dispatchQueued, releaseAgentConversations, withInboundConversationLock } from "./routing";
 import { answerTelegramCallback, channelRecipient, deleteProviderMessage, editProviderMessage, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, reactToProviderMessage, sendCsatPrompt, sendToChannel } from "./providers";
 import { ingestMessage, updateEditedInboundMessage } from "./ingestion";
 import { getKalemlySettings, safeProviderResponse, saveKalemlySettings, sendKalemlyTest, startKalemlyWaWorker, kalemlyExternalMessageId } from "./KalemlyWaService";
@@ -436,6 +436,54 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  const openedConversation = conversation;
+  if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && openedConversation.assignedAgentId === req.user!.id && openedConversation.serviceTag && openedConversation.serviceTag !== "تواصل مباشر") {
+    try {
+      await withInboundConversationLock(openedConversation.channel, openedConversation.externalConversationId, async () => {
+        const customerName = openedConversation.customer.displayName || openedConversation.customer.name;
+        const text = `أهلاً${customerName ? ` ${customerName}` : ""}، معك ${req.user!.name} من خدمة العملاء في حلواني بندق. كيف أستطيع مساعدتك؟`;
+        let greeting = await prisma.message.findFirst({
+          where: { conversationId: openedConversation.id, direction: MessageDirection.OUTBOUND, metadata: { path: ["automation"], equals: "agent-handoff-greeting" } },
+          include: { author: { select: { id: true, name: true } } }
+        });
+        if (greeting?.deliveryStatus !== "FAILED" && greeting) return;
+        if (!greeting) {
+          greeting = await prisma.message.create({ data: {
+            conversationId: openedConversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND,
+            kind: MessageKind.TEXT, text, deliveryStatus: "QUEUED", metadata: { automation: "agent-handoff-greeting" }
+          }, include: { author: { select: { id: true, name: true } } } });
+        } else {
+          greeting = await prisma.message.update({ where: { id: greeting.id }, data: { authorId: req.user!.id, text, deliveryStatus: "QUEUED" }, include: { author: { select: { id: true, name: true } } } });
+        }
+        if (openedConversation.channel === Channel.WHATSAPP) {
+          await queueWhatsAppMessage(greeting.id, openedConversation.id, req.user!.id, {
+            channel: openedConversation.channel, recipient: openedConversation.externalCustomerId, text: greeting.text || ""
+          });
+          return;
+        }
+        try {
+          const result: any = await sendToChannel({ channel: openedConversation.channel, recipient: channelRecipient(openedConversation.channel, openedConversation.externalConversationId, openedConversation.externalCustomerId), text: greeting.text || "" });
+          const providerId = kalemlyExternalMessageId(result);
+          const sent = await prisma.message.update({ where: { id: greeting.id }, data: {
+            deliveryStatus: "SENT", ...(providerId ? { externalId: `${openedConversation.channel}:${providerId}` } : {})
+          }, include: { author: { select: { id: true, name: true } } });
+          const sentAt = sent.createdAt;
+          await prisma.conversation.update({ where: { id: openedConversation.id }, data: {
+            lastMessageAt: sentAt, lastAgentResponseAt: sentAt, firstResponseAt: openedConversation.firstResponseAt || sentAt,
+            slaBreachedAt: null, status: ConversationStatus.OPEN
+          } });
+          await audit(req.user!.id, "MESSAGE_SENT", openedConversation.id, { messageId: sent.id, automation: "agent-handoff-greeting" });
+          io.to(`conversation:${openedConversation.id}`).to("admins").to(`agent:${req.user!.id}`).emit("message:new", { conversationId: openedConversation.id, message: sent });
+        } catch (error) {
+          const failed = await prisma.message.update({ where: { id: greeting.id }, data: { deliveryStatus: "FAILED" }, include: { author: { select: { id: true, name: true } } } });
+          io.to(`conversation:${openedConversation.id}`).to("admins").to(`agent:${req.user!.id}`).emit("message:new", { conversationId: openedConversation.id, message: failed });
+          throw error;
+        }
+      });
+    } catch (error) {
+      console.warn("Personalized handoff greeting failed", openedConversation.id, error);
+    }
+  }
   if (!conversation.lastInboundAt) {
     const receivedAt = await lastInboundAt(conversation.id);
     if (receivedAt) conversation = { ...conversation, lastInboundAt: receivedAt };

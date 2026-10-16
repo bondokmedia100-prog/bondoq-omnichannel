@@ -6,6 +6,7 @@ import { config } from "./config";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { io } from "./realtime";
 import { getWhatsAppMode, sendBaileysWhatsAppMessage } from "./BaileysWhatsAppService";
+import { serializeBaileysMessageKey } from "./baileysMessageKey";
 
 const queueName = "kalemlywa-outbound";
 const redis = () => new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -197,6 +198,8 @@ export function safeProviderResponse(value: unknown): unknown {
 }
 
 export function kalemlyExternalMessageId(result: any): string | undefined {
+  const baileysKey = serializeBaileysMessageKey(result?.key);
+  if (baileysKey) return baileysKey;
   const id = result?.message_id || result?.id || result?.key?.id || result?.data?.id || result?.messages?.[0]?.id || result?.result?.message_id;
   return id ? String(id) : undefined;
 }

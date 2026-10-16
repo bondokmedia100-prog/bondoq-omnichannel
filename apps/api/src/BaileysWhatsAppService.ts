@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, rm, chmod, readdir } from "node:fs/promises";
 import path from "node:path";
 import makeWASocket, { DisconnectReason, downloadMediaMessage, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
-import { Channel, MessageKind } from "@prisma/client";
+import { Channel, ConversationBotState, ConversationStatus, Department, MessageKind } from "@prisma/client";
 import QRCode from "qrcode";
 import { prisma } from "./prisma";
 import { config } from "./config";
@@ -10,6 +10,8 @@ import { io } from "./realtime";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { sendPushNotification } from "./pushNotifications";
 import { repacketizeOggOpusToCode3 } from "./oggOpus";
+import { assignConversation, withInboundConversationLock } from "./routing";
+import { parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
 
 process.umask(0o077);
 
@@ -112,26 +114,24 @@ function normalizeJid(value: string) {
 }
 
 function baileysMessageKey(input: { recipient: string; externalId: string; direction: "INBOUND" | "OUTBOUND" }) {
+  const storedKey = parseStoredBaileysMessageKey(input.externalId, input.direction);
+  if (storedKey) return storedKey;
   const raw = input.externalId.replace(/^WHATSAPP:/, "");
-  if (raw.startsWith("baileys:")) {
-    const value = raw.slice("baileys:".length);
-    const split = value.lastIndexOf(":");
-    if (split > 0 && split < value.length - 1) return { remoteJid: value.slice(0, split), id: value.slice(split + 1), fromMe: input.direction === "OUTBOUND" };
-  }
+  if (raw.startsWith("baileys-key:")) throw new Error("معرّف مفتاح رسالة WhatsApp غير صالح");
   return { remoteJid: normalizeJid(input.recipient), id: raw, fromMe: input.direction === "OUTBOUND" };
 }
 
 export async function editBaileysWhatsAppMessage(input: { recipient: string; externalId: string; text: string }) {
   if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("تعديل الرسائل متاح فقط عند اتصال WhatsApp بوضع Baileys");
   const key = baileysMessageKey({ ...input, direction: "OUTBOUND" });
-  if (!key.id || key.id === input.externalId) throw new Error("معرّف رسالة WhatsApp غير صالح");
+  if (!key.id) throw new Error("معرّف رسالة WhatsApp غير صالح");
   return socket.sendMessage(key.remoteJid, { text: input.text, edit: key as any });
 }
 
 export async function deleteBaileysWhatsAppMessage(input: { recipient: string; externalId: string }) {
   if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("حذف الرسائل متاح فقط عند اتصال WhatsApp بوضع Baileys");
   const key = baileysMessageKey({ ...input, direction: "OUTBOUND" });
-  if (!key.id || key.id === input.externalId) throw new Error("معرّف رسالة WhatsApp غير صالح");
+  if (!key.id) throw new Error("معرّف رسالة WhatsApp غير صالح");
   return socket.sendMessage(key.remoteJid, { delete: key as any });
 }
 
@@ -165,7 +165,8 @@ async function persistBaileysReceipt(update: any) {
   const deliveryStatus = receipt.readTimestamp || statusNumber >= 4 || statusText.includes("READ") ? "READ"
     : receipt.receiptTimestamp || statusNumber >= 3 || statusText.includes("DELIVERY_ACK") || statusText.includes("DELIVERED") ? "DELIVERED" : null;
   if (!deliveryStatus) return;
-  const storedIds = [`WHATSAPP:${id}`, `WHATSAPP:baileys:${remoteJid}:${id}`];
+  const storedKey = serializeBaileysMessageKey({ remoteJid, id, fromMe: true });
+  const storedIds = [`WHATSAPP:${id}`, `WHATSAPP:baileys:${remoteJid}:${id}`, ...(storedKey ? [`WHATSAPP:${storedKey}`] : [])];
   const message = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, direction: "OUTBOUND" }, select: { id: true, conversationId: true, deliveryStatus: true } });
   if (!message || message.deliveryStatus === "READ" || message.deliveryStatus === deliveryStatus) return;
   const saved = await prisma.message.update({ where: { id: message.id }, data: { deliveryStatus } });
@@ -324,10 +325,48 @@ async function handleIncomingCall(currentSocket: WASocket, call: any) {
   if (!callerJid) return;
   const phoneNumber = phoneFromJid(String(call.callerPn || "")) || phoneFromJid(callerJid);
   const ids = [call.chatId, callerJid, phoneNumber].filter((value): value is string => typeof value === "string" && value.length > 0);
-  const conversation = ids.length ? await prisma.conversation.findFirst({
-    where: { channel: Channel.WHATSAPP, OR: [{ externalConversationId: { in: ids } }, { externalCustomerId: { in: ids } }] },
-    include: { customer: { select: { name: true, displayName: true, phone: true } }, assignedAgent: { select: { id: true } } }
-  }) : null;
+  const conversationCandidate = await withInboundConversationLock(Channel.WHATSAPP, callerJid, async () => {
+    let existing = ids.length ? await prisma.conversation.findFirst({
+      where: { channel: Channel.WHATSAPP, OR: [{ externalConversationId: { in: ids } }, { externalCustomerId: { in: ids } }] },
+      include: { customer: { select: { name: true, displayName: true, phone: true } }, assignedAgent: { select: { id: true } } }
+    }) : null;
+    if (!existing) {
+      const externalCustomerId = phoneNumber || callerJid;
+      const customer = await prisma.customer.upsert({
+        where: { id: `external_whatsapp_${externalCustomerId}` },
+        update: { ...(phoneNumber ? { phone: phoneNumber } : {}), channelIdentifiers: { whatsapp: externalCustomerId } },
+        create: {
+          id: `external_whatsapp_${externalCustomerId}`, phone: phoneNumber || null,
+          channelIdentifiers: { whatsapp: externalCustomerId }
+        }
+      });
+      try {
+        existing = await prisma.conversation.create({ data: {
+          customerId: customer.id, channel: Channel.WHATSAPP, externalConversationId: callerJid, externalCustomerId,
+          status: ConversationStatus.QUEUED, awaitingRouting: false, botState: ConversationBotState.ASSIGNED_TO_AGENT,
+          routingDepartment: Department.CUSTOMER_CARE
+        }, include: { customer: { select: { name: true, displayName: true, phone: true } }, assignedAgent: { select: { id: true } } } });
+      } catch (error) {
+        if ((error as { code?: string }).code !== "P2002") throw error;
+        existing = await prisma.conversation.findFirst({
+          where: { channel: Channel.WHATSAPP, OR: [{ externalConversationId: { in: ids } }, { externalCustomerId: { in: ids } }] },
+          include: { customer: { select: { name: true, displayName: true, phone: true } }, assignedAgent: { select: { id: true } } }
+        });
+      }
+    }
+    if (!existing) throw new Error("تعذر إنشاء محادثة للمكالمة الواردة");
+    const terminal = existing.status === ConversationStatus.CLOSED || existing.status === ConversationStatus.RESOLVED;
+    existing = await prisma.conversation.update({ where: { id: existing.id }, data: {
+      ...(terminal ? { status: existing.assignedAgentId ? ConversationStatus.OPEN : ConversationStatus.QUEUED, closedAt: null } : {}),
+      awaitingRouting: false, botState: ConversationBotState.ASSIGNED_TO_AGENT,
+      lastMessageAt: new Date(), routingDepartment: existing.routingDepartment || Department.CUSTOMER_CARE
+    }, include: { customer: { select: { name: true, displayName: true, phone: true } }, assignedAgent: { select: { id: true } } } });
+    return existing;
+  });
+  await assignConversation(conversationCandidate.id, Department.CUSTOMER_CARE, { reassignIfIneligible: true });
+  const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationCandidate.id }, include: {
+    customer: { select: { name: true, displayName: true, phone: true } }, assignedAgent: { select: { id: true } }
+  } });
   const callData = {
     callId: String(call.id), callerJid, phoneNumber: phoneNumber || conversation?.customer.phone || "",
     conversationId: conversation?.id,
