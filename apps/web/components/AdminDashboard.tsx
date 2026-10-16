@@ -311,7 +311,7 @@ export default function AdminDashboard() {
   const weeklySupport = weeklyRankedAgents.length > 1 ? weeklyRankedAgents[weeklyRankedAgents.length - 1] : null;
   const adminCallTarget = detail?.customer?.phone || detail?.externalCustomerId || "";
 
-  return <main className="min-h-screen bg-[#f7f5f1] pb-10">
+  return <main className="admin-dashboard min-h-screen bg-[#f7f5f1] pb-10">
     <header className="sticky top-0 z-20 border-b border-stone-200/80 bg-white/95 backdrop-blur"><div className="mx-auto flex h-[74px] max-w-[1500px] items-center justify-between px-4 sm:px-7">
       <div className="flex items-center gap-3"><BrandMark /><div><div className="text-lg font-extrabold text-stone-800">مركز القيادة</div><div className="text-[11px] text-stone-400">المراقبة الحية وإدارة الفريق</div></div></div>
       <div className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 sm:flex"><span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" /> النظام متصل</div>
