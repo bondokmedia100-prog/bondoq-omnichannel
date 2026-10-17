@@ -97,6 +97,7 @@ export default function AgentWorkspace() {
   const [customerEmail, setCustomerEmail] = useState("");
   const [internalNote, setInternalNote] = useState("");
   const [secretNote, setSecretNote] = useState("");
+  const [privateNoteMode, setPrivateNoteMode] = useState(false);
   const [privateNoteRecipients, setPrivateNoteRecipients] = useState<AnyRecord[]>([]);
   const [privateNoteRecipientId, setPrivateNoteRecipientId] = useState("");
   const [sendingSecretNote, setSendingSecretNote] = useState(false);
@@ -255,7 +256,7 @@ export default function AgentWorkspace() {
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" }); setSelectedProductIds([]); }
     const request = ++detailRequest.current;
-    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = !targetMessageId; setShowJumpToBottom(false); setShowMobileProfile(false); setShowCustomerSidebar(false); setShowHeaderOptions(false); setShowConversationSearch(false); setConversationSearchQuery(""); setConversationSearchMatches([]); setHighlightedMessageId(targetMessageId || ""); setHasMoreNewerMessages(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote("");
+    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = !targetMessageId; setShowJumpToBottom(false); setShowMobileProfile(false); setShowCustomerSidebar(false); setShowHeaderOptions(false); setShowConversationSearch(false); setConversationSearchQuery(""); setConversationSearchMatches([]); setHighlightedMessageId(targetMessageId || ""); setHasMoreNewerMessages(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote(""); setPrivateNoteMode(false);
     if (targetMessageId) { setMessageFilter("ALL"); pendingMessageJumpRef.current = { conversationId: id, messageId: targetMessageId }; }
     socketRef.current?.emit("conversation:join", id);
     try {
@@ -532,8 +533,8 @@ export default function AgentWorkspace() {
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حفظ الملاحظة الداخلية"); }
   }
 
-  async function sendSecretNote(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function sendSecretNote(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
     const conversationId = activeId;
     const recipientId = privateNoteRecipientId;
     const noteText = secretNote.trim();
@@ -543,6 +544,7 @@ export default function AgentWorkspace() {
       const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ recipientId, text: noteText }) });
       setDetail((current: AnyRecord) => current?.id === conversationId && !current.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...current, privateNotes: [...(current.privateNotes || []), note] } : current);
       setSecretNote("");
+      setPrivateNoteMode(false);
       setNotice(`تم إرسال رسالة سرية إلى ${note.recipient?.name || "الزميل"}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال الرسالة السرية"); }
     finally { setSendingSecretNote(false); }
@@ -841,6 +843,11 @@ export default function AgentWorkspace() {
   }, [user?.id]);
 
   useEffect(() => {
+    setPrivateNoteMode(false);
+    setSecretNote("");
+  }, [detail?.id]);
+
+  useEffect(() => {
     const conversationId = detail?.id;
     const assignedAgentId = detail?.assignedAgentId || "";
     setPrivateNoteRecipients([]);
@@ -1088,6 +1095,7 @@ export default function AgentWorkspace() {
   }, [showProducts]);
 
   const latestInbound = [...(detail?.messages || [])].reverse().find((message: AnyRecord) => message.direction === "INBOUND");
+  const privateNotePresenceLabels: Record<string, string> = { ONLINE: "متصل", BUSY: "مشغول", BREAK: "استراحة", OFFLINE: "غير متصل" };
   const displayedMessages = (detail?.messages || []).filter((message: AnyRecord) => messageFilter === "ALL"
     || messageFilter === "IMAGES" && ["IMAGE", "STICKER"].includes(message.kind)
     || messageFilter === "AUDIO" && message.kind === "AUDIO"
@@ -1439,8 +1447,8 @@ export default function AgentWorkspace() {
     const input = replyInputRef.current;
     if (!input) return;
     input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
-  }, [text]);
+    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+  }, [text, secretNote, privateNoteMode]);
 
   function chooseCannedReply(reply: AnyRecord) {
     setText(reply.content);
@@ -1590,19 +1598,13 @@ export default function AgentWorkspace() {
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
              <div className="relative shrink-0 border-t border-stone-100 bg-white p-2 sm:p-2.5">
-              {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={privateNoteRecipients} recipientId={privateNoteRecipientId} onRecipientChange={setPrivateNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
+              {detail.readOnly && detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={privateNoteRecipients} recipientId={privateNoteRecipientId} onRecipientChange={setPrivateNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
             {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
                {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
-              {failedRecording && failedRecording.conversationId === detail.id && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2"><span className="text-[10px] font-bold text-amber-900">لم يُرسل التسجيل بعد؛ احتفظنا به لتتمكن من المحاولة مجددًا.</span><audio controls src={failedRecording.previewUrl} className="h-8 max-w-full" /><button type="button" disabled={sending} onClick={retryFailedRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white disabled:opacity-50">إعادة الإرسال</button><button type="button" onClick={() => setFailedRecording(null)} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إزالة</button></div>}
-              {replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
-               <div className="mb-1 flex items-center justify-end gap-2">
-                <div className="flex items-center gap-1">
-                  <button type="button" disabled={!metaWindowOpen || sending || requestingRecording} title={recording ? "إيقاف التسجيل وإرساله" : requestingRecording ? "جارٍ طلب إذن الميكروفون" : "تسجيل رسالة صوتية"} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-500 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button>
-                  <button ref={plusButtonRef} type="button" aria-label="إضافة مرفق أو إجراء" aria-haspopup="menu" aria-expanded={showPlusMenu} disabled={!messagingEnabled || sending} onClick={() => { setShowCanned(false); setShowPlusMenu((shown) => !shown); }} className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-40"><Plus size={17} /></button>
-                </div>
-              </div>
-             {showPlusMenu && <div ref={plusMenuRef} role="menu" aria-label="إضافة إلى الرسالة" className="soft-scroll plus-menu absolute bottom-[calc(100%-8px)] right-3 z-20 max-h-[min(70vh,440px)] w-[min(320px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-2xl">
+               {failedRecording && failedRecording.conversationId === detail.id && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2"><span className="text-[10px] font-bold text-amber-900">لم يُرسل التسجيل بعد؛ احتفظنا به لتتمكن من المحاولة مجددًا.</span><audio controls src={failedRecording.previewUrl} className="h-8 max-w-full" /><button type="button" disabled={sending || privateNoteMode} onClick={retryFailedRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white disabled:opacity-50">إعادة الإرسال</button><button type="button" onClick={() => setFailedRecording(null)} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إزالة</button></div>}
+               {!privateNoteMode && replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
+             {showPlusMenu && <div ref={plusMenuRef} role="menu" aria-label="إضافة إلى الرسالة" className="soft-scroll plus-menu absolute bottom-[calc(4rem+16px)] right-3 z-20 max-h-[min(70vh,440px)] w-[min(320px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-2xl">
                <div className="grid grid-cols-2 gap-1">
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); photoInputRef.current?.click(); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><ImageIcon size={15} className="text-emerald-700" /> الصور</button>
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); cameraInputRef.current?.click(); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><Camera size={15} className="text-emerald-700" /> الكاميرا</button>
@@ -1616,12 +1618,29 @@ export default function AgentWorkspace() {
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); setShowQuickReplyManager(true); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><MessageCircle size={15} className="text-emerald-700" /> إدارة الردود السريعة</button>
                </div>
              </div>}
-             {showCanned && <div role="listbox" aria-label="الردود الجاهزة" className="soft-scroll absolute bottom-[calc(100%-8px)] right-3 z-10 max-h-60 w-[min(340px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply, index) => <button key={reply.id} type="button" role="option" aria-selected={index === cannedReplyIndex} onMouseEnter={() => setCannedReplyIndex(index)} onClick={() => chooseCannedReply(reply)} className={`flex w-full flex-col rounded-xl px-3 py-2 text-right ${index === cannedReplyIndex ? "bg-[#fff8e9]" : "hover:bg-[#fff8e9]"}`}><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
-               <form onSubmit={sendReply}><div className="rounded-xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={1} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/" )).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(event) => { if (event.key === "ArrowUp" && !showCanned && !text.trim() && recallLastSentMessage()) { event.preventDefault(); return; } if (event.key === "Enter" && !event.shiftKey && !showCanned) { event.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-24 min-h-[42px] w-full resize-none overflow-y-auto bg-transparent px-3 py-2 text-[13px] leading-5 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
-                 <div className="flex justify-end border-t border-stone-100 px-2 py-1.5">
-                   <button disabled={!text.trim() || !messagingEnabled || sending} className="flex h-8 items-center gap-1.5 rounded-lg bg-[#d32f2f] px-3 text-[11px] font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span>{sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={14} /></button>
-                 </div>
-               </div></form><p className="mt-1 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
+              {showCanned && <div role="listbox" aria-label="الردود الجاهزة" className="soft-scroll absolute bottom-[calc(4rem+16px)] right-3 z-10 max-h-60 w-[min(340px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply, index) => <button key={reply.id} type="button" role="option" aria-selected={index === cannedReplyIndex} onMouseEnter={() => setCannedReplyIndex(index)} onClick={() => chooseCannedReply(reply)} className={`flex w-full flex-col rounded-xl px-3 py-2 text-right ${index === cannedReplyIndex ? "bg-[#fff8e9]" : "hover:bg-[#fff8e9]"}`}><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
+                <form onSubmit={(event) => { if (privateNoteMode) void sendSecretNote(event); else sendReply(event); }}>
+                  <div className={`overflow-hidden rounded-xl border bg-white focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)] ${privateNoteMode ? "border-violet-200 focus-within:border-violet-300" : "border-stone-200 focus-within:border-[#e4b8a8]"}`}>
+                    {privateNoteMode && <div className="flex min-h-10 items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-3">
+                      <LockKeyhole size={14} className="shrink-0 text-violet-700" />
+                      <span className="shrink-0 text-[10px] font-bold text-violet-900">إلى</span>
+                      <select aria-label="الزميل المستلم" value={privateNoteRecipientId} onChange={(event) => setPrivateNoteRecipientId(event.target.value)} disabled={!privateNoteRecipients.length || sendingSecretNote} className="min-w-0 flex-1 bg-transparent py-2 text-[11px] text-violet-950 outline-none disabled:text-stone-400">
+                        <option value="">{privateNoteRecipients.length ? "اختر الزميل" : "لا يوجد زملاء مؤهّلون"}</option>
+                        {privateNoteRecipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.presence ? ` · ${privateNotePresenceLabels[recipient.presence] || "غير متصل"}` : ""}</option>)}
+                      </select>
+                      <span className="hidden shrink-0 text-[9px] text-violet-600 sm:inline">لا يراها العميل</span>
+                    </div>}
+                    <textarea ref={replyInputRef} rows={3} maxLength={privateNoteMode ? 4000 : undefined} value={privateNoteMode ? secretNote : text} disabled={privateNoteMode ? sendingSecretNote : !messagingEnabled} onChange={(event) => { if (privateNoteMode) setSecretNote(event.target.value); else { setText(event.target.value); setShowCanned(event.target.value.startsWith("/")); } }} onPaste={(event) => { if (privateNoteMode) return; const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/" )).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(event) => { if (!privateNoteMode && event.key === "ArrowUp" && !showCanned && !text.trim() && recallLastSentMessage()) { event.preventDefault(); return; } if (event.key === "Enter" && !event.shiftKey && (!showCanned || privateNoteMode)) { event.preventDefault(); if (privateNoteMode) void sendSecretNote(); else void submitReply(); } }} placeholder={privateNoteMode ? "اكتب رسالة سرية لا يراها العميل..." : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-40 min-h-[76px] w-full resize-none overflow-y-auto bg-transparent px-3 py-3 text-[13px] leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
+                    <div className="flex items-center justify-between gap-2 border-t border-stone-100 px-2 py-1.5">
+                      <div className="flex items-center gap-1">
+                        {detail.canSendPrivateNote && <button type="button" aria-label={privateNoteMode ? "إيقاف وضع الرسالة السرية" : "إرسال رسالة سرية لزميل"} aria-pressed={privateNoteMode} title={privateNoteMode ? "رسالة سرية لزميل" : "تبديل إلى رسالة سرية"} disabled={sending || sendingSecretNote || recording || requestingRecording} onClick={() => { setPrivateNoteMode((mode) => !mode); setShowCanned(false); setShowPlusMenu(false); }} className={`grid h-8 w-8 place-items-center rounded-lg disabled:opacity-40 ${privateNoteMode ? "bg-violet-100 text-violet-800" : "text-stone-500 hover:bg-violet-50 hover:text-violet-700"}`}><LockKeyhole size={16} /></button>}
+                        <button type="button" disabled={privateNoteMode || !metaWindowOpen || sending || requestingRecording} title={privateNoteMode ? "التسجيل الصوتي متاح لردود العميل فقط" : recording ? "إيقاف التسجيل وإرساله" : requestingRecording ? "جارٍ طلب إذن الميكروفون" : "تسجيل رسالة صوتية"} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-500 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button>
+                        <button ref={plusButtonRef} type="button" aria-label="إضافة مرفق أو إجراء" aria-haspopup="menu" aria-expanded={showPlusMenu} disabled={privateNoteMode || !messagingEnabled || sending} onClick={() => { setShowCanned(false); setShowPlusMenu((shown) => !shown); }} className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-40"><Plus size={17} /></button>
+                      </div>
+                      <button type="submit" disabled={privateNoteMode ? (!secretNote.trim() || !privateNoteRecipientId || !privateNoteRecipients.some((recipient) => recipient.id === privateNoteRecipientId) || sendingSecretNote) : (!text.trim() || !messagingEnabled || sending)} className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-[11px] font-bold text-white shadow-sm transition disabled:cursor-not-allowed disabled:opacity-40 ${privateNoteMode ? "bg-violet-700 hover:bg-violet-800" : "bg-[#d32f2f] shadow-red-200 hover:bg-[#b71c1c]"}`}><span>{privateNoteMode ? sendingSecretNote ? "جارٍ الإرسال..." : "إرسال سري" : sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={14} /></button>
+                    </div>
+                  </div>
+                </form><p className="mt-1 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
             </>}
             </div>
         </> : activeId ? <div className="grid flex-1 place-items-center text-xs text-stone-400">جارٍ تحميل المحادثة...</div> : <div className="grid flex-1 place-items-center text-center"><div><div className="mx-auto grid h-16 w-16 place-items-center rounded-3xl bg-[#fff2dd] text-[#c38f22]"><MessageCircle size={28} /></div><h2 className="mt-4 font-extrabold">اختر محادثة للبدء</h2><p className="mt-1 text-xs text-stone-400">ستظهر لك الرسائل وتفاصيل العميل هنا.</p></div></div>}
