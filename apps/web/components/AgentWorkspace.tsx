@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Archive, ArrowDown, ArrowLeft, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
@@ -782,11 +782,61 @@ export default function AgentWorkspace() {
   }, []);
 
   useEffect(() => {
-    if (!lightboxImage) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setLightboxImage(""); };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [lightboxImage]);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const dialogs = Array.from(document.querySelectorAll<HTMLElement>('.agent-app [role="dialog"][aria-modal="true"]'))
+        .filter((dialog) => dialog.getClientRects().length > 0 && window.getComputedStyle(dialog).visibility !== "hidden");
+      let topmostDialog: HTMLElement | null = null;
+      let topmostLayer = -1;
+      for (const dialog of dialogs) {
+        let layer = 0;
+        for (let element: HTMLElement | null = dialog; element; element = element.parentElement) {
+          const style = window.getComputedStyle(element);
+          if (style.position === "fixed" && style.zIndex !== "auto") { layer = Number(style.zIndex) || 0; break; }
+        }
+        if (layer > topmostLayer || layer === topmostLayer && topmostDialog && (topmostDialog.compareDocumentPosition(dialog) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+          topmostDialog = dialog;
+          topmostLayer = layer;
+        }
+      }
+      if (topmostDialog) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const callCloseButton = topmostDialog.querySelector<HTMLButtonElement>('button[aria-label="إغلاق شاشة المكالمة"]');
+        (callCloseButton || topmostDialog.querySelector<HTMLButtonElement>('button[aria-label^="إغلاق"], button[aria-label^="إلغاء"], button[aria-label^="إخفاء"], button[aria-label="تصغير نافذة المكالمة"]'))?.click();
+        return;
+      }
+      if (showHeaderOptions) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        setShowHeaderOptions(false);
+        headerOptionsRef.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus();
+      } else if (showPlusMenu) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        setShowPlusMenu(false);
+        plusButtonRef.current?.focus();
+      } else if (showCanned) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        setShowCanned(false);
+        replyInputRef.current?.focus();
+      } else {
+        const openDetails = document.querySelector<HTMLDetailsElement>(".workspace-chat details[open]");
+        if (openDetails) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          openDetails.open = false;
+          openDetails.querySelector("summary")?.focus();
+        } else if (showMobileProfile || showCustomerSidebar) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          setShowMobileProfile(false);
+          setShowCustomerSidebar(false);
+        } else if (activeIdRef.current) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          returnToChatList();
+        }
+      }
+    };
+    document.addEventListener("keydown", handleEscape, true);
+    return () => document.removeEventListener("keydown", handleEscape, true);
+  }, [showHeaderOptions, showPlusMenu, showCanned, showMobileProfile, showCustomerSidebar, returnToChatList]);
 
   useEffect(() => {
     if (!showHeaderOptions) return;
@@ -795,11 +845,6 @@ export default function AgentWorkspace() {
     };
     const handleMenuKeys = (event: KeyboardEvent) => {
       const items = Array.from(headerOptionsRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') || []);
-      if (event.key === "Escape") {
-        setShowHeaderOptions(false);
-        headerOptionsRef.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus();
-        return;
-      }
       if (!items.length || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
       event.preventDefault();
       const current = items.indexOf(document.activeElement as HTMLButtonElement);
@@ -823,11 +868,6 @@ export default function AgentWorkspace() {
     };
     const handleMenuKeys = (event: KeyboardEvent) => {
       const items = Array.from(plusMenuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') || []);
-      if (event.key === "Escape") {
-        setShowPlusMenu(false);
-        plusButtonRef.current?.focus();
-        return;
-      }
       if (!items.length || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
       event.preventDefault();
       const current = items.indexOf(document.activeElement as HTMLButtonElement);
@@ -1239,6 +1279,13 @@ export default function AgentWorkspace() {
 
   useEffect(() => { setCannedReplyIndex(0); }, [showCanned, text, agentQuickReplies, canned]);
 
+  useEffect(() => {
+    const input = replyInputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+  }, [text]);
+
   function chooseCannedReply(reply: AnyRecord) {
     setText(reply.content);
     setShowCanned(false);
@@ -1252,11 +1299,6 @@ export default function AgentWorkspace() {
         event.preventDefault();
         event.stopImmediatePropagation();
         setCannedReplyIndex((current) => event.key === "ArrowDown" ? (current + 1) % filteredCanned.length : (current - 1 + filteredCanned.length) % filteredCanned.length);
-      } else if (showCanned && event.key === "Escape") {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        setShowCanned(false);
-        replyInputRef.current?.focus();
       } else if (showCanned && event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -1301,9 +1343,8 @@ export default function AgentWorkspace() {
         <input ref={uploadInputRef} type="file" multiple className="hidden" accept="image/jpeg,image/png,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,audio/webm,audio/aac,video/mp4,video/3gpp,video/quicktime,application/pdf,text/plain,.doc,.docx,.xls,.xlsx" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
         {isDraggingFile && detail && <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-emerald-500 bg-emerald-50/90 text-lg font-extrabold text-emerald-800">أفلت الصورة أو ملصق WebP أو الصوت أو الفيديو أو الملف لإرساله</div>}
         {detail ? <>
-              <button type="button" onClick={returnToChatList} aria-label="العودة إلى قائمة المحادثات دون إغلاقها" title="العودة إلى قائمة المحادثات دون إغلاقها" className="conversation-view-back"><X size={16} /> العودة إلى المحادثات</button>
-             <fieldset disabled={Boolean(detail.readOnly)} className="contents">
-            <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-stone-100 bg-white px-3 sm:px-4">
+               <button type="button" onClick={returnToChatList} aria-label="العودة إلى قائمة المحادثات دون إغلاقها" title="العودة إلى قائمة المحادثات دون إغلاقها" className="conversation-view-back"><ArrowRight size={16} /> العودة إلى المحادثات</button>
+             <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-stone-100 bg-white px-3 sm:px-4">
               <div className="flex min-w-0 items-center gap-2 sm:gap-3">
                 <Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} />
                 <div className="min-w-0">
@@ -1311,22 +1352,23 @@ export default function AgentWorkspace() {
                   <div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</div>
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <div ref={headerOptionsRef} className="relative">
-                  <button type="button" title="خيارات المحادثة" aria-label="خيارات المحادثة" aria-haspopup="menu" aria-expanded={showHeaderOptions} onClick={() => setShowHeaderOptions((open) => !open)} className={`grid h-9 w-9 place-items-center rounded-lg ${showHeaderOptions ? "bg-stone-100 text-stone-700" : "text-stone-400 hover:bg-stone-100"}`}><MoreHorizontal size={18} /></button>
-                  {showHeaderOptions && <div role="menu" aria-label="إجراءات المحادثة" className="absolute left-0 top-full z-50 mt-2 w-64 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">
+               <div className="flex shrink-0 items-center gap-1">
+                <fieldset disabled={Boolean(detail.readOnly)} className="contents">
+                 <div ref={headerOptionsRef} className="relative">
+                   <button type="button" title="خيارات المحادثة" aria-label="خيارات المحادثة" aria-haspopup="menu" aria-expanded={showHeaderOptions} onClick={() => setShowHeaderOptions((open) => !open)} className={`grid h-9 w-9 place-items-center rounded-lg ${showHeaderOptions ? "bg-stone-100 text-stone-700" : "text-stone-400 hover:bg-stone-100"}`}><MoreHorizontal size={18} /></button>
+                   {showHeaderOptions && <div role="menu" aria-label="إجراءات المحادثة" className="absolute left-0 top-full z-50 mt-2 w-64 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">
                     {detail.channel === "WHATSAPP" && <button type="button" role="menuitem" disabled={!callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : undefined} onClick={() => { setShowHeaderOptions(false); setCallConversation(detail); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><PhoneCall size={16} className="shrink-0" /><span className="text-xs font-extrabold">مكالمة WhatsApp داخل النظام</span></button>}
                     <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void toggleFavorite(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Star size={16} className="shrink-0 text-amber-500" fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /><span className="text-xs font-bold">{favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"}</span></button>
                     <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void deferConversation(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><Clock3 size={16} className="shrink-0 text-stone-400" /><span className="text-xs font-bold">تأجيل للمتابعة لاحقًا</span></button>
-                    {!detail.readOnly && user?.role === "AGENT" && user.department === "CUSTOMER_CARE" && <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void openHandoffDialog(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Users size={16} className="shrink-0 text-amber-700" /><span className="text-xs font-bold">تحويل لزميل متاح</span></button>}
-                    <div className="my-1 border-t border-stone-100" />
-                    <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void resolveConversation(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50"><CheckCircle2 size={16} className="shrink-0" /><span className="text-xs font-bold">تم الحل وإرسال استبيان الرضا</span></button>
-                    <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void closeConversation(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><Archive size={16} className="shrink-0 text-stone-400" /><span className="text-xs font-bold">إغلاق المحادثة</span></button>
-                  </div>}
-                </div>
-              </div>
-            </div>
-             </fieldset>
+                     {!detail.readOnly && user?.role === "AGENT" && user.department === "CUSTOMER_CARE" && <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void openHandoffDialog(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Users size={16} className="shrink-0 text-amber-700" /><span className="text-xs font-bold">تحويل لزميل متاح</span></button>}
+                     <div className="my-1 border-t border-stone-100" />
+                     <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void resolveConversation(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50"><CheckCircle2 size={16} className="shrink-0" /><span className="text-xs font-bold">تم الحل وإرسال استبيان الرضا</span></button>
+                   </div>}
+                 </div>
+                </fieldset>
+                <button type="button" onClick={() => void closeConversation()} disabled={Boolean(detail.readOnly)} title={detail.readOnly ? "محادثة للقراءة فقط" : "إغلاق المحادثة"} aria-label="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-40"><X size={18} /></button>
+               </div>
+             </div>
              {detail.customer?.isBlocked && <div role="status" className="flex shrink-0 items-center gap-2 border-b border-red-100 bg-red-50 px-4 py-2 text-[10px] font-bold text-red-800"><Ban size={14} /> العميل محظور داخل النظام؛ لا يمكن إرسال ردود أو منتجات إليه.</div>}
                <div className="flex h-9 shrink-0 items-center justify-between border-b border-stone-100 bg-white px-2">
                  <button type="button" onClick={toggleCustomerProfile} aria-expanded={showCustomerSidebar} aria-label={showCustomerSidebar ? "إخفاء ملف العميل" : "إظهار ملف العميل"} className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-[10px] font-bold ${showCustomerSidebar ? "bg-amber-50 text-amber-800" : "text-stone-500 hover:bg-stone-100"}`}><BookUser size={15} /> ملف العميل</button>
@@ -1364,20 +1406,20 @@ export default function AgentWorkspace() {
              <div className="mt-auto" /><div ref={messageEndRef} />
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
-            <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
+             <div className="relative shrink-0 border-t border-stone-100 bg-white p-2 sm:p-2.5">
               {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={privateNoteRecipients} recipientId={privateNoteRecipientId} onRecipientChange={setPrivateNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
             {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
                {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
               {failedRecording && failedRecording.conversationId === detail.id && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2"><span className="text-[10px] font-bold text-amber-900">لم يُرسل التسجيل بعد؛ احتفظنا به لتتمكن من المحاولة مجددًا.</span><audio controls src={failedRecording.previewUrl} className="h-8 max-w-full" /><button type="button" disabled={sending} onClick={retryFailedRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white disabled:opacity-50">إعادة الإرسال</button><button type="button" onClick={() => setFailedRecording(null)} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إزالة</button></div>}
               {replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
-             <div className="mb-2 flex items-center justify-between gap-2">
-               <button type="button" disabled={!messagingEnabled} onClick={() => { setShowPlusMenu(false); if (!text.startsWith("/")) setText("/"); setShowCanned((shown) => !shown); replyInputRef.current?.focus(); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-[#9b7219] hover:bg-amber-50 disabled:opacity-40">/ رد جاهز</button>
-               <div className="flex items-center gap-1">
-                 <button type="button" disabled={!metaWindowOpen || sending || requestingRecording} title={recording ? "إيقاف التسجيل وإرساله" : requestingRecording ? "جارٍ طلب إذن الميكروفون" : "تسجيل رسالة صوتية"} onClick={() => void toggleRecording()} className={`grid h-9 w-9 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-500 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={17} /> : <Mic size={17} />}</button>
-                 <button ref={plusButtonRef} type="button" aria-label="إضافة مرفق أو إجراء" aria-haspopup="menu" aria-expanded={showPlusMenu} disabled={!messagingEnabled || sending} onClick={() => { setShowCanned(false); setShowPlusMenu((shown) => !shown); }} className="grid h-9 w-9 place-items-center rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-40"><Plus size={19} /></button>
-               </div>
-             </div>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <button type="button" disabled={!messagingEnabled} onClick={() => { setShowPlusMenu(false); if (!text.startsWith("/")) setText("/"); setShowCanned((shown) => !shown); replyInputRef.current?.focus(); }} className="rounded-lg px-2.5 py-1.5 text-[10px] font-bold text-[#9b7219] hover:bg-amber-50 disabled:opacity-40">/ رد جاهز</button>
+                <div className="flex items-center gap-1">
+                  <button type="button" disabled={!metaWindowOpen || sending || requestingRecording} title={recording ? "إيقاف التسجيل وإرساله" : requestingRecording ? "جارٍ طلب إذن الميكروفون" : "تسجيل رسالة صوتية"} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-500 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button>
+                  <button ref={plusButtonRef} type="button" aria-label="إضافة مرفق أو إجراء" aria-haspopup="menu" aria-expanded={showPlusMenu} disabled={!messagingEnabled || sending} onClick={() => { setShowCanned(false); setShowPlusMenu((shown) => !shown); }} className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-40"><Plus size={17} /></button>
+                </div>
+              </div>
              {showPlusMenu && <div ref={plusMenuRef} role="menu" aria-label="إضافة إلى الرسالة" className="soft-scroll plus-menu absolute bottom-[calc(100%-8px)] right-3 z-20 max-h-[min(70vh,440px)] w-[min(320px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-2xl">
                <div className="grid grid-cols-2 gap-1">
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); photoInputRef.current?.click(); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><ImageIcon size={15} className="text-emerald-700" /> الصور</button>
@@ -1393,11 +1435,11 @@ export default function AgentWorkspace() {
                </div>
              </div>}
              {showCanned && <div role="listbox" aria-label="الردود الجاهزة" className="soft-scroll absolute bottom-[calc(100%-8px)] right-3 z-10 max-h-60 w-[min(340px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply, index) => <button key={reply.id} type="button" role="option" aria-selected={index === cannedReplyIndex} onMouseEnter={() => setCannedReplyIndex(index)} onClick={() => chooseCannedReply(reply)} className={`flex w-full flex-col rounded-xl px-3 py-2 text-right ${index === cannedReplyIndex ? "bg-[#fff8e9]" : "hover:bg-[#fff8e9]"}`}><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
-              <form onSubmit={sendReply}><div className="rounded-2xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={2} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/" )).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(event) => { if (event.key === "ArrowUp" && !showCanned && !text.trim() && recallLastSentMessage()) { event.preventDefault(); return; } if (event.key === "Enter" && !event.shiftKey && !showCanned) { event.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-32 min-h-[62px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
-                <div className="flex justify-end border-t border-stone-100 px-2 py-2">
-                  <button disabled={!text.trim() || !messagingEnabled || sending} className="flex h-9 items-center gap-2 rounded-xl bg-[#d32f2f] px-4 text-xs font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span>{sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={15} /></button>
-                </div>
-              </div></form><p className="mt-2 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
+               <form onSubmit={sendReply}><div className="rounded-xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={1} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/" )).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(event) => { if (event.key === "ArrowUp" && !showCanned && !text.trim() && recallLastSentMessage()) { event.preventDefault(); return; } if (event.key === "Enter" && !event.shiftKey && !showCanned) { event.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-24 min-h-[42px] w-full resize-none overflow-y-auto bg-transparent px-3 py-2 text-[13px] leading-5 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
+                 <div className="flex justify-end border-t border-stone-100 px-2 py-1.5">
+                   <button disabled={!text.trim() || !messagingEnabled || sending} className="flex h-8 items-center gap-1.5 rounded-lg bg-[#d32f2f] px-3 text-[11px] font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span>{sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={14} /></button>
+                 </div>
+               </div></form><p className="mt-1 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
             </>}
             </div>
         </> : activeId ? <div className="grid flex-1 place-items-center text-xs text-stone-400">جارٍ تحميل المحادثة...</div> : <div className="grid flex-1 place-items-center text-center"><div><div className="mx-auto grid h-16 w-16 place-items-center rounded-3xl bg-[#fff2dd] text-[#c38f22]"><MessageCircle size={28} /></div><h2 className="mt-4 font-extrabold">اختر محادثة للبدء</h2><p className="mt-1 text-xs text-stone-400">ستظهر لك الرسائل وتفاصيل العميل هنا.</p></div></div>}
@@ -1437,8 +1479,8 @@ export default function AgentWorkspace() {
      {showContacts && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowContacts(false)}><section role="dialog" aria-modal="true" aria-labelledby="contacts-title" className="panel flex max-h-[85vh] w-full max-w-lg flex-col p-5" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="contacts-title" className="text-base font-extrabold">جهات الاتصال</h2><p className="mt-1 text-xs text-stone-500">اختر اسمًا لفتح محادثة WhatsApp داخل النظام.</p></div><button type="button" onClick={() => setShowContacts(false)} aria-label="إغلاق جهات الاتصال" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><label className="mb-3 flex h-10 items-center gap-2 rounded-xl bg-stone-50 px-3"><Search size={15} className="text-stone-400" /><input autoFocus value={contactQuery} onChange={(event) => setContactQuery(event.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف" className="w-full bg-transparent text-xs outline-none" /></label><div className="soft-scroll min-h-32 flex-1 overflow-y-auto">{loadingContacts ? <p className="py-8 text-center text-xs text-stone-400">جارٍ البحث...</p> : contactResults.map((contact) => <button key={contact.id} type="button" disabled={!contact.phone} onClick={() => void startChatFromContact(contact)} className="flex w-full items-center gap-3 border-b border-stone-100 px-2 py-3 text-right hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><Avatar name={customerDisplayName(contact)} src={contact.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(contact)}</b><span dir="ltr" className="mt-1 block text-right text-[10px] text-stone-400">{contact.phone || "أضف رقم هاتف لبدء محادثة"}</span></span><MessageCircle size={16} className="text-emerald-700" /></button>)}{!loadingContacts && !contactResults.length && <p className="py-8 text-center text-xs text-stone-400">لا توجد جهة اتصال مطابقة.</p>}</div><p className="mt-3 text-[9px] leading-4 text-stone-400">في وضع WhatsApp Business API قد يتطلب بدء مراسلة جديدة استخدام قالب معتمد من Meta.</p></section></div>}
      {forwardMessage && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setForwardMessage(null); setForwardQuery(""); }}><section role="dialog" aria-modal="true" aria-labelledby="forward-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="forward-title" className="text-base font-extrabold">تحويل الرسالة</h2><p className="mt-1 text-xs leading-5 text-stone-500">ستُرسل نسخة من الرسالة إلى محادثة أخرى.</p></div><button type="button" onClick={() => { setForwardMessage(null); setForwardQuery(""); }} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><input autoFocus value={forwardQuery} onChange={(event) => setForwardQuery(event.target.value)} placeholder="ابحث عن محادثة" className="mb-3 h-10 w-full rounded-xl border border-stone-200 px-3 text-xs outline-none focus:border-amber-400" /><div className="max-h-[55vh] space-y-2 overflow-y-auto">{conversations.filter((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())).map((target) => <button key={target.id} type="button" onClick={() => void forwardMessageTo(target)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50"><Avatar name={customerDisplayName(target.customer)} src={target.customer?.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(target.customer)}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-stone-400"><ChannelIcon channel={target.channel} />{channelName(target.channel)}</span></span><Forward size={15} className="text-stone-400" /></button>)}{!conversations.some((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())) && <p className="rounded-xl bg-stone-50 p-5 text-center text-xs text-stone-500">لا توجد محادثات مطابقة ضمن المحادثات المحمّلة.</p>}</div></section></div>}
      {showHandoff && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowHandoff(false)}><section role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="handoff-title" className="text-base font-extrabold">تحويل المحادثة لزميل</h2><p className="mt-1 text-xs leading-5 text-stone-500">اختر موظفًا متاحًا من خدمة العملاء ليتابع مع العميل.</p></div><button type="button" onClick={() => setShowHandoff(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><div className="max-h-[55vh] space-y-2 overflow-y-auto">{handoffColleagues.map((colleague) => <button key={colleague.id} type="button" disabled={Boolean(handoffBusyId)} onClick={() => void handoffToColleague(colleague.id, colleague.name)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50 disabled:opacity-60"><Avatar name={colleague.name} /><span className="min-w-0 flex-1"><b className="block truncate text-sm">{colleague.name}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متاح الآن</span></span><span className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">{handoffBusyId === colleague.id ? "جارٍ التحويل..." : "تحويل"}</span></button>)}{!handoffColleagues.length && <div className="rounded-xl bg-stone-50 p-5 text-center text-xs leading-6 text-stone-500">لا يوجد زميل متاح الآن في خدمة العملاء. جرّب لاحقًا أو أبقِ المحادثة لديك.</div>}</div></section></div>}
-    {showProducts && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }}><section className="panel max-h-[90vh] w-full max-w-4xl overflow-y-auto p-4 sm:p-6" onClick={(event) => event.stopPropagation()}>
-       <div className="mb-4 flex items-center justify-between gap-3"><div><h2 className="text-lg font-extrabold">كتالوج حلواني بندق</h2><p className="text-xs text-stone-400">حدد منتجًا واحدًا أو أكثر لإرسال السعر والصورة معًا</p></div><button type="button" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }} className="rounded-lg px-3 py-1 text-xl text-stone-400">×</button></div>
+    {showProducts && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }}><section role="dialog" aria-modal="true" aria-labelledby="products-title" className="panel max-h-[90vh] w-full max-w-4xl overflow-y-auto p-4 sm:p-6" onClick={(event) => event.stopPropagation()}>
+       <div className="mb-4 flex items-center justify-between gap-3"><div><h2 id="products-title" className="text-lg font-extrabold">كتالوج حلواني بندق</h2><p className="text-xs text-stone-400">حدد منتجًا واحدًا أو أكثر لإرسال السعر والصورة معًا</p></div><button type="button" aria-label="إغلاق الكتالوج" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }} className="rounded-lg px-3 py-1 text-xl text-stone-400">×</button></div>
        <label className="mb-3 flex h-10 items-center gap-2 rounded-xl border border-stone-200 bg-white px-3"><Search size={15} className="text-stone-400" /><input value={productSearch} onChange={(event) => setProductSearch(event.target.value)} placeholder="ابحث باسم المنتج أو الكود" className="w-full bg-transparent text-xs outline-none" /></label>
        <div className="soft-scroll mb-4 flex gap-2 overflow-x-auto pb-1">{[{ id: "ALL", label: "الكل" }, { id: "EASTERN", label: "شرقي" }, { id: "WESTERN", label: "غربي" }, { id: "CAKES", label: "تورتات" }, { id: "BAKERY", label: "مخبوزات" }, { id: "KAHK", label: "كحك وبسكويت" }, { id: "CHOCOLATE", label: "شوكولاتة" }, { id: "MOULID", label: "حلاوة المولد" }, { id: "OCCASIONS", label: "مناسبات" }, { id: "MIX_BONDOQ", label: "ميكس بندق" }].filter((item) => item.id === "ALL" || products.some((product) => product.category === item.id)).map((item) => <button type="button" key={item.id} onClick={() => setProductFilter(item.id)} className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-bold ${productFilter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500"}`}>{item.label}</button>)}</div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{visibleProducts.map((product) => {
