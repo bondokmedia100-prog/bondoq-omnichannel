@@ -195,22 +195,29 @@ async function startWhatsAppConversation(actor: NonNullable<AuthedRequest["user"
 function messengerWindowOpen(channel: Channel, inboundAt: Date | null) {
   return !isMessenger(channel) || Boolean(inboundAt && Date.now() - inboundAt.getTime() < MESSENGER_WINDOW_MS);
 }
-async function queueWhatsAppMessage(messageId: string, conversationId: string, authorId: string | null, input: Parameters<typeof sendToChannel>[0]) {
+type QueuedWhatsAppMessage = Prisma.MessageGetPayload<{ include: {
+  author: { select: { id: true; name: true } };
+  quotedMessage: { select: { id: true; text: true; kind: true } };
+} }>;
+async function queueWhatsAppMessage(messageId: string, conversationId: string, authorId: string | null, input: Parameters<typeof sendToChannel>[0], options: { clientMessageId?: string; message?: QueuedWhatsAppMessage } = {}) {
   const emitMessage = (message: unknown) => {
     const targets = io.to(`conversation:${conversationId}`).to("admins");
-    if (authorId) targets.to(`agent:${authorId}`).emit("message:new", { conversationId, message });
-    else targets.emit("message:new", { conversationId, message });
+    const payload = { conversationId, message, ...(options.clientMessageId ? { clientMessageId: options.clientMessageId } : {}) };
+    if (authorId) targets.to(`agent:${authorId}`).emit("message:new", payload);
+    else targets.emit("message:new", payload);
   };
-  const queued = await prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
+  const queued = options.message ?? await prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
+  let responseMessage = queued;
   if (queued) emitMessage(queued);
   try {
     await sendToChannel({ ...input, outboundMessageId: messageId });
   } catch (error) {
     console.warn("Could not enqueue WhatsApp delivery", messageId, error);
-    const failed = await prisma.message.update({ where: { id: messageId }, data: { deliveryStatus: "FAILED" }, include: { author: { select: { id: true, name: true } } } });
+    const failed = await prisma.message.update({ where: { id: messageId }, data: { deliveryStatus: "FAILED" }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
     emitMessage(failed);
+    responseMessage = failed;
   }
-  return prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
+  return responseMessage;
 }
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "bondoq-api" }));
@@ -1025,7 +1032,7 @@ app.patch("/api/admin/directory/entries/:id", permissionGuard("canManageCatalog"
 });
 
 app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: httpsUrl.optional(), mediaAssetId: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional(), quotedMessageId: z.string().min(1).optional() }).strict().safeParse(req.body);
+  const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: httpsUrl.optional(), mediaAssetId: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional(), quotedMessageId: z.string().min(1).optional(), clientMessageId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/).optional() }).strict().safeParse(req.body);
   if (!parsed.success || (!parsed.data.text && parsed.data.kind === MessageKind.TEXT)) return res.status(400).json({ error: "الرسالة غير صالحة" });
   if (parsed.data.kind === MessageKind.POLL) return res.status(400).json({ error: "استخدم نموذج الاستطلاع لإرسال السؤال وخياراته" });
    const mediaKind = parsed.data.kind === MessageKind.IMAGE || parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.VIDEO || parsed.data.kind === MessageKind.FILE || parsed.data.kind === MessageKind.STICKER;
@@ -1038,7 +1045,7 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
    if (conversation.customer.isBlocked) return res.status(409).json({ error: "هذا العميل محظور داخل النظام؛ ألغِ الحظر قبل إرسال رسالة" });
   if (parsed.data.kind === MessageKind.STICKER && (conversation.channel === Channel.MESSENGER || conversation.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS")) return res.status(409).json({ error: "إرسال الملصقات غير مدعوم في وضع القناة الحالي" });
   if (parsed.data.quotedMessageId && !await prisma.message.findFirst({ where: { id: parsed.data.quotedMessageId, conversationId: conversation.id }, select: { id: true } })) return res.status(400).json({ error: "الرسالة المقتبسة لا تنتمي إلى هذه المحادثة" });
-  const { quotedMessageId, ...replyInput } = parsed.data;
+  const { quotedMessageId, clientMessageId, ...replyInput } = parsed.data;
   const receivedAt = await lastInboundAt(conversation.id, conversation.lastInboundAt);
   if (!messengerWindowOpen(conversation.channel, receivedAt)) return res.status(409).json({ code: "META_WINDOW_EXPIRED", error: "انتهت نافذة الرد في Messenger. انتظر رسالة جديدة من العميل." });
   try {
@@ -1055,7 +1062,7 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
       }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: message.createdAt, status: ConversationStatus.OPEN } });
       await audit(req.user!.id, "MESSAGE_QUEUED", conversation.id, { kind: parsed.data.kind });
-       const queuedMessage = await queueWhatsAppMessage(message.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, ...replyInput, mediaUrl, mediaAssetId: asset?.id, mediaContentType: asset?.contentType });
+       const queuedMessage = await queueWhatsAppMessage(message.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, ...replyInput, mediaUrl, mediaAssetId: asset?.id, mediaContentType: asset?.contentType }, { clientMessageId, message });
       return res.status(202).json(queuedMessage || message);
     }
       const result: any = await sendToChannel({ channel: conversation.channel, recipient: channelRecipient(conversation.channel, conversation.externalConversationId, conversation.externalCustomerId), ...replyInput, mediaUrl, mediaContentType: asset?.contentType, mediaBuffer: conversation.channel === Channel.TELEGRAM && parsed.data.kind === MessageKind.AUDIO && asset ? asset.data : undefined });
@@ -1069,7 +1076,7 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
       lastMessageAt: message.createdAt, lastAgentResponseAt: message.createdAt, firstResponseAt: conversation.firstResponseAt || message.createdAt, slaBreachedAt: null, status: ConversationStatus.OPEN
     } });
     await audit(req.user!.id, "MESSAGE_SENT", conversation.id, { kind: parsed.data.kind });
-    io.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message });
+    io.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message, ...(clientMessageId ? { clientMessageId } : {}) });
     res.status(201).json(message);
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "تعذر إرسال الرسالة للقناة" });

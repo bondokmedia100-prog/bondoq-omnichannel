@@ -12,6 +12,12 @@ export function mergeMessages(messages: Message[] = [], incoming: Message[] | Me
   });
 }
 
+export function mergePendingMessage(messages: Message[] = [], incoming: Message, clientMessageId?: string) {
+  const pending = clientMessageId ? messages.find((message) => message.id === clientMessageId) : undefined;
+  const resolved = pending?.localPreviewUrl ? { ...incoming, localPreviewUrl: pending.localPreviewUrl } : incoming;
+  return mergeMessages(clientMessageId ? messages.filter((message) => message.id !== clientMessageId) : messages, resolved);
+}
+
 export function messageNotificationPreview(message?: { text?: string | null; kind?: string } | null) {
   const text = message?.text?.trim();
   if (text) return text;

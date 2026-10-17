@@ -15,7 +15,7 @@ import WhatsAppCallModal from "./WhatsAppCallModal";
 import AgentQuickRepliesModal from "./AgentQuickRepliesModal";
 import ProtectedMedia from "./ProtectedMedia";
 import ImageEditorDialog from "./ImageEditorDialog";
-import { hasMessageTextLinks, isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled, splitMessageTextLinks } from "@/lib/messageHelpers";
+import { hasMessageTextLinks, isNotificationSoundEnabled, mergeMessages, mergePendingMessage, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled, splitMessageTextLinks } from "@/lib/messageHelpers";
 
 type AnyRecord = Record<string, any>;
 const channels = [{ id: "ALL", label: "الكل" }, { id: "WHATSAPP", label: "واتساب" }, { id: "MESSENGER", label: "ماسنجر" }, { id: "TELEGRAM", label: "تليجرام" }];
@@ -135,6 +135,8 @@ export default function AgentWorkspace() {
   const detailLoadingIdRef = useRef("");
   const loadingMessagesRef = useRef(new Map<string, AnyRecord[]>());
   const notifiedMessagesRef = useRef(new Set<string>());
+  const activeOutgoingClientIdsRef = useRef(new Set<string>());
+  const pendingServerMessageIdsRef = useRef(new Map<string, string>());
   const chatLoadRequest = useRef(0);
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
@@ -632,8 +634,8 @@ export default function AgentWorkspace() {
         }
       });
       connection.on("message:new", (event) => {
-        loadChats();
         const conversationId = event.conversationId || event.conversation?.id;
+        if (event.message?.direction !== "OUTBOUND" || event.message.authorId !== user?.id) void loadChats();
         if (event.message?.direction === "INBOUND" && conversationId) {
           const messageId = event.message.id;
           if (!messageId || !notifiedMessagesRef.current.has(messageId)) {
@@ -645,10 +647,14 @@ export default function AgentWorkspace() {
             setIncomingNotice({ conversationId, customerName: customerDisplayName(event.customer || event.conversation?.customer), channel: event.conversation?.channel, preview: messageNotificationPreview(event.message) });
           }
         }
-        if (event.message && conversationId === detailLoadingIdRef.current) {
-          loadingMessagesRef.current.set(conversationId, mergeMessages(loadingMessagesRef.current.get(conversationId) || [], event.message));
+        const clientMessageId = typeof event.clientMessageId === "string" ? event.clientMessageId : undefined;
+        if (clientMessageId && event.message?.id && activeOutgoingClientIdsRef.current.has(clientMessageId)) {
+          pendingServerMessageIdsRef.current.set(clientMessageId, event.message.id);
         }
-        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: event.customer || old.customer } : old);
+        if (event.message && conversationId === detailLoadingIdRef.current) {
+          loadingMessagesRef.current.set(conversationId, mergePendingMessage(loadingMessagesRef.current.get(conversationId) || [], event.message, clientMessageId));
+        }
+        if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergePendingMessage(old.messages || [], event.message, clientMessageId), customer: event.customer || old.customer } : old);
       });
       connection.on("whatsapp:history-synced", ({ conversationIds = [] }) => {
         void loadChats();
@@ -911,26 +917,44 @@ export default function AgentWorkspace() {
     const removePending = () => {
       if (pendingId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== pendingId) } : old);
     };
+    const restoreDraft = () => {
+      if (payload.text !== undefined && payload.draftRevision === replyDraftRevisionRef.current) setTextState((current) => current || payload.text || "");
+    };
     const discardPending = () => { removePending(); if (payload.previewUrl) URL.revokeObjectURL(payload.previewUrl); };
-    if (!conversationId) { if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); return false; }
-    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); return false; }
-    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل الرد."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); return false; }
-    if (!alreadyLocked && sendingRef.current) { discardPending(); return false; }
+    if (!conversationId) { if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); restoreDraft(); return false; }
+    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); restoreDraft(); return false; }
+    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل الرد."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); restoreDraft(); return false; }
+    if (!alreadyLocked && sendingRef.current) { discardPending(); restoreDraft(); return false; }
     if (!alreadyLocked) { sendingRef.current = true; setSending(true); }
     const localId = pendingId || `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const pendingMessage = { id: localId, conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind: payload.kind || "TEXT", text: payload.text, mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId, localPreviewUrl: payload.previewUrl, deliveryStatus: "PENDING" };
     if (!pendingId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old);
+    activeOutgoingClientIdsRef.current.add(localId);
+    if (payload.text !== undefined && payload.draftRevision === replyDraftRevisionRef.current) setTextState("");
     setShowCanned(false); setNotice("");
     try {
-      const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId }) });
-      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => item.id !== localId), message) } : old);
+      const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId, clientMessageId: localId }) });
+      const correlatedMessageId = pendingServerMessageIdsRef.current.get(localId);
+      pendingServerMessageIdsRef.current.delete(localId);
+      activeOutgoingClientIdsRef.current.delete(localId);
+      setDetail((old: AnyRecord) => {
+        if (old?.id !== conversationId) return old;
+        const currentMessage = correlatedMessageId ? (old.messages || []).find((item: AnyRecord) => item.id === correlatedMessageId) : null;
+        const currentIsFinal = ["SENT", "DELIVERED", "READ", "FAILED"].includes(currentMessage?.deliveryStatus);
+        const settledMessage = currentIsFinal ? { ...currentMessage, localPreviewUrl: undefined } : message;
+        const removedIds = new Set([localId, message.id, ...(correlatedMessageId ? [correlatedMessageId] : [])]);
+        return { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => !removedIds.has(item.id)), settledMessage) };
+      });
       if (payload.quotedMessageId) setReplyingTo((old) => old?.id === payload.quotedMessageId ? null : old);
-      if (message.deliveryStatus === "FAILED") setNotice("تعذر إضافة الرسالة إلى قائمة الإرسال. تحقق من اتصال WhatsApp.");
-      else if (payload.text !== undefined && payload.draftRevision === replyDraftRevisionRef.current) setText((current) => current.trim() === payload.text ? "" : current);
+      if (message.deliveryStatus === "FAILED") { setNotice("تعذر إضافة الرسالة إلى قائمة الإرسال. تحقق من اتصال WhatsApp."); restoreDraft(); }
       void loadChats();
       return message.deliveryStatus !== "FAILED";
     } catch (error) {
-      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== localId) } : old);
+      const serverMessageId = pendingServerMessageIdsRef.current.get(localId);
+      pendingServerMessageIdsRef.current.delete(localId);
+      activeOutgoingClientIdsRef.current.delete(localId);
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== localId).map((item: AnyRecord) => item.id === serverMessageId ? { ...item, localPreviewUrl: undefined } : item) } : old);
+      if (!serverMessageId) restoreDraft();
       setNotice(error instanceof Error ? error.message : "تعذر إرسال الرد. تحقق من إعداد ربط القناة.");
       return false;
     } finally {
@@ -992,6 +1016,7 @@ export default function AgentWorkspace() {
     const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const pendingMessage = { id: pendingId, conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind, text: caption, localPreviewUrl: previewUrl, deliveryStatus: "UPLOADING" };
     sendingRef.current = true; setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old); setNotice("جارٍ رفع الملف..."); setSending(true);
+    if (caption !== undefined && draftRevision === replyDraftRevisionRef.current) setTextState("");
     try {
       const response = await fetch(`${API_URL}/api/media`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": contentType || "application/octet-stream", "X-File-Name": encodeURIComponent(file.name), "X-Conversation-Id": conversationId }, body: file });
       const uploaded = await response.json().catch(() => ({}));
@@ -1007,6 +1032,7 @@ export default function AgentWorkspace() {
       sendingRef.current = false; setSending(false);
       setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== pendingId) } : old);
       if (previewUrl) URL.revokeObjectURL(previewUrl);
+      if (caption !== undefined && draftRevision === replyDraftRevisionRef.current) setTextState((current) => current || caption);
       keepRecording();
       setNotice(error instanceof Error ? error.message : "تعذر رفع الملف أو إرساله");
     }
