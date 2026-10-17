@@ -18,6 +18,14 @@ export function mergePendingMessage(messages: Message[] = [], incoming: Message,
   return mergeMessages(clientMessageId ? messages.filter((message) => message.id !== clientMessageId) : messages, resolved);
 }
 
+export function latestOutgoingTextMessage(messages: Message[] = [], authorId?: string) {
+  if (!authorId) return undefined;
+  return [...messages].reverse().find((message) =>
+    message.direction === "OUTBOUND" && message.authorId === authorId && message.kind === "TEXT" &&
+    ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) && typeof message.text === "string" && Boolean(message.text.trim())
+  );
+}
+
 export function messageNotificationPreview(message?: { text?: string | null; kind?: string } | null) {
   const text = message?.text?.trim();
   if (text) return text;

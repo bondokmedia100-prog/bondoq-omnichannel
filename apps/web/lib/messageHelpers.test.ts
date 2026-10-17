@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasMessageTextLinks, mergeMessages, mergePendingMessage, messageNotificationPreview, splitMessageTextLinks } from "./messageHelpers";
+import { hasMessageTextLinks, latestOutgoingTextMessage, mergeMessages, mergePendingMessage, messageNotificationPreview, splitMessageTextLinks } from "./messageHelpers";
 
 test("merges duplicate real-time messages and retains chronological order", () => {
   const result = mergeMessages([
@@ -32,6 +32,18 @@ test("reconciles a pending media bubble with its server message without losing t
   assert.deepEqual(result.map((message) => message.id), ["server-456"]);
   assert.equal(result[0].localPreviewUrl, "blob:voice-preview");
   assert.equal(result[0].deliveryStatus, "QUEUED");
+});
+
+test("recalls the latest successfully sent text by the current agent", () => {
+  const messages = [
+    { id: "mine-1", direction: "OUTBOUND", authorId: "agent-1", kind: "TEXT", text: "Earlier", deliveryStatus: "READ" },
+    { id: "theirs", direction: "INBOUND", authorId: "customer", kind: "TEXT", text: "Reply", deliveryStatus: "SENT" },
+    { id: "failed", direction: "OUTBOUND", authorId: "agent-1", kind: "TEXT", text: "Unsent", deliveryStatus: "FAILED" },
+    { id: "mine-2", direction: "OUTBOUND", authorId: "agent-1", kind: "TEXT", text: "Most recent", deliveryStatus: "DELIVERED" }
+  ];
+
+  assert.equal(latestOutgoingTextMessage(messages, "agent-1")?.id, "mine-2");
+  assert.equal(latestOutgoingTextMessage(messages, undefined), undefined);
 });
 
 test("uses message content or a useful media label for notifications", () => {
