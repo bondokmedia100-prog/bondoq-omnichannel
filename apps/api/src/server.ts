@@ -30,6 +30,7 @@ import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
 import { channelEligibilityWhere } from "./routingSelection";
 import { formatAgentHandoffGreeting } from "./autoReplies";
 import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
+import { AiImageGenerationError, aiImagePromptSchema, generateAiImage } from "./aiImage";
 
 const app = express();
 const server = http.createServer(app);
@@ -1074,6 +1075,36 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
     res.status(502).json({ error: error instanceof Error ? error.message : "تعذر إرسال الرسالة للقناة" });
   }
    });
+});
+
+app.post("/api/conversations/:id/ai-image", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = aiImagePromptSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "أدخل وصفًا للصورة من 4 إلى 1000 حرف" });
+  return withConversationAssignmentLock(req.params.id, async () => {
+    const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { customer: { select: { isBlocked: true } } } });
+    if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+    if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية الرد على هذه المحادثة" });
+    if (conversation.customer.isBlocked) return res.status(409).json({ error: "هذا العميل محظور داخل النظام؛ ألغِ الحظر قبل إرسال رسالة" });
+    const receivedAt = await lastInboundAt(conversation.id, conversation.lastInboundAt);
+    if (!messengerWindowOpen(conversation.channel, receivedAt)) return res.status(409).json({ code: "META_WINDOW_EXPIRED", error: "انتهت نافذة الرد في Messenger. انتظر رسالة جديدة من العميل." });
+    if (!config.openaiApiKey) return res.status(503).json({ error: "توليد الصور غير مُعدّ: يلزم ضبط OPENAI_API_KEY" });
+
+    let image: Awaited<ReturnType<typeof generateAiImage>>;
+    try {
+      image = await generateAiImage(parsed.data.prompt, config.openaiApiKey);
+    } catch (error) {
+      const timedOut = error instanceof AiImageGenerationError && error.code === "timeout";
+      return res.status(timedOut ? 504 : 502).json({ error: timedOut ? "انتهت مهلة توليد الصورة؛ حاول مرة أخرى" : "تعذر توليد صورة صالحة؛ حاول مرة أخرى" });
+    }
+
+    const extension = image.contentType === "image/png" ? "png" : "jpg";
+    const asset = await prisma.mediaAsset.create({ data: {
+      fileName: safeFileName(`ai-image.${extension}`), contentType: image.contentType, size: image.data.length,
+      data: Uint8Array.from(image.data), createdById: req.user!.id
+    }, select: { id: true, fileName: true, contentType: true, size: true } });
+    await audit(req.user!.id, "AI_IMAGE_GENERATED", conversation.id, { assetId: asset.id, contentType: asset.contentType, size: asset.size });
+    return res.status(201).json(asset);
+  });
 });
 
 app.post("/api/conversations/:id/contact-card", agentGuard, async (req: AuthedRequest, res: express.Response) => {

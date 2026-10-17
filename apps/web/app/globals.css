@@ -142,4 +142,15 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
   .admin-dashboard .panel > div.overflow-x-auto > table th:nth-child(4),
   .admin-dashboard .panel > div.overflow-x-auto > table td:nth-child(4) { width: 17%; }
 }
+.workspace-chat form > div > div > div.flex.items-center.gap-1 { display: none; }
+.workspace-chat > .relative.shrink-0 > .mb-2.flex.justify-end,
+.workspace-chat > .relative.shrink-0 > .mb-2.flex.flex-wrap.justify-start { display: none; }
+.plus-menu { overscroll-behavior: contain; }
+@media (min-width: 851px) {
+  .workspace-list-collapsed,
+  .workspace-profile-collapsed { display: none !important; }
+}
+@media (max-width: 850px) {
+  .desktop-sidebar-controls { display: none !important; }
+}
 .admin-conversation-preview > div:has(> select) { display: none !important; }
