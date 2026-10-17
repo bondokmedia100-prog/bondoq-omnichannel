@@ -83,8 +83,7 @@ html[data-crm-theme="dark"] input.bg-transparent,
 html[data-crm-theme="dark"] textarea.bg-transparent { background-color: transparent !important; }
 html[data-crm-theme="dark"] input::placeholder,
 html[data-crm-theme="dark"] textarea::placeholder { color: #aaa99f; }
-html[data-crm-theme="dark"] .workspace-list > div:first-child,
-html[data-crm-theme="dark"] .workspace-chat fieldset > div:first-child { background-color: #141a16 !important; }
+html[data-crm-theme="dark"] .workspace-list > div:first-child { background-color: #141a16 !important; }
 html[data-crm-theme="dark"] .soft-scroll { scrollbar-color: #535950 transparent; }
 html[data-crm-theme="dark"] .soft-scroll::-webkit-scrollbar-thumb { background: #535950; }
 html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !important; }
@@ -105,7 +104,6 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
   .workspace-grid[data-chat-open="true"] .workspace-list { display: none; }
    .workspace-grid[data-chat-open="true"] .workspace-chat { display: flex !important; }
    .conversation-view-back { display: flex; }
-   .workspace-chat fieldset > div:first-child { min-height: 58px; height: auto !important; gap: 4px; padding-inline: 8px !important; }
   .workspace-chat > div[class*="bg-[#f0f2f5]"] { height: auto !important; min-height: 44px; flex-wrap: wrap; justify-content: flex-start; padding: 6px 8px; }
   .workspace-chat > div[class*="bg-[#f0f2f5]"] > span { display: none; }
   .workspace-chat > div[class*="bg-[#f0f2f5]"] > div:last-child { max-width: 100%; }
