@@ -907,15 +907,19 @@ export default function AgentWorkspace() {
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث الحالة"); }
   }
-  async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; previewUrl?: string; latitude?: number; longitude?: number; quotedMessageId?: string; draftRevision?: number }, conversationId = activeId, alreadyLocked = false): Promise<boolean> {
-    if (!conversationId) { if (alreadyLocked) { sendingRef.current = false; setSending(false); } return false; }
-    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } return false; }
-    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل الرد."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } return false; }
-    if (!alreadyLocked && sendingRef.current) return false;
+  async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; previewUrl?: string; latitude?: number; longitude?: number; quotedMessageId?: string; draftRevision?: number }, conversationId = activeId, alreadyLocked = false, pendingId?: string): Promise<boolean> {
+    const removePending = () => {
+      if (pendingId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== pendingId) } : old);
+    };
+    const discardPending = () => { removePending(); if (payload.previewUrl) URL.revokeObjectURL(payload.previewUrl); };
+    if (!conversationId) { if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); return false; }
+    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); return false; }
+    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل الرد."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } discardPending(); return false; }
+    if (!alreadyLocked && sendingRef.current) { discardPending(); return false; }
     if (!alreadyLocked) { sendingRef.current = true; setSending(true); }
-    const localId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const localId = pendingId || `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const pendingMessage = { id: localId, conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind: payload.kind || "TEXT", text: payload.text, mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId, localPreviewUrl: payload.previewUrl, deliveryStatus: "PENDING" };
-    setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old);
+    if (!pendingId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old);
     setShowCanned(false); setNotice("");
     try {
       const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId }) });
@@ -984,19 +988,24 @@ export default function AgentWorkspace() {
     const contentType = (file.type || extensionType[extension] || "").split(";")[0].toLowerCase();
       const kind = contentType === "image/webp" ? "STICKER" : contentType.startsWith("image/") ? "IMAGE" : contentType.startsWith("audio/") ? "AUDIO" : contentType.startsWith("video/") ? "VIDEO" : "FILE";
       const previewUrl = ["IMAGE", "STICKER", "AUDIO", "VIDEO"].includes(kind) ? URL.createObjectURL(file) : undefined;
-    sendingRef.current = true; setNotice("جارٍ رفع الملف..."); setSending(true);
+    const caption = text.trim() || undefined;
+    const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const pendingMessage = { id: pendingId, conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind, text: caption, localPreviewUrl: previewUrl, deliveryStatus: "UPLOADING" };
+    sendingRef.current = true; setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old); setNotice("جارٍ رفع الملف..."); setSending(true);
     try {
       const response = await fetch(`${API_URL}/api/media`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": contentType || "application/octet-stream", "X-File-Name": encodeURIComponent(file.name), "X-Conversation-Id": conversationId }, body: file });
       const uploaded = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(uploaded.error || `تعذر رفع الملف (${response.status})`);
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).map((item: AnyRecord) => item.id === pendingId ? { ...item, deliveryStatus: "PENDING" } : item) } : old);
       setNotice("");
-      const sent = await deliverReply({ text: text.trim() || undefined, kind, mediaAssetId: uploaded.id, previewUrl, draftRevision }, conversationId, true);
+      const sent = await deliverReply({ text: caption, kind, mediaAssetId: uploaded.id, previewUrl, draftRevision }, conversationId, true, pendingId);
       if (preserveRecording) {
         if (sent) setFailedRecording(null);
         else keepRecording();
       }
     } catch (error) {
       sendingRef.current = false; setSending(false);
+      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== pendingId) } : old);
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       keepRecording();
       setNotice(error instanceof Error ? error.message : "تعذر رفع الملف أو إرساله");
@@ -1377,7 +1386,7 @@ function ChannelIcon({ channel }: { channel: string }) { const config: Record<st
   const hasMedia = ["IMAGE", "AUDIO", "VIDEO", "FILE", "STICKER"].includes(message.kind);
   const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
   const contactCard = metadata.contactCard && typeof metadata.contactCard === "object" ? metadata.contactCard : null;
-  const deliveryLabel = message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
+  const deliveryLabel = message.deliveryStatus === "UPLOADING" ? "جارٍ رفع الملف" : message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
     return <div className={`flex ${outgoing ? "justify-start" : "justify-end"}`}><div className={`agent-message-bubble ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-[82%] rounded-2xl px-4 py-3 shadow-sm`}>
     {message.quotedMessage && <div className="mb-2 rounded-lg border-r-2 border-[#d32f2f] bg-stone-50/80 px-2.5 py-1.5 text-[10px] text-stone-500"><b>{message.quotedMessage.author?.name || "رسالة مقتبسة"}</b><p className="mt-0.5 line-clamp-2">{message.quotedMessage.text || (message.quotedMessage.kind === "IMAGE" ? "صورة" : "مرفق")}</p></div>}
     {hasMedia && (message.localPreviewUrl ? ["IMAGE", "STICKER"].includes(message.kind) ? <button type="button" onClick={() => onOpenImage?.(message.localPreviewUrl)} className="mb-2 block"><img src={message.localPreviewUrl} alt={message.kind === "STICKER" ? "ملصق قيد الإرسال" : "صورة قيد الإرسال"} className="max-h-56 rounded-xl object-contain" /></button> : message.kind === "AUDIO" ? <audio controls src={message.localPreviewUrl} className="mb-2 max-w-full" /> : message.kind === "VIDEO" ? <video controls src={message.localPreviewUrl} className="mb-2 max-h-56 max-w-full rounded-xl" /> : <span className="mb-2 block text-xs">ملف مرفق قيد الإرسال</span> : message.mediaAssetId ? <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} /> : message.kind === "IMAGE" && outgoing && message.mediaUrl ? <button type="button" onClick={() => onOpenImage?.(message.mediaUrl)} className="mb-2 block"><img src={message.mediaUrl} alt="منتج حلواني بندق" className="max-h-56 rounded-xl object-cover" /></button> : <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} />)}
