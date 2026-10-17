@@ -35,6 +35,7 @@ button { cursor: pointer; }
 .agent-app .message-body { font-size: var(--chat-font-size, 15px); font-weight: 400; line-height: 1.55; }
 .agent-message-bubble { min-width: 0; max-width: min(88%, 44rem); overflow-wrap: anywhere; padding: 8px 12px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .chat-message-list > .agent-message-row + .agent-message-row { margin-top: -3px; }
+.search-message-highlight { outline: 2px solid #d6a43a; outline-offset: 3px; border-radius: 14px; }
 .message-quote-button { opacity: 1; transition: opacity .15s ease, background-color .15s ease; }
 .agent-message-inbound { border: 1px solid #bdc8d0; background-color: #fff !important; color: #1f2933 !important; }
 .agent-message-inbound .message-body { color: #1f2933; overflow-wrap: anywhere; word-break: break-word; }

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
@@ -55,10 +55,17 @@ export default function AgentWorkspace() {
   const [messageFilter, setMessageFilter] = useState("ALL");
   const [chatLoadError, setChatLoadError] = useState("");
   const [search, setSearch] = useState("");
+  const [globalSearchResults, setGlobalSearchResults] = useState<AnyRecord[]>([]);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
+  const [globalSearchError, setGlobalSearchError] = useState("");
+  const [globalSearchHasMore, setGlobalSearchHasMore] = useState(false);
   const [phoneSearchResult, setPhoneSearchResult] = useState<AnyRecord | null>(null);
   const [phoneSearchError, setPhoneSearchError] = useState("");
   const [searchingPhone, setSearchingPhone] = useState(false);
   const phoneSearchRequestRef = useRef(0);
+  const globalSearchRequestRef = useRef(0);
+  const conversationSearchRequestRef = useRef(0);
+  const pendingMessageJumpRef = useRef<{ conversationId: string; messageId: string } | null>(null);
   const [startingPhoneChat, setStartingPhoneChat] = useState(false);
   const [chatFontSize, setChatFontSize] = useState(15);
   const [text, setTextState] = useState("");
@@ -123,6 +130,15 @@ export default function AgentWorkspace() {
   const [showMobileProfile, setShowMobileProfile] = useState(false);
   const [callConversation, setCallConversation] = useState<AnyRecord | null>(null);
   const [showHeaderOptions, setShowHeaderOptions] = useState(false);
+  const [showConversationSearch, setShowConversationSearch] = useState(false);
+  const [conversationSearchQuery, setConversationSearchQuery] = useState("");
+  const [conversationSearchMatches, setConversationSearchMatches] = useState<AnyRecord[]>([]);
+  const [conversationSearchTotal, setConversationSearchTotal] = useState(0);
+  const [conversationSearchIndex, setConversationSearchIndex] = useState(0);
+  const [conversationSearchLoading, setConversationSearchLoading] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState("");
+  const [hasMoreNewerMessages, setHasMoreNewerMessages] = useState(false);
+  const [loadingNewerMessages, setLoadingNewerMessages] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
   const [handoffColleagues, setHandoffColleagues] = useState<AnyRecord[]>([]);
   const [handoffBusyId, setHandoffBusyId] = useState("");
@@ -154,6 +170,7 @@ export default function AgentWorkspace() {
   const plusMenuRef = useRef<HTMLDivElement>(null);
   const plusButtonRef = useRef<HTMLButtonElement>(null);
   const replyInputRef = useRef<HTMLTextAreaElement>(null);
+  const conversationSearchInputRef = useRef<HTMLInputElement>(null);
   const stickToBottom = useRef(true);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -232,19 +249,24 @@ export default function AgentWorkspace() {
       void loadChats(history, team);
     }
   }
-  async function openChat(id: string) {
+  async function openChat(id: string, targetMessageId?: string) {
+    pendingMessageJumpRef.current = null;
     if (activeIdRef.current && activeIdRef.current !== id) socketRef.current?.emit("conversation:leave", activeIdRef.current);
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" }); setSelectedProductIds([]); }
     const request = ++detailRequest.current;
-    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setShowMobileProfile(false); setShowCustomerSidebar(false); setShowHeaderOptions(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote("");
+    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = !targetMessageId; setShowJumpToBottom(false); setShowMobileProfile(false); setShowCustomerSidebar(false); setShowHeaderOptions(false); setShowConversationSearch(false); setConversationSearchQuery(""); setConversationSearchMatches([]); setHighlightedMessageId(targetMessageId || ""); setHasMoreNewerMessages(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote("");
+    if (targetMessageId) { setMessageFilter("ALL"); pendingMessageJumpRef.current = { conversationId: id, messageId: targetMessageId }; }
     socketRef.current?.emit("conversation:join", id);
     try {
-      const conversation = await api(`/api/conversations/${id}?messageLimit=50`);
+      const [conversation, aroundPage] = await Promise.all([
+        api(`/api/conversations/${id}?messageLimit=50`),
+        targetMessageId ? api(`/api/conversations/${id}/messages?around=${encodeURIComponent(targetMessageId)}&limit=50`) : Promise.resolve(null)
+      ]);
       if (request === detailRequest.current) {
         const queuedMessages = loadingMessagesRef.current.get(id) || [];
         loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
-        setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) }); setSavedOrder(null);
+        setDetail({ ...conversation, messages: mergeMessages(aroundPage?.messages || conversation.messages || [], queuedMessages), hasMoreMessages: aroundPage?.hasMore ?? conversation.hasMoreMessages, hasMoreAfterMessages: Boolean(aroundPage?.hasMoreAfter), nextAfterMessageId: aroundPage?.nextAfter || null }); setHasMoreNewerMessages(Boolean(aroundPage?.hasMoreAfter)); setSavedOrder(null);
       }
     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
@@ -278,6 +300,31 @@ export default function AgentWorkspace() {
         setPhoneSearchError(error instanceof Error ? error.message : "تعذر البحث عن هذا الرقم");
       }
     } finally { if (request === phoneSearchRequestRef.current) setSearchingPhone(false); }
+  }
+  function buildGlobalSearchParams(query: string, offset = 0) {
+    const params = new URLSearchParams({ q: query, offset: String(offset) });
+    if (statusFilter === "TEAM") params.set("team", "1");
+    else if (statusFilter === "HISTORY") params.set("history", "1");
+    else if (statusFilter === "FAVORITES") params.set("favorite", "1");
+    else if (statusFilter === "PINNED") params.set("pinned", "1");
+    else if (statusFilter === "ACTIVE") params.set("status", "ACTIVE");
+    else if (["OPEN", "PENDING", "QUEUED", "RESOLVED", "CLOSED"].includes(statusFilter)) params.set("status", statusFilter);
+    if (filter !== "ALL") params.set("channel", filter);
+    return params;
+  }
+  async function loadMoreGlobalSearch() {
+    const query = search.trim();
+    if (!query || !globalSearchHasMore || globalSearchLoading) return;
+    const request = globalSearchRequestRef.current;
+    setGlobalSearchLoading(true);
+    setGlobalSearchError("");
+    try {
+      const page = await api(`/api/conversations/search?${buildGlobalSearchParams(query, globalSearchResults.length)}`);
+      if (request !== globalSearchRequestRef.current) return;
+      setGlobalSearchResults((current) => [...current, ...(page.items || [])]);
+      setGlobalSearchHasMore(Boolean(page.hasMore));
+    } catch (error) { if (request === globalSearchRequestRef.current) setGlobalSearchError(error instanceof Error ? error.message : "تعذر تحميل نتائج إضافية"); }
+    finally { if (request === globalSearchRequestRef.current) setGlobalSearchLoading(false); }
   }
   async function startChatFromPhone() {
     if (!phoneSearchResult?.phone || startingPhoneChat || user?.canReceiveWhatsApp === false) return;
@@ -418,6 +465,59 @@ export default function AgentWorkspace() {
       setDetail((current: AnyRecord) => current?.id === conversationId ? { ...current, messages: mergeMessages(current.messages || [], page.messages || []), hasMoreMessages: Boolean(page.hasMore) } : current);
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحميل الرسائل الأقدم"); }
     finally { setLoadingOlderMessages(false); }
+  }
+  async function loadNewerMessages() {
+    const conversationId = detail?.id;
+    const lastMessage = detail?.messages?.[detail.messages.length - 1];
+    if (!conversationId || !lastMessage?.id || !hasMoreNewerMessages || loadingNewerMessages) return;
+    setLoadingNewerMessages(true);
+    try {
+      const params = new URLSearchParams({ after: lastMessage.id, limit: "50" });
+      const page = await api(`/api/conversations/${conversationId}/messages?${params}`);
+      setDetail((current: AnyRecord) => current?.id === conversationId ? { ...current, messages: mergeMessages(current.messages || [], page.messages || []) } : current);
+      setHasMoreNewerMessages(Boolean(page.hasMoreAfter));
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحميل الرسائل الأحدث"); }
+    finally { setLoadingNewerMessages(false); }
+  }
+  async function jumpToMessage(messageId: string) {
+    const conversationId = detail?.id;
+    if (!conversationId || !messageId) return;
+    stickToBottom.current = false;
+    setMessageFilter("ALL");
+    setHighlightedMessageId(messageId);
+    const scrollToMatch = () => requestAnimationFrame(() => {
+      const element = document.getElementById(`message-${messageId}`);
+      if (element) { element.scrollIntoView({ behavior: "smooth", block: "center" }); setShowJumpToBottom(false); }
+    });
+    if (detail.messages?.some((message: AnyRecord) => message.id === messageId)) { scrollToMatch(); return; }
+    try {
+      const params = new URLSearchParams({ around: messageId, limit: "50" });
+      const page = await api(`/api/conversations/${conversationId}/messages?${params}`);
+      pendingMessageJumpRef.current = { conversationId, messageId };
+      setHasMoreNewerMessages(Boolean(page.hasMoreAfter));
+      setDetail((current: AnyRecord) => current?.id === conversationId ? { ...current, messages: page.messages || [], hasMoreMessages: Boolean(page.hasMore), hasMoreAfterMessages: Boolean(page.hasMoreAfter), nextAfterMessageId: page.nextAfter || null } : current);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر فتح الرسالة المطابقة"); }
+  }
+  async function moveConversationSearchMatch(direction: -1 | 1) {
+    const nextIndex = conversationSearchIndex + direction;
+    if (nextIndex < 0 || nextIndex >= conversationSearchTotal) return;
+    if (nextIndex < conversationSearchMatches.length) {
+      setConversationSearchIndex(nextIndex);
+      void jumpToMessage(conversationSearchMatches[nextIndex].id);
+      return;
+    }
+    if (!detail?.id || conversationSearchLoading) return;
+    const request = conversationSearchRequestRef.current;
+    setConversationSearchLoading(true);
+    try {
+      const params = new URLSearchParams({ q: conversationSearchQuery.trim(), conversationId: detail.id, offset: String(conversationSearchMatches.length) });
+      const page = await api(`/api/conversations/search?${params}`);
+      if (request !== conversationSearchRequestRef.current) return;
+      const matches = [...conversationSearchMatches, ...(page.items || [])];
+      setConversationSearchMatches(matches);
+      if (matches[nextIndex]) { setConversationSearchIndex(nextIndex); void jumpToMessage(matches[nextIndex].id); }
+    } catch (error) { if (request === conversationSearchRequestRef.current) setNotice(error instanceof Error ? error.message : "تعذر تحميل نتيجة البحث التالية"); }
+    finally { if (request === conversationSearchRequestRef.current) setConversationSearchLoading(false); }
   }
 
   async function addInternalNote(event: FormEvent<HTMLFormElement>) {
@@ -775,6 +875,65 @@ export default function AgentWorkspace() {
     setPhoneSearchResult(null);
     setPhoneSearchError("");
   }, [search]);
+
+  useEffect(() => {
+    const query = search.trim();
+    const digits = query.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit))).replace(/\D/g, "");
+    const request = ++globalSearchRequestRef.current;
+    if (query.length < 2 && digits.length < 3) {
+      setGlobalSearchResults([]); setGlobalSearchHasMore(false); setGlobalSearchError(""); setGlobalSearchLoading(false);
+      return;
+    }
+    setGlobalSearchResults([]); setGlobalSearchHasMore(false); setGlobalSearchError(""); setGlobalSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      void api(`/api/conversations/search?${buildGlobalSearchParams(query)}`).then((page) => {
+        if (request !== globalSearchRequestRef.current) return;
+        setGlobalSearchResults(page.items || []); setGlobalSearchHasMore(Boolean(page.hasMore));
+      }).catch((error) => {
+        if (request === globalSearchRequestRef.current) setGlobalSearchError(error instanceof Error ? error.message : "تعذر البحث في المحادثات");
+      }).finally(() => { if (request === globalSearchRequestRef.current) setGlobalSearchLoading(false); });
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [search, statusFilter, filter]);
+
+  useEffect(() => {
+    const conversationId = detail?.id;
+    const query = conversationSearchQuery.trim();
+    const request = ++conversationSearchRequestRef.current;
+    if (!showConversationSearch || !conversationId || query.length < 2) {
+      setConversationSearchMatches([]); setConversationSearchTotal(0); setConversationSearchIndex(0); setConversationSearchLoading(false);
+      return;
+    }
+    setConversationSearchLoading(true); setConversationSearchMatches([]); setConversationSearchTotal(0);
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({ q: query, conversationId });
+      void api(`/api/conversations/search?${params}`).then((page) => {
+        if (request !== conversationSearchRequestRef.current) return;
+        const matches = page.items || [];
+        setConversationSearchMatches(matches); setConversationSearchTotal(page.total || 0); setConversationSearchIndex(0);
+        if (matches[0]?.id) void jumpToMessage(matches[0].id);
+      }).catch((error) => {
+        if (request === conversationSearchRequestRef.current) setNotice(error instanceof Error ? error.message : "تعذر البحث داخل المحادثة");
+      }).finally(() => { if (request === conversationSearchRequestRef.current) setConversationSearchLoading(false); });
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [showConversationSearch, conversationSearchQuery, detail?.id]);
+
+  useEffect(() => {
+    if (!showConversationSearch) return;
+    conversationSearchInputRef.current?.focus();
+  }, [showConversationSearch]);
+
+  useEffect(() => {
+    const pending = pendingMessageJumpRef.current;
+    if (!pending || detail?.id !== pending.conversationId || !detail.messages?.some((message: AnyRecord) => message.id === pending.messageId)) return;
+    pendingMessageJumpRef.current = null;
+    requestAnimationFrame(() => {
+      const element = document.getElementById(`message-${pending.messageId}`);
+      element?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setShowJumpToBottom(false);
+    });
+  }, [detail?.id, detail?.messages?.length]);
 
   useEffect(() => {
     const saved = Number(localStorage.getItem("bondoq_chat_font_size"));
@@ -1260,9 +1419,10 @@ export default function AgentWorkspace() {
   }
   async function logout() { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* clear the local session even if the API is unreachable */ } socket?.disconnect(); localStorage.removeItem("bondoq_token"); router.replace("/login"); }
 
+  const hasGlobalSearchQuery = search.trim().length >= 2 || search.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit))).replace(/\D/g, "").length >= 3;
   const visible = conversations.filter((chat) => {
     const statusMatches = statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
-    return statusMatches && (filter === "ALL" || chat.channel === filter) && `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase());
+    return statusMatches && (filter === "ALL" || chat.channel === filter) && (!search.trim() || hasGlobalSearchQuery || `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
   });
   const availableChannels = user
     ? channels.filter((item) => {
@@ -1322,7 +1482,7 @@ export default function AgentWorkspace() {
        <input ref={photoInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
        <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
        <aside className={`workspace-list panel flex min-h-0 flex-col overflow-hidden ${showConversationSidebar ? "" : "workspace-list-collapsed"}`}>
-            <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="بحث عن عميل..." className="w-full bg-transparent text-xs outline-none" /></label>
+             <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ابحث بالاسم أو الهاتف أو نص الرسالة" className="w-full bg-transparent text-xs outline-none" /></label>
               {search.replace(/[^\d٠-٩۰-۹]/g, "").length >= 7 && <button type="button" onClick={() => void searchPhoneHistory()} disabled={searchingPhone} className="mt-2 w-full rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-800 disabled:opacity-50">{searchingPhone ? "جارٍ البحث في سجل WhatsApp..." : "بحث شامل برقم الهاتف"}</button>}
               {phoneSearchError && <p role="alert" className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-[10px] leading-5 text-red-700">{phoneSearchError}</p>}
               {phoneSearchResult && <div className="mt-2 rounded-xl border border-emerald-100 bg-white p-2.5">
@@ -1334,7 +1494,22 @@ export default function AgentWorkspace() {
               <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
           </div>
           {chatLoadError && <div role="alert" className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-[10px] text-red-800"><span>{chatLoadError}</span><button type="button" onClick={() => void loadChats()} className="shrink-0 font-bold underline">إعادة المحاولة</button></div>}
-           <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</div>
+            <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">
+              {hasGlobalSearchQuery ? <>
+                {globalSearchLoading && !globalSearchResults.length && <p role="status" className="px-4 py-10 text-center text-xs text-stone-400">جارٍ البحث في الأسماء والأرقام والرسائل...</p>}
+                {globalSearchError && <p role="alert" className="px-4 py-6 text-center text-xs text-red-700">{globalSearchError}</p>}
+                {globalSearchResults.map((result) => <article key={result.id} className="border-b border-stone-100 bg-white px-3 py-3">
+                  <button type="button" onClick={() => void openChat(result.id)} className="flex w-full items-center gap-3 text-right hover:text-emerald-800">
+                    <Avatar name={customerDisplayName(result.customer)} src={result.customer?.avatarUrl} />
+                    <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><b className="truncate text-xs"><HighlightedText text={customerDisplayName(result.customer)} query={search.trim()} /></b><ChannelIcon channel={result.channel} /></span><span className="mt-1 block truncate text-[10px] text-stone-400">{result.customer?.phone ? <><HighlightedText text={result.customer.phone} query={search.trim()} /> · </> : null}{result.matchType === "CUSTOMER" ? "مطابقة بيانات العميل" : "مطابقة في الرسائل"} · {conversationStatusLabel(result.status)}</span></span>
+                    <span className="shrink-0 text-[9px] text-stone-400">{ago(result.lastMessageAt)}</span>
+                  </button>
+                  {result.messages?.length ? <div className="mt-2 space-y-1.5 border-r-2 border-emerald-100 pr-2">{result.messages.map((message: AnyRecord) => <button key={message.id} type="button" onClick={() => void openChat(result.id, message.id)} className="block w-full rounded-lg bg-stone-50 px-2.5 py-2 text-right text-[10px] leading-5 text-stone-600 hover:bg-emerald-50"><span className="mb-0.5 block text-[9px] font-bold text-emerald-700">{message.transcription && !message.text ? "تفريغ رسالة صوتية" : "رسالة مطابقة"} · {ago(message.createdAt)}</span><span className="line-clamp-2"><HighlightedText text={message.transcription || message.text || "رسالة مرفقة"} query={search.trim()} /></span></button>)}</div> : <button type="button" onClick={() => void openChat(result.id)} className="mt-2 w-full rounded-lg bg-stone-50 px-2.5 py-2 text-right text-[10px] font-semibold text-stone-500 hover:bg-emerald-50">افتح المحادثة المطابقة</button>}
+                </article>)}
+                {!globalSearchLoading && !globalSearchError && !globalSearchResults.length && <p className="px-4 py-10 text-center text-xs text-stone-400">لا توجد نتائج مطابقة.</p>}
+                {globalSearchHasMore && <button type="button" onClick={() => void loadMoreGlobalSearch()} disabled={globalSearchLoading} className="m-3 w-[calc(100%-1.5rem)] rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 disabled:opacity-50">{globalSearchLoading ? "جارٍ التحميل..." : "عرض نتائج إضافية"}</button>}
+              </> : <>{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</>}
+            </div>
         {hasMoreChats && <button type="button" onClick={() => void loadMoreChats()} disabled={loadingMoreChats} className="m-3 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">{loadingMoreChats ? "جارٍ تحميل المزيد..." : "تحميل المزيد من المحادثات"}</button>}
         <div className="space-y-2 border-t border-stone-100 px-4 py-3 text-[10px] text-stone-400"><div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متصل بالنظام</span><span className="truncate">{user?.email}</span></div><div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-2"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">واتساب</a></div></div>
       </aside>
@@ -1344,18 +1519,22 @@ export default function AgentWorkspace() {
         {isDraggingFile && detail && <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-emerald-500 bg-emerald-50/90 text-lg font-extrabold text-emerald-800">أفلت الصورة أو ملصق WebP أو الصوت أو الفيديو أو الملف لإرساله</div>}
         {detail ? <>
                <button type="button" onClick={returnToChatList} aria-label="العودة إلى قائمة المحادثات دون إغلاقها" title="العودة إلى قائمة المحادثات دون إغلاقها" className="conversation-view-back"><ArrowRight size={16} /> العودة إلى المحادثات</button>
-             <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-stone-100 bg-white px-3 sm:px-4">
-              <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-                <Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} />
-                <div className="min-w-0">
-                  <h2 className="truncate text-sm font-extrabold">{customerDisplayName(detail.customer)} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</h2>
-                  <div className="flex flex-wrap items-center gap-2 text-[10px] text-stone-400"><ChannelIcon channel={detail.channel} /> {detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)} · {detail.status === "OPEN" ? "محادثة مفتوحة" : detail.status}{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</div>
-                </div>
-              </div>
-               <div className="flex shrink-0 items-center gap-1">
-                <fieldset disabled={Boolean(detail.readOnly)} className="contents">
-                 <div ref={headerOptionsRef} className="relative">
-                   <button type="button" title="خيارات المحادثة" aria-label="خيارات المحادثة" aria-haspopup="menu" aria-expanded={showHeaderOptions} onClick={() => setShowHeaderOptions((open) => !open)} className={`grid h-9 w-9 place-items-center rounded-lg ${showHeaderOptions ? "bg-stone-100 text-stone-700" : "text-stone-400 hover:bg-stone-100"}`}><MoreHorizontal size={18} /></button>
+              <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-stone-100 bg-white px-2 sm:px-4">
+               <button type="button" onClick={openCustomerProfile} title={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} aria-label={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} className="flex min-w-0 items-center gap-2 text-right hover:text-amber-800 sm:gap-3">
+                 <Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} />
+                 <span className="min-w-0"><span className="line-clamp-2 break-words text-xs font-extrabold sm:text-sm">{customerDisplayName(detail.customer)} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</span>
+                   <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[9px] text-stone-400 sm:text-[10px]"><ChannelIcon channel={detail.channel} />{detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)}<span className="rounded-full bg-emerald-50 px-1.5 py-0.5 font-bold text-emerald-700">{conversationStatusLabel(detail.status)}</span>{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</span>
+                 </span>
+               </button>
+                <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+                 <fieldset disabled={Boolean(detail.readOnly)} className="contents">
+                   <button type="button" disabled title="مكالمات الفيديو غير متاحة حاليًا؛ النظام يدعم المكالمات الصوتية فقط" aria-label="مكالمة فيديو غير متاحة" className="grid h-8 w-8 place-items-center rounded-lg text-stone-300 disabled:cursor-not-allowed"><Video size={16} /></button>
+                   {detail.channel === "WHATSAPP" && <button type="button" disabled={!callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : "مكالمة صوتية عبر WhatsApp"} aria-label="مكالمة صوتية عبر WhatsApp" onClick={() => setCallConversation(detail)} className="grid h-8 w-8 place-items-center rounded-lg text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} /></button>}
+                 </fieldset>
+                 <button type="button" onClick={() => { setShowConversationSearch((open) => !open); setConversationSearchQuery(""); setConversationSearchMatches([]); }} title="البحث داخل المحادثة" aria-label="البحث داخل المحادثة" aria-expanded={showConversationSearch} className={`grid h-8 w-8 place-items-center rounded-lg ${showConversationSearch ? "bg-amber-50 text-amber-800" : "text-stone-500 hover:bg-stone-100"}`}><Search size={16} /></button>
+                 <fieldset disabled={Boolean(detail.readOnly)} className="contents">
+                  <div ref={headerOptionsRef} className="relative">
+                    <button type="button" title="خيارات المحادثة" aria-label="خيارات المحادثة" aria-haspopup="menu" aria-expanded={showHeaderOptions} onClick={() => setShowHeaderOptions((open) => !open)} className={`grid h-8 w-8 place-items-center rounded-lg ${showHeaderOptions ? "bg-stone-100 text-stone-700" : "text-stone-400 hover:bg-stone-100"}`}><MoreHorizontal size={18} /></button>
                    {showHeaderOptions && <div role="menu" aria-label="إجراءات المحادثة" className="absolute left-0 top-full z-50 mt-2 w-64 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">
                     {detail.channel === "WHATSAPP" && <button type="button" role="menuitem" disabled={!callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : undefined} onClick={() => { setShowHeaderOptions(false); setCallConversation(detail); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><PhoneCall size={16} className="shrink-0" /><span className="text-xs font-extrabold">مكالمة WhatsApp داخل النظام</span></button>}
                     <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void toggleFavorite(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Star size={16} className="shrink-0 text-amber-500" fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /><span className="text-xs font-bold">{favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"}</span></button>
@@ -1364,11 +1543,19 @@ export default function AgentWorkspace() {
                      <div className="my-1 border-t border-stone-100" />
                      <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void resolveConversation(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50"><CheckCircle2 size={16} className="shrink-0" /><span className="text-xs font-bold">تم الحل وإرسال استبيان الرضا</span></button>
                    </div>}
-                 </div>
-                </fieldset>
-                <button type="button" onClick={() => void closeConversation()} disabled={Boolean(detail.readOnly)} title={detail.readOnly ? "محادثة للقراءة فقط" : "إغلاق المحادثة"} aria-label="إغلاق المحادثة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-400 hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-40"><X size={18} /></button>
-               </div>
-             </div>
+                  </div>
+                 </fieldset>
+                 <button type="button" onClick={() => void closeConversation()} disabled={Boolean(detail.readOnly)} title={detail.readOnly ? "محادثة للقراءة فقط" : "إغلاق المحادثة"} aria-label="إغلاق المحادثة" className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-40"><X size={17} /></button>
+                </div>
+              </div>
+              {showConversationSearch && <div className="flex shrink-0 items-center gap-2 border-b border-amber-100 bg-[#fffaf0] px-3 py-2">
+                <Search size={15} className="shrink-0 text-amber-700" />
+                <input ref={conversationSearchInputRef} value={conversationSearchQuery} onChange={(event) => setConversationSearchQuery(event.target.value)} placeholder="ابحث في رسائل هذه المحادثة" aria-label="ابحث داخل المحادثة" className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-stone-400" />
+                <span role="status" className="shrink-0 text-[9px] text-stone-500">{conversationSearchLoading ? "جارٍ البحث" : conversationSearchTotal ? `${conversationSearchIndex + 1} / ${conversationSearchTotal}` : conversationSearchQuery.trim().length >= 2 ? "لا نتائج" : ""}</span>
+                <button type="button" disabled={!conversationSearchTotal || conversationSearchIndex <= 0} onClick={() => void moveConversationSearchMatch(-1)} aria-label="النتيجة السابقة" title="النتيجة السابقة" className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-stone-500 hover:bg-white disabled:opacity-30"><ArrowRight size={15} /></button>
+                <button type="button" disabled={!conversationSearchTotal || conversationSearchIndex >= conversationSearchTotal - 1} onClick={() => void moveConversationSearchMatch(1)} aria-label="النتيجة التالية" title="النتيجة التالية" className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-stone-500 hover:bg-white disabled:opacity-30"><ArrowLeft size={15} /></button>
+                <button type="button" onClick={() => { setShowConversationSearch(false); setConversationSearchQuery(""); setHighlightedMessageId(""); }} aria-label="إغلاق البحث داخل المحادثة" className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-stone-400 hover:bg-white"><X size={15} /></button>
+              </div>}
              {detail.customer?.isBlocked && <div role="status" className="flex shrink-0 items-center gap-2 border-b border-red-100 bg-red-50 px-4 py-2 text-[10px] font-bold text-red-800"><Ban size={14} /> العميل محظور داخل النظام؛ لا يمكن إرسال ردود أو منتجات إليه.</div>}
                <div className="flex h-9 shrink-0 items-center justify-between border-b border-stone-100 bg-white px-2">
                  <button type="button" onClick={toggleCustomerProfile} aria-expanded={showCustomerSidebar} aria-label={showCustomerSidebar ? "إخفاء ملف العميل" : "إظهار ملف العميل"} className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-[10px] font-bold ${showCustomerSidebar ? "bg-amber-50 text-amber-800" : "text-stone-500 hover:bg-stone-100"}`}><BookUser size={15} /> ملف العميل</button>
@@ -1400,7 +1587,8 @@ export default function AgentWorkspace() {
                <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="chat-message-list soft-scroll relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 py-3 sm:px-5">
               {detail.hasMoreMessages && <button type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlderMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingOlderMessages ? "جارٍ تحميل الرسائل..." : "تحميل الرسائل الأقدم"}</button>}
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
-                {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
+                 {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} highlighted={highlightedMessageId === message.id} highlightQuery={highlightedMessageId === message.id ? conversationSearchQuery || search : ""} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
+                 {hasMoreNewerMessages && <button type="button" onClick={() => void loadNewerMessages()} disabled={loadingNewerMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingNewerMessages ? "جارٍ تحميل الرسائل الأحدث..." : "تحميل الرسائل الأحدث"}</button>}
              {(detail.whisperNotes || []).map((note: AnyRecord) => <div key={`whisper-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-[#f0d786] bg-[#fff8e1] px-4 py-3 text-xs leading-6 text-[#755916]"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><CakeSlice size={14} /> توجيه سري من {note.author?.name || "المدير"}<span className="mr-auto text-[9px] font-normal text-[#aa8a36]">{ago(note.createdAt)}</span></div>{note.text}</div>)}
               {(detail.privateNotes || []).map((note: AnyRecord) => <div key={`private-note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs leading-6 text-violet-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><LockKeyhole size={13} /> رسالة سرية {note.authorId === user?.id ? `إلى ${note.recipient?.name || "زميل"}` : `من ${note.author?.name || "زميل"}`}<span className="mr-auto text-[9px] font-normal text-violet-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
              <div className="mt-auto" /><div ref={messageEndRef} />
@@ -1521,13 +1709,13 @@ function Avatar({ name, src }: { name: string; src?: string }) { return <span cl
 function AvatarLarge({ name, src }: { name: string; src?: string }) { return <span className="mx-auto grid h-16 w-16 place-items-center overflow-hidden rounded-[22px] bg-white text-2xl font-extrabold text-[#b67739] shadow-sm">{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : name?.[0] || "ع"}</span>; }
 function Info({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-xl bg-stone-50 p-2.5"><p className="text-[9px] text-stone-400">{label}</p><p className="mt-1 truncate text-[10px] font-bold text-stone-700" dir="auto">{value}</p></div>; }
 function ChannelIcon({ channel }: { channel: string }) { const config: Record<string, { label: string; className: string }> = { WHATSAPP: { label: "W", className: "bg-emerald-100 text-emerald-700" }, MESSENGER: { label: "M", className: "bg-blue-100 text-blue-700" }, TELEGRAM: { label: "T", className: "bg-sky-100 text-sky-700" } }; const item = config[channel] || config.WHATSAPP; return <span title={channelName(channel)} className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-md text-[9px] font-black ${item.className}`}>{item.label}</span>; }
-  function Message({ message, conversationId, readOnly = false, onQuote, onEdit, onDelete, deleting = false, onForward, editing = false, editingText = "", onEditingTextChange, onSaveEdit, onCancelEdit, savingEdit = false, onReact, onOpenImage }: { message: AnyRecord; conversationId: string; readOnly?: boolean; onQuote?: () => void; onEdit?: () => void; onDelete?: () => void; deleting?: boolean; onForward?: () => void; editing?: boolean; editingText?: string; onEditingTextChange?: (value: string) => void; onSaveEdit?: () => void; onCancelEdit?: () => void; savingEdit?: boolean; onReact?: (emoji: string) => void; onOpenImage?: (url: string) => void }) {
+  function Message({ message, conversationId, readOnly = false, highlighted = false, highlightQuery = "", onQuote, onEdit, onDelete, deleting = false, onForward, editing = false, editingText = "", onEditingTextChange, onSaveEdit, onCancelEdit, savingEdit = false, onReact, onOpenImage }: { message: AnyRecord; conversationId: string; readOnly?: boolean; highlighted?: boolean; highlightQuery?: string; onQuote?: () => void; onEdit?: () => void; onDelete?: () => void; deleting?: boolean; onForward?: () => void; editing?: boolean; editingText?: string; onEditingTextChange?: (value: string) => void; onSaveEdit?: () => void; onCancelEdit?: () => void; savingEdit?: boolean; onReact?: (emoji: string) => void; onOpenImage?: (url: string) => void }) {
   const outgoing = message.direction === "OUTBOUND";
   const hasMedia = ["IMAGE", "AUDIO", "VIDEO", "FILE", "STICKER"].includes(message.kind);
   const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
   const contactCard = metadata.contactCard && typeof metadata.contactCard === "object" ? metadata.contactCard : null;
   const deliveryLabel = message.deliveryStatus === "UPLOADING" ? "جارٍ رفع الملف" : message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
-      return <div className={`agent-message-row flex ${outgoing ? "justify-start" : "justify-end"}`}><div className="group relative w-fit max-w-[80%]"><div className={`agent-message-bubble ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-full rounded-2xl px-3 py-2 shadow-sm`}>
+       return <div id={`message-${message.id}`} className={`agent-message-row flex ${outgoing ? "justify-start" : "justify-end"} ${highlighted ? "search-message-highlight" : ""}`}><div className="group relative w-fit max-w-[80%]"><div className={`agent-message-bubble ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-full rounded-2xl px-3 py-2 shadow-sm`}>
     {message.quotedMessage && <div className="mb-2 rounded-lg border-r-2 border-[#d32f2f] bg-stone-50/80 px-2.5 py-1.5 text-[10px] text-stone-500"><b>{message.quotedMessage.author?.name || "رسالة مقتبسة"}</b><p className="mt-0.5 line-clamp-2">{message.quotedMessage.text || (message.quotedMessage.kind === "IMAGE" ? "صورة" : "مرفق")}</p></div>}
     {hasMedia && (message.localPreviewUrl ? ["IMAGE", "STICKER"].includes(message.kind) ? <button type="button" onClick={() => onOpenImage?.(message.localPreviewUrl)} className="mb-2 block"><img src={message.localPreviewUrl} alt={message.kind === "STICKER" ? "ملصق قيد الإرسال" : "صورة قيد الإرسال"} className="max-h-56 rounded-xl object-contain" /></button> : message.kind === "AUDIO" ? <audio controls src={message.localPreviewUrl} className="mb-2 max-w-full" /> : message.kind === "VIDEO" ? <video controls src={message.localPreviewUrl} className="mb-2 max-h-56 max-w-full rounded-xl" /> : <span className="mb-2 block text-xs">ملف مرفق قيد الإرسال</span> : message.mediaAssetId ? <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} /> : message.kind === "IMAGE" && outgoing && message.mediaUrl ? <button type="button" onClick={() => onOpenImage?.(message.mediaUrl)} className="mb-2 block"><img src={message.mediaUrl} alt="منتج حلواني بندق" className="max-h-56 rounded-xl object-cover" /></button> : <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} />)}
      {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
@@ -1542,6 +1730,12 @@ function ChannelIcon({ channel }: { channel: string }) { const config: Record<st
 }
 function department(value?: string) { return ({ CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "خدمة العملاء", ADMINISTRATION: "الإدارة" } as Record<string, string>)[value || ""] || "فريق بندق"; }
 function channelName(value: string) { return ({ WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" } as Record<string, string>)[value] || value; }
+function conversationStatusLabel(value: string) { return ({ OPEN: "مفتوحة", PENDING: "بانتظار الرد", QUEUED: "في قائمة الانتظار", RESOLVED: "تم الحل", CLOSED: "مؤرشفة" } as Record<string, string>)[value] || value; }
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  const index = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+  if (index < 0 || !query) return <>{text}</>;
+  return <>{text.slice(0, index)}<mark className="rounded bg-amber-200 px-0.5 text-stone-900">{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>;
+}
 function ago(value?: string) { if (!value) return "الآن"; const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000)); return minutes < 1 ? "الآن" : minutes < 60 ? `منذ ${minutes} د` : `منذ ${Math.floor(minutes / 60)} س`; }
 function orderStatus(value: string) { return ({ DRAFT: "مسودة", CONFIRMED: "مؤكد", PREPARING: "قيد التجهيز", OUT_FOR_DELIVERY: "خرج للتوصيل", DELIVERED: "تم التسليم", CANCELLED: "ملغي", COMPLETED: "مكتمل" } as Record<string, string>)[value] || value; }
 function categoryLabel(value: string) { return productCategoryLabel[value] || value; }

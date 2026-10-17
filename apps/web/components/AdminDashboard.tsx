@@ -41,6 +41,10 @@ export default function AdminDashboard() {
   const [internalNote, setInternalNote] = useState("");
   const [showInternalNotes, setShowInternalNotes] = useState(false);
   const [search, setSearch] = useState("");
+  const [globalSearchResults, setGlobalSearchResults] = useState<AnyRecord[]>([]);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
+  const [globalSearchError, setGlobalSearchError] = useState("");
+  const [globalSearchHasMore, setGlobalSearchHasMore] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("ALL");
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
@@ -67,6 +71,8 @@ export default function AdminDashboard() {
   const activeConversationRef = useRef("");
   const loadingMessagesRef = useRef(new Map<string, AnyRecord[]>());
   const loadRequest = useRef(0);
+  const searchRequest = useRef(0);
+  const pendingSearchJumpRef = useRef<{ conversationId: string; messageId: string } | null>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const notifiedMessagesRef = useRef(new Set<string>());
@@ -78,6 +84,40 @@ export default function AdminDashboard() {
     if (stickToBottom.current) { messageEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }
     else setShowJumpToBottom(true);
   }, [selected?.id, detail?.id, detail?.messages?.length]);
+  useEffect(() => {
+    const pending = pendingSearchJumpRef.current;
+    if (!pending || detail?.id !== pending.conversationId || !detail.messages?.some((message: AnyRecord) => message.id === pending.messageId)) return;
+    pendingSearchJumpRef.current = null;
+    requestAnimationFrame(() => {
+      const index = detail.messages.findIndex((message: AnyRecord) => message.id === pending.messageId);
+      const element = messageListRef.current?.children.item(index) as HTMLElement | null;
+      element?.classList.add("search-message-highlight");
+      element?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setShowJumpToBottom(false);
+    });
+  }, [detail?.id, detail?.messages?.length]);
+  useEffect(() => {
+    const query = search.trim();
+    const request = ++searchRequest.current;
+    if (query.length < 2) {
+      setGlobalSearchResults([]); setGlobalSearchHasMore(false); setGlobalSearchError(""); setGlobalSearchLoading(false);
+      return;
+    }
+    setGlobalSearchResults([]); setGlobalSearchHasMore(false); setGlobalSearchError(""); setGlobalSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({ q: query });
+      if (conversationFilter === "OPEN") params.set("status", "OPEN");
+      else if (conversationFilter === "WAITING") params.set("status", "WAITING");
+      else if (conversationFilter === "DONE") params.set("status", "DONE");
+      void api(`/api/conversations/search?${params}`).then((page) => {
+        if (request !== searchRequest.current) return;
+        setGlobalSearchResults(page.items || []); setGlobalSearchHasMore(Boolean(page.hasMore));
+      }).catch((error) => {
+        if (request === searchRequest.current) setGlobalSearchError(error instanceof Error ? error.message : "تعذر البحث في المحادثات");
+      }).finally(() => { if (request === searchRequest.current) setGlobalSearchLoading(false); });
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [search, conversationFilter]);
 
   function allowed(profile: AnyRecord | null, permission: string) {
     if (profile?.role === "ADMIN" || profile?.role === "SUPERVISOR") return profile[permission] !== false;
@@ -167,17 +207,20 @@ export default function AdminDashboard() {
     return () => { connection?.disconnect(); };
   }, [router]);
 
-  async function openConversation(item: AnyRecord) {
+  async function openConversation(item: AnyRecord, targetMessageId?: string) {
     if (selected && selected.id !== item.id) socket?.emit("conversation:leave", selected.id);
     const request = ++detailRequest.current;
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== item.id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
-     activeConversationRef.current = item.id; detailLoadingIdRef.current = item.id; stickToBottom.current = true; setShowJumpToBottom(false); setShowInternalNotes(false); setInternalNote(""); setSelected(item); setDetail(null); setError(""); socket?.emit("conversation:join", item.id);
+     activeConversationRef.current = item.id; detailLoadingIdRef.current = item.id; stickToBottom.current = !targetMessageId; setShowJumpToBottom(false); setShowInternalNotes(false); setInternalNote(""); setSelected(item); setDetail(null); setError(""); pendingSearchJumpRef.current = targetMessageId ? { conversationId: item.id, messageId: targetMessageId } : null; socket?.emit("conversation:join", item.id);
     try {
-      const conversation = await api(`/api/conversations/${item.id}`);
+      const [conversation, aroundPage] = await Promise.all([
+        api(`/api/conversations/${item.id}?messageLimit=200`),
+        targetMessageId ? api(`/api/conversations/${item.id}/messages?around=${encodeURIComponent(targetMessageId)}&limit=50`) : Promise.resolve(null)
+      ]);
       if (request === detailRequest.current) {
         const queuedMessages = loadingMessagesRef.current.get(item.id) || [];
         loadingMessagesRef.current.delete(item.id); detailLoadingIdRef.current = "";
-         setDetail({ ...conversation, customer: withDisplayName(conversation.customer), messages: mergeMessages(conversation.messages || [], queuedMessages) });
+         setDetail({ ...conversation, customer: withDisplayName(conversation.customer), messages: mergeMessages(aroundPage?.messages || conversation.messages || [], queuedMessages) });
       }
     } catch (e) { if (request === detailRequest.current) setError(e instanceof Error ? e.message : "تعذر فتح المحادثة"); }
   }
@@ -300,14 +343,31 @@ export default function AdminDashboard() {
     }
     catch (e) { setError(e instanceof Error ? e.message : "تعذر تحديث حالة المحادثة"); }
   }
+  async function loadMoreGlobalSearch() {
+    const query = search.trim();
+    if (query.length < 2 || !globalSearchHasMore || globalSearchLoading) return;
+    const request = searchRequest.current;
+    const params = new URLSearchParams({ q: query, offset: String(globalSearchResults.length) });
+    if (conversationFilter === "OPEN") params.set("status", "OPEN");
+    else if (conversationFilter === "WAITING") params.set("status", "WAITING");
+    else if (conversationFilter === "DONE") params.set("status", "DONE");
+    setGlobalSearchLoading(true); setGlobalSearchError("");
+    try {
+      const page = await api(`/api/conversations/search?${params}`);
+      if (request !== searchRequest.current) return;
+      setGlobalSearchResults((current) => [...current, ...(page.items || [])]); setGlobalSearchHasMore(Boolean(page.hasMore));
+    } catch (error) { if (request === searchRequest.current) setGlobalSearchError(error instanceof Error ? error.message : "تعذر تحميل نتائج إضافية"); }
+    finally { if (request === searchRequest.current) setGlobalSearchLoading(false); }
+  }
   async function logout() { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* clear the local session even if the API is unreachable */ } socket?.disconnect(); localStorage.removeItem("bondoq_token"); router.replace("/login"); }
 
+  const hasGlobalSearchQuery = search.trim().length >= 2;
   const visibleConversations = conversations.filter((chat) => {
     const statusMatches = conversationFilter === "ALL"
       || conversationFilter === "OPEN" && chat.status === "OPEN"
       || conversationFilter === "WAITING" && ["PENDING", "QUEUED"].includes(chat.status)
       || conversationFilter === "DONE" && ["RESOLVED", "CLOSED"].includes(chat.status);
-    const queryMatches = `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase());
+    const queryMatches = hasGlobalSearchQuery || `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase());
     return statusMatches && queryMatches;
   });
   const kpis = data?.kpis || {};
@@ -360,9 +420,18 @@ export default function AdminDashboard() {
       </section>
 
       <section className="panel mt-5 overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4"><div><h2 className="font-extrabold text-stone-800">كل المحادثات</h2><p className="text-xs text-stone-400">افتح أي محادثة للمشاهدة أو التدخل</p></div><label className="flex h-10 min-w-48 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={16} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ابحث عن عميل..." className="w-full bg-transparent text-xs outline-none" /></label></div>
+         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4"><div><h2 className="font-extrabold text-stone-800">كل المحادثات</h2><p className="text-xs text-stone-400">ابحث في أسماء العملاء وأرقامهم وكل الرسائل</p></div><label className="flex h-10 min-w-48 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={16} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="الاسم أو الهاتف أو نص الرسالة" className="w-full bg-transparent text-xs outline-none" /></label></div>
           <div className="flex flex-wrap gap-1.5 border-b border-stone-100 px-5 py-3">{[{ id: "ALL", label: "الكل" }, { id: "OPEN", label: "مفتوحة" }, { id: "WAITING", label: "بانتظار الرد" }, { id: "DONE", label: "مغلقة" }].map((item) => <button key={item.id} type="button" aria-pressed={conversationFilter === item.id} onClick={() => setConversationFilter(item.id)} className={`rounded-full px-3 py-1.5 text-[10px] font-bold transition ${conversationFilter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
-          <div className="grid divide-y divide-stone-100 lg:grid-cols-2 lg:divide-x lg:divide-y-0 lg:divide-x-reverse">{visibleConversations.slice(0, 12).map((chat) => <button key={chat.id} onClick={() => openConversation(chat)} className="flex min-w-0 items-center gap-3 px-5 py-4 text-right transition hover:bg-[#fffaf3]"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} size="h-12 w-12" /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><b className="truncate text-sm text-stone-700">{customerDisplayName(chat.customer)}</b><ChannelBadge channel={chat.channel} />{chat.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">شكوى</span>}</div><p className="mt-1 truncate text-xs text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة جديدة"}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><span className="text-[10px] text-stone-400">{timeAgo(chat.lastMessageAt)}</span>{chat.slaBreachedAt ? <span className="sla-pulse rounded-md bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">متأخرة</span> : <span className="text-[10px] text-stone-400">{chat.assignedAgent?.name || "بانتظار إسناد"}</span>}</div></button>)}{!visibleConversations.length && <Empty text="لا توجد محادثات مطابقة" />}</div>
+           {hasGlobalSearchQuery ? <div className="divide-y divide-stone-100">
+             {globalSearchLoading && !globalSearchResults.length && <p role="status" className="px-5 py-10 text-center text-xs text-stone-400">جارٍ البحث في السجل الكامل...</p>}
+             {globalSearchError && <p role="alert" className="px-5 py-6 text-center text-xs text-red-700">{globalSearchError}</p>}
+             {globalSearchResults.map((result) => <article key={result.id} className="grid gap-3 px-5 py-4 lg:grid-cols-[minmax(220px,.8fr)_1.2fr]">
+                <button type="button" onClick={() => void openConversation({ ...result, customer: withDisplayName(result.customer) })} className="flex min-w-0 items-center gap-3 text-right hover:text-amber-800"><Avatar name={customerDisplayName(result.customer)} src={result.customer?.avatarUrl} size="h-12 w-12" /><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><b className="truncate text-sm"><HighlightedText text={customerDisplayName(result.customer)} query={search.trim()} /></b><ChannelBadge channel={result.channel} /></span><span className="mt-1 block truncate text-[10px] text-stone-400">{result.customer?.phone ? <><HighlightedText text={result.customer.phone} query={search.trim()} /> · </> : null}{result.matchType === "CUSTOMER" ? "مطابقة بيانات العميل" : "مطابقة في الرسائل"} · {result.assignedAgent?.name || "بانتظار إسناد"}</span><span className="mt-1 block text-[9px] text-stone-400">{timeAgo(result.lastMessageAt)}</span></span></button>
+               <div className="space-y-1.5">{result.messages?.length ? result.messages.map((message: AnyRecord) => <button key={message.id} type="button" onClick={() => void openConversation({ ...result, customer: withDisplayName(result.customer) }, message.id)} className="block w-full rounded-xl bg-stone-50 px-3 py-2 text-right text-xs leading-5 text-stone-600 hover:bg-amber-50"><span className="mb-0.5 block text-[9px] font-bold text-amber-800">رسالة مطابقة · {timeAgo(message.createdAt)}</span><span className="line-clamp-2"><HighlightedText text={message.transcription || message.text || "رسالة مرفقة"} query={search.trim()} /></span></button>) : <button type="button" onClick={() => void openConversation({ ...result, customer: withDisplayName(result.customer) })} className="w-full rounded-xl bg-stone-50 px-3 py-2 text-right text-[10px] font-semibold text-stone-500 hover:bg-amber-50">فتح المحادثة المطابقة</button>}</div>
+             </article>)}
+             {!globalSearchLoading && !globalSearchError && !globalSearchResults.length && <Empty text="لا توجد محادثات مطابقة" />}
+             {globalSearchHasMore && <button type="button" onClick={() => void loadMoreGlobalSearch()} disabled={globalSearchLoading} className="m-4 rounded-xl border border-stone-200 bg-white px-4 py-2 text-xs font-bold text-stone-600 disabled:opacity-50">{globalSearchLoading ? "جارٍ التحميل..." : "عرض نتائج إضافية"}</button>}
+           </div> : <div className="grid divide-y divide-stone-100 lg:grid-cols-2 lg:divide-x lg:divide-y-0 lg:divide-x-reverse">{visibleConversations.slice(0, 12).map((chat) => <button key={chat.id} onClick={() => openConversation(chat)} className="flex min-w-0 items-center gap-3 px-5 py-4 text-right transition hover:bg-[#fffaf3]"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} size="h-12 w-12" /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><b className="truncate text-sm text-stone-700">{customerDisplayName(chat.customer)}</b><ChannelBadge channel={chat.channel} />{chat.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">شكوى</span>}</div><p className="mt-1 truncate text-xs text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة جديدة"}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><span className="text-[10px] text-stone-400">{timeAgo(chat.lastMessageAt)}</span>{chat.slaBreachedAt ? <span className="sla-pulse rounded-md bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">متأخرة</span> : <span className="text-[10px] text-stone-400">{chat.assignedAgent?.name || "بانتظار إسناد"}</span>}</div></button>)}{!visibleConversations.length && <Empty text="لا توجد محادثات مطابقة" />}</div>}
       </section>
     </div>
 
@@ -546,6 +615,7 @@ function Avatar({ name, src, size = "h-10 w-10" }: { name: string; src?: string;
 function PresencePill({ status }: { status: string }) { const color: Record<string, string> = { ONLINE: "bg-emerald-50 text-emerald-700", BUSY: "bg-orange-50 text-orange-700", BREAK: "bg-amber-50 text-amber-700", OFFLINE: "bg-stone-100 text-stone-500" }; return <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${color[status] || color.OFFLINE}`}>{presenceLabel[status] || status}</span>; }
 function ChannelBadge({ channel }: { channel: string }) { const style: Record<string, string> = { WHATSAPP: "bg-emerald-50 text-emerald-700", MESSENGER: "bg-blue-50 text-blue-700", TELEGRAM: "bg-sky-50 text-sky-700" }; return <span className={`rounded-md px-1.5 py-0.5 text-[9px] font-bold ${style[channel] || "bg-stone-100 text-stone-600"}`}>{channelLabel[channel] || channel}</span>; }
 function Empty({ text }: { text: string }) { return <p className="px-5 py-10 text-center text-sm text-stone-400">{text}</p>; }
+function HighlightedText({ text, query }: { text: string; query: string }) { const index = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase()); return index < 0 || !query ? <>{text}</> : <>{text.slice(0, index)}<mark className="rounded bg-amber-200 px-0.5 text-stone-900">{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>; }
 function formatDuration(seconds?: number | null) { if (seconds == null) return "—"; if (seconds < 60) return `${seconds}ث`; return `${Math.floor(seconds / 60)}د ${seconds % 60}ث`; }
 function timeAgo(value?: string) { if (!value) return "الآن"; const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000)); return minutes < 1 ? "الآن" : minutes < 60 ? `منذ ${minutes} د` : `منذ ${Math.floor(minutes / 60)} س`; }
 function auditText(action: string) { const map: Record<string, string> = { MESSAGE_SENT: "تم إرسال رد للعميل", MESSAGE_QUEUED: "أُضيف رد WhatsApp لقائمة الإرسال", MESSAGE_EDITED: "تم تعديل رسالة مرسلة", MESSAGE_DELETED: "تم حذف رسالة مرسلة", CUSTOMER_VIP_UPDATED: "تم تحديث حالة VIP للعميل", CUSTOMER_BLOCK_UPDATED: "تم تحديث حالة حظر العميل", CUSTOMER_PERMANENTLY_DELETED: "تم حذف عميل وسجلاته نهائيًا", CONVERSATION_PERMANENTLY_DELETED: "تم حذف محادثة نهائيًا", BLOCKED_CUSTOMER_MESSAGE_IGNORED: "وصلت رسالة من عميل محظور", WHISPER_SENT: "تم إرسال توجيه سري", CONVERSATION_REASSIGNED: "أعاد المدير إسناد محادثة", CONVERSATION_HANDOFF: "حوّل موظف محادثة لزميل", CONVERSATION_HANDOFF_REQUESTED: "أُرسل طلب تحويل بانتظار قبول الزميل", CONVERSATION_HANDOFF_ACCEPTED: "قبل الزميل استلام المحادثة", CONVERSATION_HANDOFF_DECLINED: "رفض الزميل استلام المحادثة", CONVERSATION_HANDOFF_CANCELLED: "أُلغي طلب تحويل المحادثة", CONVERSATION_CLOSED: "تم إغلاق محادثة", SLA_BREACHED: "تجاوزت محادثة مهلة الرد", CONVERSATION_OPENED: "تم فتح محادثة للمراجعة", AGENT_CREATED: "تمت إضافة موظف", PRESENCE_CHANGED: "تم تحديث حالة موظف", CSAT_RECEIVED: "تم استلام تقييم خدمة", PRODUCT_SENT: "تم إرسال منتج للعميل", PASSWORD_RESET_REQUESTED: "تم تقديم طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_APPROVED: "تمت الموافقة على طلب إعادة ضبط", PASSWORD_RESET_REJECTED: "تم رفض طلب إعادة ضبط كلمة مرور", PASSWORD_RESET_COMPLETED: "تم تغيير كلمة مرور الحساب" }; return map[action] || action.replaceAll("_", " "); }

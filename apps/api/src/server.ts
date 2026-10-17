@@ -30,6 +30,7 @@ import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
 import { channelEligibilityWhere } from "./routingSelection";
 import { formatAgentHandoffGreeting } from "./autoReplies";
 import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
+import { normalizeSearchDigits } from "./search";
 import { AiImageGenerationError, aiImagePromptSchema, generateAiImage } from "./aiImage";
 
 const app = express();
@@ -559,6 +560,94 @@ app.put("/api/conversations/:id/pin", agentGuard, async (req: AuthedRequest, res
   res.json({ conversationId: conversation.id, pinned: parsed.data.pinned });
 });
 
+app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const actor = req.user!;
+  const query = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
+  const digits = normalizeSearchDigits(query);
+  if (query.length < 2 && digits.length < 3) return res.status(400).json({ error: "اكتب حرفين على الأقل أو ثلاثة أرقام للبحث" });
+  const offsetValue = typeof req.query.offset === "string" ? Number(req.query.offset) : 0;
+  if (!Number.isSafeInteger(offsetValue) || offsetValue < 0 || offsetValue > 10_000) return res.status(400).json({ error: "صفحة البحث غير صالحة" });
+
+  const canSeeAll = actor.role === Role.ADMIN || actor.role === Role.SUPERVISOR && hasPermission(actor, "canViewAllConversations");
+  const teamView = req.query.team === "1" && canReadTeamConversations(actor);
+  const historyOnly = req.query.history === "1" && !canSeeAll && !teamView;
+  const scope: Prisma.ConversationWhereInput[] = canSeeAll ? [] : teamView
+    ? actor.role === Role.BRANCH_USER ? [{ branchId: actor.branchId! }] : []
+    : historyOnly ? [
+      ...(actor.role === Role.BRANCH_USER ? [{ branchId: actor.branchId! }] : []),
+      { OR: [{ assignedAgentId: null }, { assignedAgentId: { not: actor.id } }] },
+      { OR: [
+        { assignmentHistory: { some: { agentId: actor.id } } },
+        { messages: { some: { authorId: actor.id } } },
+        { internalNotes: { some: { authorId: actor.id } } },
+        { whatsappCallSessions: { some: { agentId: actor.id } } }
+      ] }
+    ] : [{ assignedAgentId: actor.id }];
+
+  const conversationId = typeof req.query.conversationId === "string" ? req.query.conversationId : "";
+  const messageMatch: Prisma.MessageWhereInput = { OR: [
+    { text: { contains: query, mode: "insensitive" } },
+    { transcription: { contains: query, mode: "insensitive" } }
+  ] };
+  if (conversationId) {
+    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true } });
+    if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+    if (!await canReadConversationOrHistory(actor, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+    const where = { conversationId, ...messageMatch };
+    const [items, total] = await Promise.all([
+      prisma.message.findMany({ where, select: { id: true, text: true, transcription: true, kind: true, direction: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: offsetValue, take: 50 }),
+      prisma.message.count({ where })
+    ]);
+    return res.json({ items, total, hasMore: offsetValue + items.length < total, nextOffset: offsetValue + items.length });
+  }
+
+  let matchingCustomerIds: string[] = [];
+  if (digits.length >= 3) {
+    const matchingCustomers = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT "id" FROM "Customer"
+      WHERE regexp_replace(translate(COALESCE("phone", ''), '٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'), '[^0-9]', '', 'g') LIKE ${`%${digits}%`}
+      LIMIT 1000
+    `);
+    matchingCustomerIds = matchingCustomers.map((customer) => customer.id);
+  }
+  const customerMatches: Prisma.CustomerWhereInput[] = [
+    { displayName: { contains: query, mode: "insensitive" } },
+    { name: { contains: query, mode: "insensitive" } },
+    ...(matchingCustomerIds.length ? [{ id: { in: matchingCustomerIds } }] : [])
+  ];
+  const channel = typeof req.query.channel === "string" && Object.values(Channel).includes(req.query.channel as Channel) ? req.query.channel as Channel : undefined;
+  const status = typeof req.query.status === "string" ? req.query.status : "";
+  const statusFilter: Prisma.ConversationWhereInput = status === "ACTIVE" ? { status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] } }
+    : status === "WAITING" ? { status: { in: [ConversationStatus.PENDING, ConversationStatus.QUEUED] } }
+      : status === "DONE" ? { status: { in: [ConversationStatus.RESOLVED, ConversationStatus.CLOSED] } }
+        : Object.values(ConversationStatus).includes(status as ConversationStatus) ? { status: status as ConversationStatus } : {};
+  const where: Prisma.ConversationWhereInput = {
+    AND: [
+      ...scope,
+      statusFilter,
+      ...(channel ? [{ channel }] : []),
+      ...(req.query.favorite === "1" ? [{ favorites: { some: { userId: actor.id } } }] : []),
+      ...(req.query.pinned === "1" ? [{ pins: { some: { userId: actor.id } } }] : []),
+      { OR: [
+        { customer: { is: { OR: customerMatches } } },
+        { messages: { some: messageMatch } }
+      ] }
+    ]
+  };
+  const rows = await prisma.conversation.findMany({
+    where,
+    include: {
+      customer: { select: { id: true, name: true, displayName: true, phone: true, avatarUrl: true, isBlocked: true } },
+      assignedAgent: { select: { id: true, name: true } },
+      messages: { where: messageMatch, select: { id: true, text: true, transcription: true, kind: true, direction: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 3 }
+    },
+    orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }], skip: offsetValue, take: 51
+  });
+  const hasMore = rows.length > 50;
+  const items = rows.slice(0, 50).map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation), matchType: conversation.messages.length ? "MESSAGE" : "CUSTOMER" }));
+  res.json({ items, hasMore, nextOffset: offsetValue + items.length });
+});
+
 app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const messageLimit = req.query.messageLimit === undefined ? null : pageLimit(req.query.messageLimit);
   const canViewAllPrivateNotes = canViewAllPrivateConversationNotes(req.user!);
@@ -665,6 +754,35 @@ app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   const limit = pageLimit(req.query.limit);
+  const include = { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } } as const;
+  if (req.query.around !== undefined) {
+    if (typeof req.query.around !== "string" || req.query.around.length > 128) return res.status(400).json({ error: "معرّف الرسالة غير صالح" });
+    const target = await prisma.message.findFirst({ where: { id: req.query.around, conversationId: conversation.id }, include });
+    if (!target) return res.status(404).json({ error: "الرسالة غير موجودة في هذه المحادثة" });
+    const beforeLimit = Math.floor((limit - 1) / 2);
+    const afterLimit = limit - beforeLimit - 1;
+    const [beforeMessages, afterMessages] = await Promise.all([
+      prisma.message.findMany({ where: { conversationId: conversation.id, OR: [{ createdAt: { lt: target.createdAt } }, { createdAt: target.createdAt, id: { lt: target.id } }] }, include, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: beforeLimit + 1 }),
+      prisma.message.findMany({ where: { conversationId: conversation.id, OR: [{ createdAt: { gt: target.createdAt } }, { createdAt: target.createdAt, id: { gt: target.id } }] }, include, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: afterLimit + 1 })
+    ]);
+    const hasMore = beforeMessages.length > beforeLimit;
+    const hasMoreAfter = afterMessages.length > afterLimit;
+    const page = [...beforeMessages.slice(0, beforeLimit).reverse(), target, ...afterMessages.slice(0, afterLimit)];
+    if (canWorkOnConversation(req.user!, conversation)) void markBaileysMessagesRead(page.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
+    return res.json({ messages: page, hasMore, nextBefore: hasMore ? page[0]?.id || null : null, hasMoreAfter, nextAfter: hasMoreAfter ? page[page.length - 1]?.id || null : null });
+  }
+  if (req.query.after !== undefined) {
+    if (typeof req.query.after !== "string" || req.query.after.length > 128) return res.status(400).json({ error: "مؤشر الرسائل غير صالح" });
+    const after = await prisma.message.findFirst({ where: { id: req.query.after, conversationId: conversation.id }, select: { createdAt: true, id: true } });
+    if (!after) return res.status(400).json({ error: "مؤشر الرسائل غير صالح لهذه المحادثة" });
+    const messages = await prisma.message.findMany({
+      where: { conversationId: conversation.id, OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] },
+      include, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: limit + 1
+    });
+    const hasMoreAfter = messages.length > limit;
+    const page = messages.slice(0, limit);
+    return res.json({ messages: page, hasMoreAfter, nextAfter: hasMoreAfter && page.length ? page[page.length - 1].id : null });
+  }
   let before: { createdAt: Date; id: string } | null = null;
   if (req.query.before !== undefined) {
     if (typeof req.query.before !== "string" || req.query.before.length > 128) return res.status(400).json({ error: "مؤشر الرسائل غير صالح" });
@@ -676,7 +794,7 @@ app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest
       conversationId: conversation.id,
       ...(before ? { OR: [{ createdAt: { lt: before.createdAt } }, { createdAt: before.createdAt, id: { lt: before.id } }] } : {})
     },
-    include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } },
+    include,
     orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: limit + 1
   });
   const hasMore = messages.length > limit;
