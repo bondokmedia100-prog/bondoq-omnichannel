@@ -29,7 +29,9 @@ button { cursor: pointer; }
 .mobile-chat-back { display: none; }
 .workspace-chat { background-color: #efeae2 !important; }
 .workspace-chat > .flex-1 { background-color: #efeae2; }
-.agent-app .message-body { font-size: var(--chat-font-size, 14px); }
+.agent-app .message-body { font-size: var(--chat-font-size, 18px); font-weight: 500; line-height: 1.8; }
+.agent-message-bubble { max-width: min(88%, 44rem); }
+.agent-message-inbound { border: 1px solid #e8e5df; }
 html[data-crm-theme="dark"] { color-scheme: dark; --cream: #090b09; --ink: #f5f2e9; --muted: #b7b09f; }
 html[data-crm-theme="dark"] body { background: #090b09; color: #f5f2e9; }
 html[data-crm-theme="dark"] main { color: #f5f2e9; }
@@ -98,7 +100,8 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
   .workspace-chat > div[class*="bg-[#f0f2f5]"] > span { display: none; }
   .workspace-chat > div[class*="bg-[#f0f2f5]"] > div:last-child { max-width: 100%; }
   .workspace-chat > div[class*="overflow-y-auto"][class*="gap-4"] { padding: 12px; }
-  .agent-message-bubble { max-width: 92%; padding: 10px 12px; }
+   .agent-message-bubble { max-width: 94%; padding: 12px 14px; }
+   .agent-app .message-body { font-size: max(18px, var(--chat-font-size, 18px)); line-height: 1.75; }
   .admin-dashboard { overflow-x: hidden; padding-bottom: max(2.5rem, env(safe-area-inset-bottom)); }
   .admin-dashboard > header > div { height: 60px; gap: 6px; padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
   .admin-dashboard > header > div > div:first-child { min-width: 0; gap: 8px; }

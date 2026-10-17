@@ -18,8 +18,9 @@ async function postJson(url: string, payload: unknown, token: string) {
   return response.json();
 }
 
-export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaAssetId?: string; mediaContentType?: string; latitude?: number; longitude?: number; pollOptions?: string[]; outboundMessageId?: string }) {
+export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaAssetId?: string; mediaContentType?: string; latitude?: number; longitude?: number; pollOptions?: string[]; contactCard?: { name: string; phone: string }; outboundMessageId?: string }) {
   const kind = input.kind || MessageKind.TEXT;
+  if (input.contactCard && input.channel !== Channel.WHATSAPP) throw new Error("بطاقات جهات الاتصال متاحة عبر WhatsApp فقط");
   if (input.channel === Channel.WHATSAPP) {
     if (kind === MessageKind.STICKER && await getWhatsAppMode() !== "BAILEYS") throw new Error("ملصقات WhatsApp غير مدعومة عبر وضع API الحالي؛ استخدم وضع Baileys");
     if (kind === MessageKind.POLL && await getWhatsAppMode() !== "BAILEYS") throw new Error("استطلاعات WhatsApp غير مدعومة عبر وضع API الحالي؛ استخدم وضع Baileys");
@@ -29,6 +30,7 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
     return enqueueKalemlyMessage({
       to: input.recipient, message,
       ...(input.pollOptions ? { pollOptions: input.pollOptions } : {}),
+      ...(input.contactCard ? { contactCard: input.contactCard } : {}),
       ...(input.mediaUrl ? { file: input.mediaUrl } : {}),
       ...(input.mediaAssetId ? { mediaAssetId: input.mediaAssetId } : {}),
       ...(input.mediaUrl || input.mediaAssetId ? { mediaType: kind === MessageKind.STICKER ? "sticker" : kind === MessageKind.IMAGE ? "image" : kind === MessageKind.AUDIO ? "audio" : kind === MessageKind.VIDEO ? "video" : "document" } : {})

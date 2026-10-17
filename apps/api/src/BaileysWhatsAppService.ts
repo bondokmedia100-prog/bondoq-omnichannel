@@ -39,13 +39,6 @@ let callReplyText = defaultCallReply;
 const pendingCalls = new Map<string, { callId: string; callerJid: string; phoneNumber: string; conversationId?: string; assignedAgentId?: string; customerName: string; isVideo: boolean; receivedAt: string }>();
 const profilePictureCache = new Map<string, { url: string | undefined; expiresAt: number }>();
 const profilePictureRequests = new Map<string, Promise<string | undefined>>();
-const groupSubjectCache = new Map<string, { subject: string; expiresAt: number }>();
-
-export type BaileysWhatsAppGroup = {
-  id: string;
-  subject: string;
-  participants: Array<{ id: string; phone: string | null; admin: string | null }>;
-};
 
 let state: WhatsAppConnectionState = {
   mode: "BAILEYS", status: "DISCONNECTED", qrDataUrl: "", phoneNumber: "", accountName: "", lastError: ""
@@ -155,48 +148,6 @@ export async function saveWhatsAppCallReply(text: string) {
 
 export function getBaileysWhatsAppState() { return { ...state }; }
 
-function connectedBaileysSocket() {
-  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") throw new Error("إدارة جروبات WhatsApp متاحة فقط عند اتصال Baileys");
-  return socket;
-}
-
-function groupInfo(metadata: any): BaileysWhatsAppGroup {
-  return {
-    id: String(metadata.id || ""),
-    subject: String(metadata.subject || "مجموعة WhatsApp"),
-    participants: (Array.isArray(metadata.participants) ? metadata.participants : []).flatMap((participant: any) => {
-      const id = String(participant.id || participant.phoneNumber || "");
-      const phone = String(participant.phoneNumber || (id.endsWith("@s.whatsapp.net") ? id : "")) || null;
-      return id ? [{ id, phone, admin: participant.admin === "superadmin" || participant.admin === "admin" ? participant.admin : null }] : [];
-    })
-  };
-}
-
-export async function listBaileysWhatsAppGroups() {
-  const currentSocket = connectedBaileysSocket();
-  const groups = await currentSocket.groupFetchAllParticipating();
-  return Object.values(groups).map(groupInfo).filter((group) => group.id.endsWith("@g.us"));
-}
-
-export async function getBaileysWhatsAppGroup(groupId: string) {
-  const currentSocket = connectedBaileysSocket();
-  if (!groupId.endsWith("@g.us")) throw new Error("معرّف مجموعة WhatsApp غير صالح");
-  return groupInfo(await currentSocket.groupMetadata(groupId));
-}
-
-export async function createBaileysWhatsAppGroup(subject: string, participants: string[]) {
-  const currentSocket = connectedBaileysSocket();
-  const result = await currentSocket.groupCreate(subject, participants.map(normalizeJid));
-  return groupInfo(result);
-}
-
-export async function updateBaileysWhatsAppGroupParticipants(groupId: string, participants: string[], action: "add" | "remove" | "promote" | "demote") {
-  const currentSocket = connectedBaileysSocket();
-  if (!groupId.endsWith("@g.us")) throw new Error("معرّف مجموعة WhatsApp غير صالح");
-  await currentSocket.groupParticipantsUpdate(groupId, participants.map(normalizeJid), action);
-  return getBaileysWhatsAppGroup(groupId);
-}
-
 export async function setWhatsAppMode(mode: WhatsAppMode) {
   state = { ...state, mode };
   await prisma.integrationSetting.upsert({
@@ -281,6 +232,39 @@ function phoneFromJid(value?: string) {
   return match?.[1] || "";
 }
 
+async function syncWhatsAppContacts(currentSocket: WASocket, contacts: any[]) {
+  if (!Array.isArray(contacts) || !contacts.length) return;
+  let synced = 0;
+  for (let offset = 0; offset < contacts.length; offset += 50) {
+    if (socket !== currentSocket) return;
+    const batch = contacts.slice(offset, offset + 50);
+    const results = await Promise.allSettled(batch.map(async (contact) => {
+      const jid = String(contact?.id || contact?.jid || "").trim();
+      if (!jid || jid === "status@broadcast" || /@(?:g\.us|newsletter)$/i.test(jid)) return false;
+      const phoneValue = [contact?.phoneNumber, contact?.phone, jid].find((value) => typeof value === "string" && value.trim());
+      let phone = "";
+      if (phoneValue) {
+        try { phone = normalizePhoneNumber(String(phoneValue)); }
+        catch { phone = phoneFromJid(jid); }
+      }
+      const externalCustomerId = phone || (/@lid$/i.test(jid) ? jid : "");
+      if (!externalCustomerId) return false;
+      const name = [contact?.name, contact?.verifiedName, contact?.notify].find((value) => typeof value === "string" && value.trim())?.trim();
+      const id = `external_whatsapp_${externalCustomerId}`;
+      await prisma.customer.upsert({
+        where: { id },
+        create: { id, name: name || null, phone: phone || null, channelIdentifiers: { whatsapp: externalCustomerId } },
+        update: { ...(name ? { name } : {}), ...(phone ? { phone } : {}), channelIdentifiers: { whatsapp: externalCustomerId } },
+        select: { id: true }
+      });
+      return true;
+    }));
+    synced += results.filter((result) => result.status === "fulfilled" && result.value).length;
+    results.filter((result) => result.status === "rejected").forEach((result) => console.warn("WhatsApp contact could not be synchronized", result.reason));
+  }
+  if (synced) console.info("WhatsApp contacts synchronized", { received: contacts.length, synced });
+}
+
 function unwrapMessage(message: any) {
   let content = message?.message || {};
   for (let depth = 0; depth < 5; depth++) {
@@ -326,9 +310,16 @@ async function readMediaFile(url: string) {
   return { buffer, contentType: (response.headers.get("content-type") || "application/octet-stream").split(";")[0].toLowerCase() };
 }
 
-export async function sendBaileysWhatsAppMessage(input: { to: string; message: string; file?: string; mediaType?: "image" | "audio" | "video" | "document" | "sticker"; pollOptions?: string[] }) {
+export async function sendBaileysWhatsAppMessage(input: { to: string; message: string; file?: string; mediaType?: "image" | "audio" | "video" | "document" | "sticker"; pollOptions?: string[]; contactCard?: { name: string; phone: string } }) {
   if (!socket || state.status !== "CONNECTED") throw new Error("محرك WhatsApp الداخلي غير متصل. افتح إعدادات واتساب وأعد الاتصال.");
   const jid = normalizeJid(input.to);
+  if (input.contactCard) {
+    const phone = normalizePhoneNumber(input.contactCard.phone);
+    const name = input.contactCard.name.trim().replace(/[\r\n]+/g, " ");
+    const vcardText = (value: string) => value.replace(/\\/g, "\\\\").replace(/,/g, "\\,").replace(/;/g, "\\;").replace(/\r?\n/g, "\\n");
+    const vcard = ["BEGIN:VCARD", "VERSION:3.0", `N:;${vcardText(name)};;;`, `FN:${vcardText(name)}`, `TEL;type=CELL;type=VOICE;waid=${phone}:+${phone}`, "END:VCARD"].join("\n");
+    return socket.sendMessage(jid, { contacts: { displayName: name, contacts: [{ displayName: name, vcard }] } });
+  }
   if (input.pollOptions?.length) {
     if (input.pollOptions.length < 2 || input.pollOptions.length > 10) throw new Error("يجب أن يحتوي الاستطلاع على خيارين إلى عشرة خيارات");
     return socket.sendMessage(jid, { poll: { name: input.message, values: input.pollOptions, selectableCount: 1 } });
@@ -353,29 +344,16 @@ export async function sendBaileysWhatsAppMessage(input: { to: string; message: s
   return socket.sendMessage(jid, { document: media.buffer, fileName, mimetype: media.contentType, caption: input.message || undefined });
 }
 
-async function handleIncomingMessage(message: any, historySync = false) {
-  if (!message?.message || message.key?.fromMe && !historySync) return;
+async function handleIncomingMessage(message: any) {
+  if (!message?.message || message.key?.fromMe) return;
   const content = unwrapMessage(message);
   const remoteJid = String(message.key?.remoteJid || "");
-  if (!remoteJid || remoteJid === "status@broadcast") return;
-  const isGroup = remoteJid.endsWith("@g.us");
-  const currentSocket = socket;
-  let groupSubject = "مجموعة WhatsApp";
-  if (isGroup && currentSocket && state.status === "CONNECTED") {
-    const cached = groupSubjectCache.get(remoteJid);
-    if (cached && cached.expiresAt > Date.now()) groupSubject = cached.subject;
-    else {
-      try {
-        groupSubject = String((await currentSocket.groupMetadata(remoteJid)).subject || groupSubject);
-        groupSubjectCache.set(remoteJid, { subject: groupSubject, expiresAt: Date.now() + 5 * 60_000 });
-      } catch {}
-    }
-  }
+  if (!remoteJid || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) return;
   const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
-  const participantJid = String(message.key?.participant || message.key?.participantAlt || "");
-  const phoneNumber = isGroup ? "" : phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
-  const externalCustomerId = isGroup ? remoteJid : phoneNumber || remoteJid;
-  const profilePictureUrl = !historySync && !isGroup && currentSocket && state.status === "CONNECTED"
+  const phoneNumber = phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
+  const externalCustomerId = phoneNumber || remoteJid;
+  const currentSocket = socket;
+  const profilePictureUrl = currentSocket && state.status === "CONNECTED"
     ? await customerProfilePicture(currentSocket, remoteJid, phoneNumber)
     : undefined;
   const audio = content.audioMessage;
@@ -397,14 +375,9 @@ async function handleIncomingMessage(message: any, historySync = false) {
       reuploadRequest: (staleMessage: any) => currentSocket.updateMediaMessage(staleMessage),
       logger: { info: () => undefined } as any
     } : undefined;
-    try {
-      mediaBuffer = Buffer.from(await downloadMediaMessage(message, "buffer", {}, retrieval));
-      if (!mediaBuffer.length) throw new Error("WhatsApp returned an empty media file");
-      if (mediaBuffer.length > inboundMediaLimit) throw new Error("رسالة واتساب الواردة تتجاوز حد التخزين البالغ 12 ميجابايت");
-    } catch (error) {
-      if (!historySync) throw error;
-      console.warn("Historical WhatsApp media is unavailable", idForMessage(message));
-    }
+    mediaBuffer = Buffer.from(await downloadMediaMessage(message, "buffer", {}, retrieval));
+    if (!mediaBuffer.length) throw new Error("WhatsApp returned an empty media file");
+    if (mediaBuffer.length > inboundMediaLimit) throw new Error("رسالة واتساب الواردة تتجاوز حد التخزين البالغ 12 ميجابايت");
   }
   const id = String(message.key?.id || `${remoteJid}:${Date.now()}`);
   const inbound = {
@@ -412,11 +385,10 @@ async function handleIncomingMessage(message: any, historySync = false) {
     externalConversationId: remoteJid,
     externalCustomerId,
     ...(phoneNumber ? { customerPhone: phoneNumber } : {}),
-    customerName: isGroup ? groupSubject : message.pushName || undefined,
+    customerName: message.pushName || undefined,
     profilePictureUrl,
     text: String(text || ""),
     kind,
-    ...(historySync ? { direction: message.key?.fromMe ? "OUTBOUND" as const : "INBOUND" as const } : {}),
     latitude: location?.degreesLatitude,
     longitude: location?.degreesLongitude,
     externalId: `baileys:${remoteJid}:${id}`,
@@ -424,43 +396,14 @@ async function handleIncomingMessage(message: any, historySync = false) {
     metadata: {
       provider: "baileys",
       remoteJid,
-      ...(isGroup ? {
-        isWhatsAppGroup: true,
-        groupSubject,
-        groupParticipantJid: participantJid,
-        groupParticipantPhone: phoneFromJid(String(message.key?.participantAlt || participantJid)) || undefined,
-        groupParticipantName: String(message.pushName || "") || undefined
-      } : {}),
       voiceNote: Boolean(audio?.ptt),
       mediaMimeType: mediaContentType,
-      ...(historySync ? { historySync: true } : {}),
       pollOptions: Array.isArray(poll?.options) ? poll.options.map((option: any) => String(option.optionName || option.name || "")).filter(Boolean) : undefined,
       messageTimestamp: Number(message.messageTimestamp || 0)
     }
   };
   const { ingestMessage } = await import("./ingestion");
-  return ingestMessage(inbound);
-}
-
-function idForMessage(message: any) { return String(message?.key?.id || "unknown"); }
-
-async function importHistoricalMessages(currentSocket: WASocket, messages: any[]) {
-  let imported = 0;
-  const conversationIds = new Set<string>();
-  for (let offset = 0; offset < messages.length; offset += 20) {
-    if (socket !== currentSocket) return;
-    const batch = messages.slice(offset, offset + 20);
-    const results = await Promise.allSettled(batch.map((message) => handleIncomingMessage(message, true)));
-    for (const result of results) {
-      if (result.status === "fulfilled") {
-        imported++;
-        const value = result.value as { conversationId?: string } | undefined;
-        if (value?.conversationId) conversationIds.add(value.conversationId);
-      } else console.warn("Historical WhatsApp message could not be stored", result.reason);
-    }
-  }
-  console.info("WhatsApp history sync processed", { received: messages.length, imported });
-  if (conversationIds.size) io?.emit("whatsapp:history-synced", { conversationIds: [...conversationIds] });
+  await ingestMessage(inbound);
 }
 
 async function handleIncomingCall(currentSocket: WASocket, call: any) {
@@ -592,13 +535,12 @@ async function startSocket() {
     })().catch((error) => console.warn("WhatsApp connection status update failed", error));
   });
   current.ev.on("messages.upsert", ({ messages, type }) => {
-    if (type === "notify") {
-      for (const message of messages) void handleIncomingMessage(message).catch((error) => console.warn("Baileys inbound message could not be stored", error));
-      return;
-    }
-    if (type === "append") void importHistoricalMessages(current, messages);
+    if (type !== "notify") return;
+    for (const message of messages) void handleIncomingMessage(message).catch((error) => console.warn("Baileys inbound message could not be stored", error));
   });
-  current.ev.on("messaging-history.set", ({ messages }) => { void importHistoricalMessages(current, messages); });
+  current.ev.on("contacts.upsert", (contacts) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("WhatsApp contact sync failed", error)); });
+  current.ev.on("contacts.update", (contacts) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("WhatsApp contact update failed", error)); });
+  current.ev.on("messaging-history.set", ({ contacts }) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("Historical WhatsApp contact sync failed", error)); });
   current.ev.on("messages.update", (updates) => {
     for (const update of updates) void persistBaileysReceipt(update).catch((error) => console.warn("Baileys delivery update could not be stored", error));
   });

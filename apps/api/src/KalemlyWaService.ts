@@ -22,6 +22,7 @@ export type KalemlyWaMessage = {
   mediaAssetId?: string;
   mediaType?: "image" | "audio" | "video" | "document" | "sticker";
   pollOptions?: string[];
+  contactCard?: { name: string; phone: string };
 };
 
 type QueuedKalemlyWaMessage = KalemlyWaMessage & { outboundMessageId?: string };
@@ -85,6 +86,7 @@ export async function saveKalemlySettings(input: { authKey?: string; appKey?: st
 
 async function postMessage(input: KalemlyWaMessage) {
   if (await getWhatsAppMode() === "BAILEYS") return sendBaileysWhatsAppMessage(input);
+  if (input.contactCard) throw new Error("إرسال بطاقة جهة اتصال متاح عند اتصال WhatsApp بوضع Baileys فقط");
   if (input.pollOptions?.length) throw new Error("استطلاعات WhatsApp غير مدعومة عبر تكامل API الحالي");
   if (input.mediaType === "sticker") throw new Error("ملصقات WhatsApp غير مدعومة عبر تكامل API الحالي");
   const settings = await getKalemlySettings();

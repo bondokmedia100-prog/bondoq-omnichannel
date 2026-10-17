@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Archive, ArrowDown, ArrowLeft, Ban, Bell, BellOff, BookUser, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, Forward, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, Paperclip, Pencil, Phone, PhoneCall, Pin, Printer, Reply as ReplyIcon, Search, Send, Star, Trash2, UserRound, Users, X } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, Ban, Bell, BellOff, BookUser, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, Crop, Forward, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, Paperclip, Pencil, Phone, PhoneCall, Pin, Printer, Reply as ReplyIcon, Search, Send, Star, Trash2, UserRound, Users, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
@@ -42,10 +42,12 @@ export default function AgentWorkspace() {
   const [messageFilter, setMessageFilter] = useState("ALL");
   const [chatLoadError, setChatLoadError] = useState("");
   const [search, setSearch] = useState("");
-  const [chatFontSize, setChatFontSize] = useState(14);
+  const [chatFontSize, setChatFontSize] = useState(18);
   const [text, setText] = useState("");
   const [showCanned, setShowCanned] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
+  const [showContactCard, setShowContactCard] = useState(false);
+  const [sendingContactId, setSendingContactId] = useState("");
   const [contactQuery, setContactQuery] = useState("");
   const [contactResults, setContactResults] = useState<AnyRecord[]>([]);
   const [loadingContacts, setLoadingContacts] = useState(false);
@@ -64,8 +66,6 @@ export default function AgentWorkspace() {
   const [customerEmail, setCustomerEmail] = useState("");
   const [internalNote, setInternalNote] = useState("");
   const [secretNote, setSecretNote] = useState("");
-  const [secretNoteRecipients, setSecretNoteRecipients] = useState<AnyRecord[]>([]);
-  const [secretNoteRecipientId, setSecretNoteRecipientId] = useState("");
   const [sendingSecretNote, setSendingSecretNote] = useState(false);
   const [replyingTo, setReplyingTo] = useState<AnyRecord | null>(null);
   const [editingMessageId, setEditingMessageId] = useState("");
@@ -85,6 +85,7 @@ export default function AgentWorkspace() {
   const [loadingMoreChats, setLoadingMoreChats] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState("");
+  const [imageEditor, setImageEditor] = useState<{ file: File; url: string } | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -123,6 +124,7 @@ export default function AgentWorkspace() {
   const replyInputRef = useRef<HTMLTextAreaElement>(null);
   const stickToBottom = useRef(true);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const imageEditorResolverRef = useRef<((file: File | null) => void) | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingCancelledRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
@@ -200,7 +202,7 @@ export default function AgentWorkspace() {
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" }); setSelectedProductIds([]); }
     const request = ++detailRequest.current;
-    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setShowMobileProfile(false); setShowHeaderOptions(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote(""); setSecretNoteRecipients([]); setSecretNoteRecipientId("");
+    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = true; setShowJumpToBottom(false); setShowMobileProfile(false); setShowHeaderOptions(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote("");
     socketRef.current?.emit("conversation:join", id);
     try {
       const conversation = await api(`/api/conversations/${id}?messageLimit=50`);
@@ -208,11 +210,6 @@ export default function AgentWorkspace() {
         const queuedMessages = loadingMessagesRef.current.get(id) || [];
         loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
         setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) }); setSavedOrder(null);
-        void api(`/api/conversations/${id}/private-note-recipients`).then((result) => {
-          if (request !== detailRequest.current) return;
-          setSecretNoteRecipients(result.recipients || []);
-          setSecretNoteRecipientId(result.defaultRecipientId || "");
-        }).catch(() => {});
       }
     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
@@ -224,6 +221,19 @@ export default function AgentWorkspace() {
       await openChat(result.conversationId);
       void loadChats();
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر فتح محادثة WhatsApp لهذا العميل"); }
+  }
+  async function sendContactCard(contact: AnyRecord) {
+    if (!activeId || !contact.phone || sendingContactId) return;
+    const conversationId = activeId;
+    setSendingContactId(contact.id);
+    try {
+      const message = await api(`/api/conversations/${conversationId}/contact-card`, { method: "POST", body: JSON.stringify({ contactId: contact.id }) });
+      setDetail((current: AnyRecord) => current?.id === conversationId ? { ...current, messages: mergeMessages(current.messages || [], message) } : current);
+      setShowContactCard(false);
+      setNotice(`تمت إضافة بطاقة ${customerDisplayName(contact)} إلى قائمة الإرسال.`);
+      void loadChats();
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إرسال بطاقة جهة الاتصال"); }
+    finally { setSendingContactId(""); }
   }
   async function saveCustomerProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -355,10 +365,10 @@ export default function AgentWorkspace() {
     event.preventDefault();
     const conversationId = activeId;
     const noteText = secretNote.trim();
-    if (!conversationId || !noteText || !secretNoteRecipientId || sendingSecretNote) return;
+    if (!conversationId || !noteText || sendingSecretNote) return;
     setSendingSecretNote(true);
     try {
-      const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ text: noteText, recipientId: secretNoteRecipientId }) });
+      const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ text: noteText }) });
       setDetail((current: AnyRecord) => current?.id === conversationId && !current.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...current, privateNotes: [...(current.privateNotes || []), note] } : current);
       setSecretNote("");
       setNotice(`تم إرسال رسالة سرية إلى ${note.recipient?.name || "الزميل"}.`);
@@ -603,7 +613,7 @@ export default function AgentWorkspace() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (!showContacts) return;
+    if (!showContacts && !showContactCard) return;
     let current = true;
     const timer = window.setTimeout(() => {
       setLoadingContacts(true);
@@ -612,11 +622,11 @@ export default function AgentWorkspace() {
         .finally(() => { if (current) setLoadingContacts(false); });
     }, 180);
     return () => { current = false; window.clearTimeout(timer); };
-  }, [showContacts, contactQuery]);
+  }, [showContacts, showContactCard, contactQuery]);
 
   useEffect(() => {
     const saved = Number(localStorage.getItem("bondoq_chat_font_size"));
-    if (Number.isFinite(saved) && saved >= 12 && saved <= 20) setChatFontSize(saved);
+    if (Number.isFinite(saved) && saved >= 14 && saved <= 28) setChatFontSize(saved);
   }, []);
 
   useEffect(() => {
@@ -796,7 +806,26 @@ export default function AgentWorkspace() {
     }
   }
   async function uploadSelectedFiles(files: File[]) {
-    for (const file of files) await uploadAndSend(file);
+    for (const file of files) {
+      const isImage = file.type.startsWith("image/") || /\.(?:jpe?g|png|webp)$/i.test(file.name);
+      const prepared = isImage ? await editImageBeforeSend(file) : file;
+      if (prepared) await uploadAndSend(prepared);
+    }
+  }
+  function editImageBeforeSend(file: File): Promise<File | null> {
+    return new Promise((resolve) => {
+      imageEditorResolverRef.current = resolve;
+      setImageEditor({ file, url: URL.createObjectURL(file) });
+    });
+  }
+  function finishImageEditor(file: File | null) {
+    const editor = imageEditor;
+    const resolve = imageEditorResolverRef.current;
+    if (!editor || !resolve) return;
+    imageEditorResolverRef.current = null;
+    setImageEditor(null);
+    URL.revokeObjectURL(editor.url);
+    resolve(file);
   }
    async function startRecording() {
       if (recorderRef.current || !activeId || sendingRef.current) return;
@@ -964,7 +993,7 @@ export default function AgentWorkspace() {
           {watching && <div className="flex h-9 shrink-0 items-center gap-2 border-b border-blue-100 bg-blue-50 px-4 text-[11px] font-semibold text-blue-700"><Users size={14} /> المدير يراقب هذه المحادثة معك الآن</div>}
            {notice && <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-100 bg-amber-50 px-4 py-2 text-[11px] text-amber-900"><span>{notice}</span><button onClick={() => setNotice("")}><span>×</span></button></div>}
               {detail.readOnly && <div role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[10px] font-bold text-amber-900">للقراءة فقط · لا يمكن الرد على العميل أو تعديل المحادثة؛ يمكنك مراسلة زميل سرًا</div>}
-             <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-200/70 bg-[#f0f2f5] px-4 text-[10px] text-stone-500"><span>حجم خط الرسائل</span><div className="flex items-center gap-2"><button type="button" aria-label="تصغير خط الرسائل" disabled={chatFontSize <= 12} onClick={() => { const next = Math.max(12, chatFontSize - 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">−</button><b className="min-w-7 text-center">{chatFontSize}</b><button type="button" aria-label="تكبير خط الرسائل" disabled={chatFontSize >= 20} onClick={() => { const next = Math.min(20, chatFontSize + 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">+</button></div><div className="soft-scroll flex max-w-[65%] gap-1 overflow-x-auto">{[{ id: "ALL", label: "الكل" }, { id: "IMAGES", label: "صور" }, { id: "AUDIO", label: "صوت" }, { id: "VIDEO", label: "فيديو" }, { id: "FILES", label: "ملفات" }, { id: "LINKS", label: "روابط" }].map((item) => <button type="button" key={item.id} aria-pressed={messageFilter === item.id} onClick={() => setMessageFilter(item.id)} className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${messageFilter === item.id ? "bg-stone-700 text-white" : "bg-white text-stone-500"}`}>{item.label}</button>)}</div></div>
+              <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-200/70 bg-[#f0f2f5] px-4 text-[10px] text-stone-500"><span>حجم خط الرسائل</span><div className="flex items-center gap-2"><button type="button" aria-label="تصغير خط الرسائل" disabled={chatFontSize <= 14} onClick={() => { const next = Math.max(14, chatFontSize - 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">−</button><b className="min-w-7 text-center">{chatFontSize}</b><button type="button" aria-label="تكبير خط الرسائل" disabled={chatFontSize >= 28} onClick={() => { const next = Math.min(28, chatFontSize + 1); setChatFontSize(next); localStorage.setItem("bondoq_chat_font_size", String(next)); }} className="grid h-6 w-6 place-items-center rounded-md bg-white text-sm font-bold disabled:opacity-40">+</button></div><div className="soft-scroll flex max-w-[65%] gap-1 overflow-x-auto">{[{ id: "ALL", label: "الكل" }, { id: "IMAGES", label: "صور" }, { id: "AUDIO", label: "صوت" }, { id: "VIDEO", label: "فيديو" }, { id: "FILES", label: "ملفات" }, { id: "LINKS", label: "روابط" }].map((item) => <button type="button" key={item.id} aria-pressed={messageFilter === item.id} onClick={() => setMessageFilter(item.id)} className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${messageFilter === item.id ? "bg-stone-700 text-white" : "bg-white text-stone-500"}`}>{item.label}</button>)}</div></div>
              <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-7">
               {detail.hasMoreMessages && <button type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlderMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingOlderMessages ? "جارٍ تحميل الرسائل..." : "تحميل الرسائل الأقدم"}</button>}
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
@@ -975,13 +1004,13 @@ export default function AgentWorkspace() {
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
             <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
-              {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={secretNoteRecipients} recipientId={secretNoteRecipientId} onRecipientChange={setSecretNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
+              {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipientName={detail.assignedAgent?.name || "لا يوجد موظف مسند"} hasRecipient={Boolean(detail.assignedAgent?.id)} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
             {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
               {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
               {replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
               {detail.channel !== "MESSENGER" && <div className="mb-2 flex justify-end"><button type="button" disabled={!metaWindowOpen || sendingPoll} onClick={() => setShowPollComposer(true)} className="flex items-center gap-1 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[10px] font-bold text-sky-700 disabled:opacity-40"><ListChecks size={14} /> إنشاء استطلاع</button></div>}
-              <div className="mb-2 flex justify-start"><button type="button" onClick={() => setShowQuickReplyManager(true)} className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100">إدارة ردودي السريعة</button></div>
+               <div className="mb-2 flex flex-wrap justify-start gap-2"><button type="button" onClick={() => setShowQuickReplyManager(true)} className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100">إدارة ردودي السريعة</button>{detail.channel === "WHATSAPP" && <button type="button" onClick={() => { setContactQuery(""); setContactResults([]); setShowContactCard(true); }} className="flex items-center gap-1 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[10px] font-bold text-sky-800 hover:bg-sky-100"><BookUser size={13} /> إرسال جهة اتصال</button>}</div>
             {showCanned && <div className="soft-scroll absolute bottom-[calc(100%-4px)] right-4 z-10 max-h-60 w-[min(340px,calc(100%-32px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply) => <button key={reply.id} onClick={() => { setText(reply.content); setShowCanned(false); }} className="flex w-full flex-col rounded-xl px-3 py-2 text-right hover:bg-[#fff8e9]"><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
               <form onSubmit={sendReply}><div className="rounded-2xl border border-stone-200 bg-white focus-within:border-[#e4b8a8] focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)]"><textarea ref={replyInputRef} rows={2} value={text} disabled={!messagingEnabled} onChange={(e) => { setText(e.target.value); setShowCanned(e.target.value.startsWith("/")); }} onPaste={(event) => { const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !showCanned) { e.preventDefault(); void submitReply(); } }} placeholder={detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-32 min-h-[62px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
                 <div className="flex flex-wrap items-center justify-between gap-1 border-t border-stone-100 px-2 py-2"><div className="flex items-center gap-1"><button type="button" disabled={!metaWindowOpen} title="ردود جاهزة" onClick={() => { setText(text.startsWith("/") ? text : "/"); setShowCanned(!showCanned); }} className="rounded-lg px-2 py-1.5 text-[10px] font-bold text-[#bd8e21] hover:bg-amber-50 disabled:opacity-40">/ رد جاهز</button><button type="button" disabled={!metaWindowOpen} onClick={() => setShowProducts(true)} className="flex items-center gap-1 rounded-lg bg-[#fff8e9] px-2 py-1.5 text-[10px] font-bold text-[#9b7219] disabled:opacity-40"><CakeSlice size={14} /> إرسال منتج</button><button type="button" title="إرفاق ملف" disabled={!metaWindowOpen || sending} onClick={() => uploadInputRef.current?.click()} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 disabled:opacity-40"><Paperclip size={16} /></button><button type="button" title={recording ? "إيقاف التسجيل وإرساله" : "تسجيل رسالة صوتية"} disabled={!metaWindowOpen || sending} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-400 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button><button type="button" title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-8 w-8 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={16} /> : <BellOff size={16} />}</button><button type="button" title="إرسال موقعي الحالي" aria-label="إرسال موقعي الحالي" disabled={!metaWindowOpen || sending} onClick={shareLocation} className="grid h-8 w-8 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 disabled:opacity-40"><MapPin size={16} /></button></div><button disabled={!text.trim() || !metaWindowOpen || sending} className="flex h-9 items-center gap-2 rounded-xl bg-[#d32f2f] px-4 text-xs font-bold text-white shadow-sm shadow-red-200 transition hover:bg-[#b71c1c] disabled:cursor-not-allowed disabled:opacity-40"><span className="hidden sm:inline">{sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={15} /></button></div>
@@ -1020,7 +1049,8 @@ export default function AgentWorkspace() {
     </section>
       {incomingCall && <IncomingWhatsAppCallModal call={incomingCall} onReject={rejectIncomingWhatsAppCall} onOpenConversation={openIncomingCallConversation} onDismiss={() => setIncomingCall(null)} />}
       {callConversation && <WhatsAppCallModal conversationId={callConversation.id} customerName={customerDisplayName(callConversation.customer)} phone={callConversation.customer?.phone || callConversation.externalCustomerId || ""} socket={socket} onClose={() => setCallConversation(null)} />}
-     {lightboxImage && <div role="dialog" aria-modal="true" aria-label="معاينة الصورة" onClick={() => setLightboxImage("")} className="fixed inset-0 z-[70] grid place-items-center bg-black/90 p-4"><button type="button" aria-label="إغلاق معاينة الصورة" onClick={() => setLightboxImage("")} className="absolute right-4 top-4 grid h-11 w-11 place-items-center rounded-full bg-white/15 text-2xl text-white hover:bg-white/25">×</button><img src={lightboxImage} alt="معاينة مكبرة" onClick={(event) => event.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-lg object-contain shadow-2xl" /></div>}
+      {imageEditor && <ImageEditorDialog file={imageEditor.file} url={imageEditor.url} onCancel={() => finishImageEditor(null)} onComplete={finishImageEditor} />}
+      {lightboxImage && <div role="dialog" aria-modal="true" aria-label="معاينة الصورة" onClick={() => setLightboxImage("")} className="fixed inset-0 z-[70] grid place-items-center bg-black/90 p-4"><button type="button" aria-label="إغلاق معاينة الصورة" onClick={() => setLightboxImage("")} className="absolute right-4 top-4 grid h-11 w-11 place-items-center rounded-full bg-white/15 text-2xl text-white hover:bg-white/25">×</button><img src={lightboxImage} alt="معاينة مكبرة" onClick={(event) => event.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-lg object-contain shadow-2xl" /></div>}
      {showContacts && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowContacts(false)}><section role="dialog" aria-modal="true" aria-labelledby="contacts-title" className="panel flex max-h-[85vh] w-full max-w-lg flex-col p-5" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="contacts-title" className="text-base font-extrabold">جهات الاتصال</h2><p className="mt-1 text-xs text-stone-500">اختر اسمًا لفتح محادثة WhatsApp داخل النظام.</p></div><button type="button" onClick={() => setShowContacts(false)} aria-label="إغلاق جهات الاتصال" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><label className="mb-3 flex h-10 items-center gap-2 rounded-xl bg-stone-50 px-3"><Search size={15} className="text-stone-400" /><input autoFocus value={contactQuery} onChange={(event) => setContactQuery(event.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف" className="w-full bg-transparent text-xs outline-none" /></label><div className="soft-scroll min-h-32 flex-1 overflow-y-auto">{loadingContacts ? <p className="py-8 text-center text-xs text-stone-400">جارٍ البحث...</p> : contactResults.map((contact) => <button key={contact.id} type="button" disabled={!contact.phone} onClick={() => void startChatFromContact(contact)} className="flex w-full items-center gap-3 border-b border-stone-100 px-2 py-3 text-right hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><Avatar name={customerDisplayName(contact)} src={contact.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(contact)}</b><span dir="ltr" className="mt-1 block text-right text-[10px] text-stone-400">{contact.phone || "أضف رقم هاتف لبدء محادثة"}</span></span><MessageCircle size={16} className="text-emerald-700" /></button>)}{!loadingContacts && !contactResults.length && <p className="py-8 text-center text-xs text-stone-400">لا توجد جهة اتصال مطابقة.</p>}</div><p className="mt-3 text-[9px] leading-4 text-stone-400">في وضع WhatsApp Business API قد يتطلب بدء مراسلة جديدة استخدام قالب معتمد من Meta.</p></section></div>}
      {forwardMessage && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setForwardMessage(null); setForwardQuery(""); }}><section role="dialog" aria-modal="true" aria-labelledby="forward-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="forward-title" className="text-base font-extrabold">تحويل الرسالة</h2><p className="mt-1 text-xs leading-5 text-stone-500">ستُرسل نسخة من الرسالة إلى محادثة أخرى.</p></div><button type="button" onClick={() => { setForwardMessage(null); setForwardQuery(""); }} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><input autoFocus value={forwardQuery} onChange={(event) => setForwardQuery(event.target.value)} placeholder="ابحث عن محادثة" className="mb-3 h-10 w-full rounded-xl border border-stone-200 px-3 text-xs outline-none focus:border-amber-400" /><div className="max-h-[55vh] space-y-2 overflow-y-auto">{conversations.filter((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())).map((target) => <button key={target.id} type="button" onClick={() => void forwardMessageTo(target)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50"><Avatar name={customerDisplayName(target.customer)} src={target.customer?.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(target.customer)}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-stone-400"><ChannelIcon channel={target.channel} />{channelName(target.channel)}</span></span><Forward size={15} className="text-stone-400" /></button>)}{!conversations.some((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())) && <p className="rounded-xl bg-stone-50 p-5 text-center text-xs text-stone-500">لا توجد محادثات مطابقة ضمن المحادثات المحمّلة.</p>}</div></section></div>}
      {showHandoff && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowHandoff(false)}><section role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="handoff-title" className="text-base font-extrabold">تحويل المحادثة لزميل</h2><p className="mt-1 text-xs leading-5 text-stone-500">اختر موظفًا متاحًا من خدمة العملاء ليتابع مع العميل.</p></div><button type="button" onClick={() => setShowHandoff(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><div className="max-h-[55vh] space-y-2 overflow-y-auto">{handoffColleagues.map((colleague) => <button key={colleague.id} type="button" disabled={Boolean(handoffBusyId)} onClick={() => void handoffToColleague(colleague.id, colleague.name)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50 disabled:opacity-60"><Avatar name={colleague.name} /><span className="min-w-0 flex-1"><b className="block truncate text-sm">{colleague.name}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متاح الآن</span></span><span className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">{handoffBusyId === colleague.id ? "جارٍ التحويل..." : "تحويل"}</span></button>)}{!handoffColleagues.length && <div className="rounded-xl bg-stone-50 p-5 text-center text-xs leading-6 text-stone-500">لا يوجد زميل متاح الآن في خدمة العملاء. جرّب لاحقًا أو أبقِ المحادثة لديك.</div>}</div></section></div>}
@@ -1044,7 +1074,8 @@ export default function AgentWorkspace() {
      {showPollComposer && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowPollComposer(false)}><section role="dialog" aria-modal="true" aria-labelledby="poll-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="poll-title" className="text-base font-extrabold">إنشاء استطلاع</h2><p className="mt-1 text-xs leading-5 text-stone-500">متاح في Telegram وWhatsApp عبر Baileys. لا يمكن تعديل الاستطلاع بعد إرساله.</p></div><button type="button" onClick={() => setShowPollComposer(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><form onSubmit={(event) => void createPoll(event)} className="space-y-3"><label className="block text-xs font-bold text-stone-600">سؤال الاستطلاع<input required maxLength={300} value={pollQuestion} onChange={(event) => setPollQuestion(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-stone-200 px-3 text-sm font-normal outline-none focus:border-sky-400" /></label><label className="block text-xs font-bold text-stone-600">الخيارات <span className="font-normal text-stone-400">(خيار واحد في كل سطر)</span><textarea required rows={6} maxLength={1200} value={pollOptionsText} onChange={(event) => setPollOptionsText(event.target.value)} placeholder={'الخيار الأول\nالخيار الثاني'} className="mt-1 w-full resize-y rounded-xl border border-stone-200 px-3 py-2 text-sm font-normal leading-6 outline-none focus:border-sky-400" /></label><p className="text-[10px] leading-5 text-stone-400">أضف من خيارين إلى عشرة. التصويت والنتائج تتم في القناة الأصلية.</p><div className="flex justify-end gap-2"><button type="button" onClick={() => setShowPollComposer(false)} className="rounded-xl bg-stone-100 px-4 py-2.5 text-xs font-bold text-stone-600">إلغاء</button><button type="submit" disabled={sendingPoll || !metaWindowOpen} className="rounded-xl bg-sky-700 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{sendingPoll ? "جارٍ الإرسال..." : "إرسال الاستطلاع"}</button></div></form></section></div>}
      {showQuickReplyManager && <AgentQuickRepliesModal onClose={() => setShowQuickReplyManager(false)} onSaved={setAgentQuickReplies} />}
      {showAccount && user && <AccountSettingsModal user={user} onClose={() => setShowAccount(false)} onSaved={setUser} />}
-   </main>;
+      {showContactCard && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowContactCard(false)}><section role="dialog" aria-modal="true" aria-labelledby="contact-card-title" className="panel flex max-h-[85vh] w-full max-w-lg flex-col p-5" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="contact-card-title" className="text-base font-extrabold">إرسال جهة اتصال</h2><p className="mt-1 text-xs text-stone-500">ستُرسل بطاقة الاسم ورقم الهاتف عبر WhatsApp.</p></div><button type="button" onClick={() => setShowContactCard(false)} aria-label="إغلاق جهات الاتصال" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><label className="mb-3 flex h-10 items-center gap-2 rounded-xl bg-stone-50 px-3"><Search size={15} className="text-stone-400" /><input autoFocus value={contactQuery} onChange={(event) => setContactQuery(event.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف" className="w-full bg-transparent text-xs outline-none" /></label><div className="soft-scroll min-h-32 flex-1 overflow-y-auto">{loadingContacts ? <p className="py-8 text-center text-xs text-stone-400">جارٍ البحث...</p> : contactResults.map((contact) => <button key={contact.id} type="button" disabled={!contact.phone || Boolean(sendingContactId)} onClick={() => void sendContactCard(contact)} className="flex w-full items-center gap-3 border-b border-stone-100 px-2 py-3 text-right hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"><Avatar name={customerDisplayName(contact)} src={contact.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(contact)}</b><span dir="ltr" className="mt-1 block text-right text-[10px] text-stone-400">{contact.phone || "لا يوجد رقم هاتف"}</span></span><span className="shrink-0 rounded-lg bg-sky-700 px-3 py-2 text-[10px] font-bold text-white">{sendingContactId === contact.id ? "جارٍ الإرسال..." : "إرسال"}</span></button>)}{!loadingContacts && !contactResults.length && <p className="py-8 text-center text-xs text-stone-400">لا توجد جهة اتصال مطابقة.</p>}</div></section></div>}
+    </main>;
 }
 
 function Avatar({ name, src }: { name: string; src?: string }) { return <span className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-full bg-gradient-to-br from-[#ffe3cd] to-[#ffedb4] font-bold text-[#965a36]">{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : name?.[0] || "ع"}</span>; }
@@ -1055,11 +1086,13 @@ function ChannelIcon({ channel }: { channel: string }) { const config: Record<st
   const outgoing = message.direction === "OUTBOUND";
   const hasMedia = ["IMAGE", "AUDIO", "VIDEO", "FILE", "STICKER"].includes(message.kind);
   const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
+  const contactCard = metadata.contactCard && typeof metadata.contactCard === "object" ? metadata.contactCard : null;
   const deliveryLabel = message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
     return <div className={`flex ${outgoing ? "justify-start" : "justify-end"}`}><div className={`agent-message-bubble ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-[82%] rounded-2xl px-4 py-3 shadow-sm`}>
     {message.quotedMessage && <div className="mb-2 rounded-lg border-r-2 border-[#d32f2f] bg-stone-50/80 px-2.5 py-1.5 text-[10px] text-stone-500"><b>{message.quotedMessage.author?.name || "رسالة مقتبسة"}</b><p className="mt-0.5 line-clamp-2">{message.quotedMessage.text || (message.quotedMessage.kind === "IMAGE" ? "صورة" : "مرفق")}</p></div>}
     {hasMedia && (message.localPreviewUrl ? ["IMAGE", "STICKER"].includes(message.kind) ? <button type="button" onClick={() => onOpenImage?.(message.localPreviewUrl)} className="mb-2 block"><img src={message.localPreviewUrl} alt={message.kind === "STICKER" ? "ملصق قيد الإرسال" : "صورة قيد الإرسال"} className="max-h-56 rounded-xl object-contain" /></button> : message.kind === "AUDIO" ? <audio controls src={message.localPreviewUrl} className="mb-2 max-w-full" /> : message.kind === "VIDEO" ? <video controls src={message.localPreviewUrl} className="mb-2 max-h-56 max-w-full rounded-xl" /> : <span className="mb-2 block text-xs">ملف مرفق قيد الإرسال</span> : message.mediaAssetId ? <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} /> : message.kind === "IMAGE" && outgoing && message.mediaUrl ? <button type="button" onClick={() => onOpenImage?.(message.mediaUrl)} className="mb-2 block"><img src={message.mediaUrl} alt="منتج حلواني بندق" className="max-h-56 rounded-xl object-cover" /></button> : <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} />)}
-    {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
+     {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
+     {contactCard && <div className="mb-2 flex min-w-52 items-center gap-3 rounded-xl border border-emerald-100 bg-white p-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-emerald-50 text-emerald-800"><BookUser size={19} /></span><span className="min-w-0"><b className="block truncate text-sm">{contactCard.name || "جهة اتصال"}</b><a href={`tel:+${String(contactCard.phone || "").replace(/[^0-9]/g, "")}`} dir="ltr" className="mt-1 block text-xs text-emerald-800 underline">+{String(contactCard.phone || "").replace(/[^0-9]/g, "")}</a></span></div>}
       {editing ? <div className="my-2 min-w-[230px]"><textarea autoFocus rows={3} maxLength={4000} value={editingText} onChange={(event) => onEditingTextChange?.(event.target.value)} className="w-full resize-y rounded-xl border border-amber-200 bg-white p-2 text-sm leading-6 outline-none focus:border-amber-400" /><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={onCancelEdit} className="rounded-lg bg-stone-100 px-3 py-1.5 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" disabled={savingEdit || !editingText.trim()} onClick={onSaveEdit} className="rounded-lg bg-[#d32f2f] px-3 py-1.5 text-[10px] font-bold text-white disabled:opacity-50">{savingEdit ? "جارٍ الحفظ..." : "حفظ التعديل"}</button></div></div> : message.kind === "POLL" ? <div className="min-w-[220px] rounded-xl border border-sky-100 bg-sky-50/60 p-3"><div className="mb-1 text-[9px] font-extrabold uppercase tracking-wide text-sky-700">استطلاع</div><p className="whitespace-pre-wrap text-sm font-bold leading-6">{message.text}</p><div className="mt-2 space-y-1.5">{(Array.isArray(metadata.pollOptions) ? metadata.pollOptions : []).map((option: string, index: number) => <div key={`${option}-${index}`} className="rounded-lg border border-sky-100 bg-white px-2.5 py-1.5 text-xs">{option}</div>)}</div><p className="mt-2 text-[9px] text-stone-400">التصويت والنتائج متاحان على المنصة الأصلية.</p></div> : message.kind === "LOCATION" ? <a className="flex items-center gap-2 text-sm text-blue-700 underline" href={`https://maps.google.com/?q=${message.latitude},${message.longitude}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} /> فتح موقع العميل</a> : message.text && <p className="message-body whitespace-pre-wrap text-sm leading-7">{splitMessageTextLinks(message.text).map((part, index) => part.href ? <a key={index} href={part.href} target="_blank" rel="noopener noreferrer" dir="ltr" className="text-blue-700 underline decoration-blue-300 underline-offset-2">{part.text}</a> : <span key={index}>{part.text}</span>)}</p>}
       <div className="mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{metadata.forwardedFrom && <span>محوّلة · </span>}{outgoing && `${deliveryLabel} · `}{formatCairoTime(message.createdAt)}{metadata.editedAt && <span className="text-stone-400"> · معدلة</span>}{outgoing && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) && (message.deliveryStatus === "SENT" ? <Check size={11} className="text-stone-400" /> : <CheckCheck size={11} className={message.deliveryStatus === "READ" ? "text-sky-600" : "text-stone-400"} />)}</div>
        {!!message.reactions?.length && <div className="mt-2 flex flex-wrap gap-1">{message.reactions.map((reaction: AnyRecord) => readOnly ? <span key={reaction.id} title={reaction.user?.name || "تفاعل"} className="rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[10px]">{reaction.emoji}</span> : <button key={reaction.id} type="button" title={reaction.user?.name || "تفاعل"} onClick={() => onReact?.(reaction.emoji)} className="rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[10px]">{reaction.emoji}</button>)}</div>}
@@ -1076,19 +1109,144 @@ function categoryLabel(value: string) { return productCategoryLabel[value] || va
 function formatCountdown(milliseconds: number) { const seconds = Math.max(0, Math.floor(milliseconds / 1000)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); const rest = seconds % 60; return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`; }
 function callStatusLabel(value: string) { return ({ INITIATING: "جارٍ الاتصال", RINGING: "يرن", CONNECTED: "تم الاتصال", TERMINATED: "انتهت", REJECTED: "مرفوضة", FAILED: "فشلت" } as Record<string, string>)[value] || value; }
 
-function SecretNoteComposer({ text, onTextChange, recipients, recipientId, onRecipientChange, sending, onSubmit }: { text: string; onTextChange: (value: string) => void; recipients: AnyRecord[]; recipientId: string; onRecipientChange: (value: string) => void; sending: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+function SecretNoteComposer({ text, onTextChange, recipientName, hasRecipient, sending, onSubmit }: { text: string; onTextChange: (value: string) => void; recipientName: string; hasRecipient: boolean; sending: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   return <details className="mb-3 rounded-xl border border-violet-200 bg-violet-50/60 p-3" open>
-    <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية لزميل <span className="mr-auto text-[9px] font-normal text-violet-600">للمرسل والمستلم والإدارة المخوّلة فقط</span></summary>
-    <form onSubmit={onSubmit} className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-stretch">
-      <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
-        <select aria-label="مستلم الرسالة السرية" value={recipientId} onChange={(event) => onRecipientChange(event.target.value)} disabled={sending || recipients.length === 0} className="h-10 shrink-0 rounded-lg border border-violet-200 bg-white px-2 text-[11px] text-stone-700 outline-none focus:border-violet-400 sm:max-w-48">
-          <option value="" disabled>اختر الزميل</option>
-          {recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.role === "BRANCH_USER" ? " · موظف فرع" : ""}</option>)}
-        </select>
-        <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." disabled={!recipients.length || sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
-      </div>
-      <button type="submit" disabled={sending || !recipientId || !text.trim()} className="flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-4 text-[10px] font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><Send size={13} />{sending ? "جارٍ الإرسال..." : "إرسال سري"}</button>
+    <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية للموظف المسند <span className="mr-auto text-[9px] font-normal text-violet-600">للمرسل والمستلم والإدارة المخوّلة فقط</span></summary>
+    <form onSubmit={onSubmit} className="mt-2 flex flex-col gap-2">
+      <div className="flex min-h-10 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 text-xs"><UserRound size={15} className="shrink-0 text-violet-600" /><span className={hasRecipient ? "font-bold text-stone-700" : "text-stone-400"}>{recipientName}</span></div>
+      <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." disabled={!hasRecipient || sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
+      <button type="submit" disabled={sending || !hasRecipient || !text.trim()} className="flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-4 text-[10px] font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><Send size={13} />{sending ? "جارٍ الإرسال..." : "إرسال سري"}</button>
     </form>
-    {!recipients.length && <p className="mt-2 text-[10px] text-violet-700">لا يوجد زملاء متاحون لإرسال رسالة إليهم.</p>}
+    {!hasRecipient && <p className="mt-2 text-[10px] text-violet-700">يجب إسناد المحادثة إلى موظف قبل إرسال رسالة سرية.</p>}
   </details>;
+}
+
+type ImageCrop = { x: number; y: number; width: number; height: number };
+type CropGesture = { mode: "move" | "resize" | "new"; point: { x: number; y: number }; crop: ImageCrop };
+
+function ImageEditorDialog({ file, url, onCancel, onComplete }: { file: File; url: string; onCancel: () => void; onComplete: (file: File | null) => void }) {
+  const [crop, setCrop] = useState<ImageCrop>({ x: 0.05, y: 0.05, width: 0.9, height: 0.9 });
+  const [text, setText] = useState("");
+  const [textPosition, setTextPosition] = useState<"top" | "center" | "bottom">("bottom");
+  const [textColor, setTextColor] = useState<"white" | "black">("white");
+  const [textSize, setTextSize] = useState(0.065);
+  const [selectingNewCrop, setSelectingNewCrop] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const gestureRef = useRef<CropGesture | null>(null);
+
+  function pointFromEvent(event: ReactPointerEvent<HTMLDivElement>) {
+    const bounds = imageRef.current?.getBoundingClientRect();
+    if (!bounds?.width || !bounds.height) return null;
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height))
+    };
+  }
+  function updateCrop(event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = gestureRef.current;
+    const point = pointFromEvent(event);
+    if (!gesture || !point) return;
+    const dx = point.x - gesture.point.x;
+    const dy = point.y - gesture.point.y;
+    if (gesture.mode === "new") {
+      setCrop({ x: Math.min(point.x, gesture.point.x), y: Math.min(point.y, gesture.point.y), width: Math.max(0.04, Math.abs(dx)), height: Math.max(0.04, Math.abs(dy)) });
+    } else if (gesture.mode === "move") {
+      setCrop({ ...gesture.crop, x: Math.min(1 - gesture.crop.width, Math.max(0, gesture.crop.x + dx)), y: Math.min(1 - gesture.crop.height, Math.max(0, gesture.crop.y + dy)) });
+    } else {
+      setCrop({ ...gesture.crop, width: Math.min(1 - gesture.crop.x, Math.max(0.08, gesture.crop.width + dx)), height: Math.min(1 - gesture.crop.y, Math.max(0.08, gesture.crop.height + dy)) });
+    }
+  }
+  function beginCropGesture(event: ReactPointerEvent<HTMLDivElement>) {
+    const point = pointFromEvent(event);
+    if (!point) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const right = crop.x + crop.width;
+    const bottom = crop.y + crop.height;
+    const inHandle = point.x >= right - 0.055 && point.y >= bottom - 0.055;
+    const inside = point.x >= crop.x && point.x <= right && point.y >= crop.y && point.y <= bottom;
+    gestureRef.current = { mode: selectingNewCrop || !inside ? "new" : inHandle ? "resize" : "move", point, crop };
+  }
+  function endCropGesture() {
+    if (gestureRef.current?.mode === "new") setSelectingNewCrop(false);
+    gestureRef.current = null;
+  }
+  async function saveImage() {
+    const image = imageRef.current;
+    if (!image?.naturalWidth || busy) return;
+    setBusy(true);
+    try {
+      await document.fonts?.ready;
+      const sx = Math.max(0, Math.round(crop.x * image.naturalWidth));
+      const sy = Math.max(0, Math.round(crop.y * image.naturalHeight));
+      const sw = Math.max(1, Math.min(image.naturalWidth - sx, Math.round(crop.width * image.naturalWidth)));
+      const sh = Math.max(1, Math.min(image.naturalHeight - sy, Math.round(crop.height * image.naturalHeight)));
+      const canvas = document.createElement("canvas");
+      canvas.width = sw;
+      canvas.height = sh;
+      const context = canvas.getContext("2d");
+      if (!context) return onComplete(null);
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, sw, sh);
+      context.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
+      context.direction = "rtl";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.font = `700 ${Math.max(24, Math.round(sw * textSize))}px Cairo, sans-serif`;
+      const lines = text.split(/\r?\n/).flatMap((paragraph) => {
+        const words = paragraph.trim().split(/\s+/).filter(Boolean);
+        if (!words.length) return [""];
+        const wrapped: string[] = [];
+        let line = "";
+        for (const word of words) {
+          const next = line ? `${line} ${word}` : word;
+          if (line && context.measureText(next).width > sw * 0.86) { wrapped.push(line); line = word; }
+          else line = next;
+        }
+        wrapped.push(line);
+        return wrapped;
+      }).slice(0, 5);
+      if (text.trim()) {
+        const fontSize = Math.max(24, Math.round(sw * textSize));
+        const lineHeight = Math.round(fontSize * 1.3);
+        const bandHeight = lineHeight * lines.length + fontSize * 0.65;
+        const margin = Math.round(sh * 0.035);
+        const bandTop = textPosition === "top" ? margin : textPosition === "center" ? Math.round((sh - bandHeight) / 2) : sh - bandHeight - margin;
+        context.font = `700 ${fontSize}px Cairo, sans-serif`;
+        context.fillStyle = textColor === "white" ? "rgba(0,0,0,.62)" : "rgba(255,255,255,.78)";
+        context.fillRect(0, bandTop, sw, bandHeight);
+        context.fillStyle = textColor === "white" ? "#ffffff" : "#171717";
+        lines.forEach((line, index) => context.fillText(line, sw / 2, bandTop + fontSize * 0.45 + index * lineHeight, sw * 0.88));
+      }
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+      if (!blob) { onComplete(null); return; }
+      const baseName = file.name.replace(/\.[^.]+$/, "") || "image";
+      onComplete(new File([blob], `${baseName}-edited.jpg`, { type: "image/jpeg" }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const overlayPosition = textPosition === "top" ? "top-2" : textPosition === "center" ? "top-1/2 -translate-y-1/2" : "bottom-2";
+  return <div role="dialog" aria-modal="true" aria-labelledby="image-editor-title" className="fixed inset-0 z-[75] grid place-items-center bg-stone-950/75 p-2 backdrop-blur-sm sm:p-4" onClick={onCancel}>
+    <section className="panel flex max-h-[96dvh] w-full max-w-4xl flex-col overflow-hidden p-3 sm:p-5" onClick={(event) => event.stopPropagation()}>
+      <header className="mb-3 flex items-start justify-between gap-3"><div><h2 id="image-editor-title" className="flex items-center gap-2 text-sm font-extrabold"><Crop size={16} className="text-amber-700" /> قص الصورة وإضافة نص</h2><p className="mt-1 text-[10px] text-stone-500">اسحب الإطار لتحريكه، واسحب الزاوية لتغيير حجمه. لا يوجد رسم يدوي.</p></div><button type="button" onClick={onCancel} aria-label="إلغاء تعديل الصورة" className="rounded-lg p-1 text-xl text-stone-400">×</button></header>
+      <div className="mb-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+        <label className="block text-[10px] font-bold text-stone-600">النص على الصورة<textarea value={text} onChange={(event) => setText(event.target.value)} maxLength={180} rows={2} placeholder="اكتب النص هنا..." className="mt-1 w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm leading-6 outline-none focus:border-amber-400" /></label>
+        <label className="block text-[10px] font-bold text-stone-600">الموضع<select value={textPosition} onChange={(event) => setTextPosition(event.target.value as typeof textPosition)} className="mt-1 h-10 w-full rounded-lg border border-stone-200 bg-white px-2 text-xs sm:w-28"><option value="top">أعلى</option><option value="center">وسط</option><option value="bottom">أسفل</option></select></label>
+        <div className="flex gap-2 sm:flex-col"><label className="block flex-1 text-[10px] font-bold text-stone-600">الحجم<select value={textSize} onChange={(event) => setTextSize(Number(event.target.value))} className="mt-1 h-10 w-full rounded-lg border border-stone-200 bg-white px-2 text-xs"><option value={0.045}>صغير</option><option value={0.065}>متوسط</option><option value={0.09}>كبير</option></select></label><label className="block flex-1 text-[10px] font-bold text-stone-600">اللون<select value={textColor} onChange={(event) => setTextColor(event.target.value as typeof textColor)} className="mt-1 h-10 w-full rounded-lg border border-stone-200 bg-white px-2 text-xs"><option value="white">أبيض</option><option value="black">أسود</option></select></label></div>
+      </div>
+      <div className="soft-scroll flex min-h-0 flex-1 items-center justify-center overflow-auto rounded-xl bg-stone-950 p-2 sm:p-3">
+        <div className="relative inline-block max-h-[55dvh] max-w-full touch-none select-none" onPointerDown={beginCropGesture} onPointerMove={updateCrop} onPointerUp={endCropGesture} onPointerCancel={endCropGesture}>
+          <img ref={imageRef} src={url} alt="الصورة الجاري تعديلها" draggable={false} className="block max-h-[55dvh] max-w-full object-contain" />
+          <div className="pointer-events-none absolute border-2 border-amber-400 shadow-[0_0_0_9999px_rgba(0,0,0,.34)]" style={{ left: `${crop.x * 100}%`, top: `${crop.y * 100}%`, width: `${crop.width * 100}%`, height: `${crop.height * 100}%` }}>
+            {text && <span className={`absolute inset-x-0 flex justify-center px-2 ${overlayPosition}`}><span className={`max-w-full whitespace-pre-wrap break-words rounded-md px-2 py-1 text-center font-bold shadow ${textColor === "white" ? "bg-black/60 text-white" : "bg-white/80 text-stone-950"}`} style={{ fontSize: "clamp(12px, 3vw, 22px)" }}>{text}</span></span>}
+            <span className="absolute -bottom-2 -right-2 h-5 w-5 rounded-br-md border-b-4 border-r-4 border-amber-400" />
+          </div>
+        </div>
+      </div>
+      <footer className="mt-3 flex flex-wrap items-center justify-between gap-2"><button type="button" onClick={() => { setCrop({ x: 0.05, y: 0.05, width: 0.9, height: 0.9 }); setSelectingNewCrop(true); }} className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600">تحديد قص جديد</button><div className="flex gap-2"><button type="button" onClick={onCancel} className="rounded-lg bg-stone-100 px-4 py-2 text-xs font-bold text-stone-600">إلغاء</button><button type="button" disabled={busy} onClick={() => void saveImage()} className="flex items-center gap-1.5 rounded-lg bg-[#d32f2f] px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{busy ? "جارٍ تجهيز الصورة..." : "استخدام الصورة"}</button></div></footer>
+    </section>
+  </div>;
 }
