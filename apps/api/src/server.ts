@@ -1247,17 +1247,30 @@ app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest
   res.status(201).json(note);
 });
 
+app.get("/api/conversations/:id/private-note-recipients", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
+  const recipientFilters: Prisma.UserWhereInput[] = [{ role: Role.AGENT }];
+  if (conversation.branchId) recipientFilters.push({ role: Role.BRANCH_USER, branchId: conversation.branchId });
+  const recipients = await prisma.user.findMany({
+    where: { id: { not: req.user!.id }, isActive: true, OR: recipientFilters },
+    select: { id: true, name: true, presence: true, branch: { select: { name: true } } },
+    orderBy: { name: "asc" }
+  });
+  res.json(recipients);
+});
+
 app.post("/api/conversations/:id/private-notes", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ text: z.string().trim().min(1).max(4000) }).strict().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "اكتب رسالة سرية لا تتجاوز 4000 حرف" });
+  const parsed = z.object({ recipientId: z.string().min(1).max(100), text: z.string().trim().min(1).max(4000) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "اختر زميلًا واكتب رسالة سرية لا تتجاوز 4000 حرف" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, customer: { select: { name: true, displayName: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
-  if (!conversation.assignedAgentId) return res.status(409).json({ error: "يجب إسناد المحادثة إلى موظف قبل إرسال رسالة سرية" });
-  const recipient = await prisma.user.findUnique({ where: { id: conversation.assignedAgentId }, select: { id: true, name: true, role: true, branchId: true, isActive: true } });
-  if (!recipient || !canReceivePrivateConversationNote(recipient, conversation)) return res.status(409).json({ error: "الموظف المسند غير متاح لتلقي رسالة سرية" });
+  const recipient = await prisma.user.findUnique({ where: { id: parsed.data.recipientId }, select: { id: true, name: true, role: true, branchId: true, isActive: true } });
+  if (!recipient || recipient.id === req.user!.id || !canReceivePrivateConversationNote(recipient, conversation)) return res.status(400).json({ error: "الزميل المحدد غير متاح لهذه المحادثة" });
   const note = await prisma.conversationPrivateNote.create({
-    data: { conversationId: conversation.id, authorId: req.user!.id, recipientId: conversation.assignedAgentId, text: parsed.data.text },
+    data: { conversationId: conversation.id, authorId: req.user!.id, recipientId: recipient.id, text: parsed.data.text },
     include: { author: { select: { id: true, name: true } }, recipient: { select: { id: true, name: true } } }
   });
   await audit(req.user!.id, "PRIVATE_CONVERSATION_NOTE_SENT", conversation.id, { noteId: note.id, recipientId: recipient.id });
