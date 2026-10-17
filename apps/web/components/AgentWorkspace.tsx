@@ -66,6 +66,8 @@ export default function AgentWorkspace() {
   const [customerEmail, setCustomerEmail] = useState("");
   const [internalNote, setInternalNote] = useState("");
   const [secretNote, setSecretNote] = useState("");
+  const [privateNoteRecipients, setPrivateNoteRecipients] = useState<AnyRecord[]>([]);
+  const [privateNoteRecipientId, setPrivateNoteRecipientId] = useState("");
   const [sendingSecretNote, setSendingSecretNote] = useState(false);
   const [replyingTo, setReplyingTo] = useState<AnyRecord | null>(null);
   const [editingMessageId, setEditingMessageId] = useState("");
@@ -364,11 +366,12 @@ export default function AgentWorkspace() {
   async function sendSecretNote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const conversationId = activeId;
+    const recipientId = privateNoteRecipientId;
     const noteText = secretNote.trim();
-    if (!conversationId || !noteText || sendingSecretNote) return;
+    if (!conversationId || !recipientId || !noteText || sendingSecretNote) return;
     setSendingSecretNote(true);
     try {
-      const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ text: noteText }) });
+      const note = await api(`/api/conversations/${conversationId}/private-notes`, { method: "POST", body: JSON.stringify({ recipientId, text: noteText }) });
       setDetail((current: AnyRecord) => current?.id === conversationId && !current.privateNotes?.some((item: AnyRecord) => item.id === note.id) ? { ...current, privateNotes: [...(current.privateNotes || []), note] } : current);
       setSecretNote("");
       setNotice(`تم إرسال رسالة سرية إلى ${note.recipient?.name || "الزميل"}.`);
@@ -611,6 +614,22 @@ export default function AgentWorkspace() {
     if (!user?.id) return;
     api<AnyRecord[]>("/api/agent/quick-replies").then(setAgentQuickReplies).catch(() => {});
   }, [user?.id]);
+
+  useEffect(() => {
+    const conversationId = detail?.id;
+    setPrivateNoteRecipients([]);
+    setPrivateNoteRecipientId("");
+    if (!conversationId || !detail.canSendPrivateNote) return;
+    let current = true;
+    void api<AnyRecord[]>(`/api/conversations/${conversationId}/private-note-recipients`).then((recipients) => {
+      if (!current) return;
+      setPrivateNoteRecipients(recipients);
+      setPrivateNoteRecipientId((selected) => recipients.some((recipient) => recipient.id === selected) ? selected : recipients[0]?.id || "");
+    }).catch((error) => {
+      if (current) setNotice(error instanceof Error ? error.message : "تعذر تحميل الزملاء");
+    });
+    return () => { current = false; };
+  }, [detail?.id, detail?.canSendPrivateNote]);
 
   useEffect(() => {
     if (!showContacts && !showContactCard) return;
@@ -1004,7 +1023,7 @@ export default function AgentWorkspace() {
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
           </div>
             <div className="relative shrink-0 border-t border-stone-100 bg-white p-3 sm:p-4">
-              {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipientName={detail.assignedAgent?.name || "لا يوجد موظف مسند"} hasRecipient={Boolean(detail.assignedAgent?.id)} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
+              {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={privateNoteRecipients} recipientId={privateNoteRecipientId} onRecipientChange={setPrivateNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
             {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
               {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
@@ -1109,15 +1128,18 @@ function categoryLabel(value: string) { return productCategoryLabel[value] || va
 function formatCountdown(milliseconds: number) { const seconds = Math.max(0, Math.floor(milliseconds / 1000)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); const rest = seconds % 60; return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`; }
 function callStatusLabel(value: string) { return ({ INITIATING: "جارٍ الاتصال", RINGING: "يرن", CONNECTED: "تم الاتصال", TERMINATED: "انتهت", REJECTED: "مرفوضة", FAILED: "فشلت" } as Record<string, string>)[value] || value; }
 
-function SecretNoteComposer({ text, onTextChange, recipientName, hasRecipient, sending, onSubmit }: { text: string; onTextChange: (value: string) => void; recipientName: string; hasRecipient: boolean; sending: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+function SecretNoteComposer({ text, onTextChange, recipients, recipientId, onRecipientChange, sending, onSubmit }: { text: string; onTextChange: (value: string) => void; recipients: AnyRecord[]; recipientId: string; onRecipientChange: (value: string) => void; sending: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  const hasRecipient = recipients.some((recipient) => recipient.id === recipientId);
+  const presenceLabels: Record<string, string> = { ONLINE: "متصل", BUSY: "مشغول", BREAK: "استراحة", OFFLINE: "غير متصل" };
   return <details className="mb-3 rounded-xl border border-violet-200 bg-violet-50/60 p-3" open>
-    <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية للموظف المسند <span className="mr-auto text-[9px] font-normal text-violet-600">للمرسل والمستلم والإدارة المخوّلة فقط</span></summary>
+    <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية لزميل <span className="mr-auto text-[9px] font-normal text-violet-600">للمرسل والمستلم والإدارة المخوّلة فقط</span></summary>
     <form onSubmit={onSubmit} className="mt-2 flex flex-col gap-2">
-      <div className="flex min-h-10 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 text-xs"><UserRound size={15} className="shrink-0 text-violet-600" /><span className={hasRecipient ? "font-bold text-stone-700" : "text-stone-400"}>{recipientName}</span></div>
-      <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." disabled={!hasRecipient || sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
+      <label className="flex min-h-10 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 text-xs"><UserRound size={15} className="shrink-0 text-violet-600" /><select aria-label="الزميل المستلم" value={recipientId} onChange={(event) => onRecipientChange(event.target.value)} disabled={!recipients.length || sending} className="min-w-0 flex-1 bg-transparent py-2 outline-none disabled:text-stone-400"><option value="">{recipients.length ? "اختر الزميل" : "لا يوجد زملاء ضمن صلاحية هذه المحادثة"}</option>{recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.branch?.name ? ` · ${recipient.branch.name}` : ""}{presenceLabels[recipient.presence] ? ` · ${presenceLabels[recipient.presence]}` : ""}</option>)}</select></label>
+      <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." disabled={sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
       <button type="submit" disabled={sending || !hasRecipient || !text.trim()} className="flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-4 text-[10px] font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><Send size={13} />{sending ? "جارٍ الإرسال..." : "إرسال سري"}</button>
     </form>
-    {!hasRecipient && <p className="mt-2 text-[10px] text-violet-700">يجب إسناد المحادثة إلى موظف قبل إرسال رسالة سرية.</p>}
+    {!recipients.length && <p className="mt-2 text-[10px] text-violet-700">لا يوجد زملاء مؤهّلون لهذه المحادثة حاليًا. يمكنك كتابة الرسالة هنا وإرسالها بعد اختيار زميل.</p>}
+    {recipients.some((recipient) => recipient.presence !== "ONLINE") && <p className="mt-2 text-[10px] text-violet-700">يمكن إرسال الرسالة للزميل غير المتصل؛ ستظهر له عند عودته.</p>}
   </details>;
 }
 
