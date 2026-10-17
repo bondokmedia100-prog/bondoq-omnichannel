@@ -53,6 +53,8 @@ html[data-crm-theme="dark"] [class*="bg-[#d9fdd3"] { background-color: #171d19 !
 html[data-crm-theme="dark"] [class*="bg-[#fce8c5"] { background-color: #302715 !important; color: #f8e4ad; }
 html[data-crm-theme="dark"] .agent-message-outbound { background-color: #302715 !important; color: #fff4c7 !important; }
 html[data-crm-theme="dark"] .agent-message-inbound { background-color: #171d19 !important; color: #f5f2e9 !important; }
+html[data-crm-theme="dark"] .agent-message-inbound .message-body { color: #f5f2e9; }
+html[data-crm-theme="dark"] .agent-message-inbound .agent-message-time { color: #c4c1b6; }
 html[data-crm-theme="dark"] .agent-message-bubble .message-body a { color: #f2cf69 !important; }
 html[data-crm-theme="dark"] .agent-app [class*="b71c1c"] { color: #f2cf69 !important; }
 html[data-crm-theme="dark"] .agent-app .workspace-chat,
