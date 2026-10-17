@@ -34,10 +34,6 @@ async function main() {
       create: { email: person.email, username, name: person.name, role: person.role, department: person.department, passwordHash }
     });
   }
-  for (let index = 1; index <= 8; index += 1) {
-    const id = `branch-${index}`;
-    await prisma.branch.upsert({ where: { id }, update: {}, create: { id, name: `الفرع ${index}` } });
-  }
   for (const [shortcut, title, content] of responses) {
     await prisma.cannedResponse.upsert({ where: { shortcut }, update: { title, content }, create: { shortcut, title, content } });
   }

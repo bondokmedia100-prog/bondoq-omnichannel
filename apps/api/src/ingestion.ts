@@ -38,12 +38,10 @@ async function findWhatsAppConversationByPhone(phone: string) {
 
 async function ingestMessageLocked(inbound: NormalizedInbound) {
   const metadata = (inbound.metadata || {}) as Record<string, unknown>;
-  const historySync = metadata.historySync === true;
+  const historySync = inbound.isHistorySync === true || metadata.historySync === true;
   const direction = historySync && inbound.direction === "OUTBOUND" ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
-  const historyTimestamp = Number(metadata.messageTimestamp);
-  const messageAt = historySync && Number.isFinite(historyTimestamp) && historyTimestamp > 0
-    ? new Date(historyTimestamp * 1000)
-    : new Date();
+  const timestampValue = inbound.messageTimestamp?.getTime() || Number(metadata.messageTimestamp) * 1000;
+  const messageAt = Number.isFinite(timestampValue) && timestampValue > 0 ? new Date(timestampValue) : new Date();
   const timestampValid = Number.isFinite(messageAt.getTime()) && messageAt.getTime() <= Date.now() + 5 * 60_000;
   const createdAt = historySync && timestampValid ? messageAt : new Date();
   const isWhatsAppGroup = metadata.isWhatsAppGroup === true && inbound.channel === "WHATSAPP";
@@ -111,7 +109,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       if (sameProviderMessage) return { duplicate: true, conversationId, messageId: sameProviderMessage.id };
     }
   }
-  const previousInboundAt = conversation.lastInboundAt || (await prisma.message.findFirst({
+  const previousInboundAt = historySync ? null : conversation.lastInboundAt || (await prisma.message.findFirst({
     where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true }
   }))?.createdAt || null;
   let cachedMedia: { body: Buffer; contentType: string } | undefined = inbound.mediaBuffer

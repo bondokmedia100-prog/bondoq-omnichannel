@@ -424,6 +424,7 @@ model WhatsAppCallSession {
   guestExpiresAt DateTime?
   recordingConsentAt DateTime?
   recordingDeletedAt DateTime?
+  callLogHiddenAt DateTime?
   aiProcessingConsentAt DateTime?
   status         String       @default("INITIATING")
   sdpAnswer      String?      @db.Text
@@ -437,6 +438,7 @@ model WhatsAppCallSession {
 
   @@index([conversationId, createdAt])
   @@index([agentId, status, createdAt])
+  @@index([callLogHiddenAt, createdAt])
   @@index([guestTokenHash])
 }
 

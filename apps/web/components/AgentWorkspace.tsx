@@ -539,6 +539,14 @@ export default function AgentWorkspace() {
         }
         if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: event.customer || old.customer } : old);
       });
+      connection.on("whatsapp:history-synced", ({ conversationIds = [] }) => {
+        void loadChats();
+        const conversationId = activeIdRef.current;
+        if (!conversationId || !conversationIds.includes(conversationId)) return;
+        void api(`/api/conversations/${conversationId}`).then((conversation) => {
+          if (activeIdRef.current === conversationId) setDetail(conversation);
+        }).catch(() => {});
+      });
       connection.on("conversation:access-revoked", ({ conversationId }) => {
         if (activeIdRef.current === conversationId) {
           ++detailRequest.current;
@@ -1121,7 +1129,7 @@ function ChannelIcon({ channel }: { channel: string }) { const config: Record<st
        </>}
   </div></div>;
 }
-function department(value?: string) { return ({ CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "موظف فرع", ADMINISTRATION: "الإدارة" } as Record<string, string>)[value || ""] || "فريق بندق"; }
+function department(value?: string) { return ({ CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "خدمة العملاء", ADMINISTRATION: "الإدارة" } as Record<string, string>)[value || ""] || "فريق بندق"; }
 function channelName(value: string) { return ({ WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" } as Record<string, string>)[value] || value; }
 function ago(value?: string) { if (!value) return "الآن"; const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000)); return minutes < 1 ? "الآن" : minutes < 60 ? `منذ ${minutes} د` : `منذ ${Math.floor(minutes / 60)} س`; }
 function orderStatus(value: string) { return ({ DRAFT: "مسودة", CONFIRMED: "مؤكد", PREPARING: "قيد التجهيز", OUT_FOR_DELIVERY: "خرج للتوصيل", DELIVERED: "تم التسليم", CANCELLED: "ملغي", COMPLETED: "مكتمل" } as Record<string, string>)[value] || value; }
@@ -1135,7 +1143,7 @@ function SecretNoteComposer({ text, onTextChange, recipients, recipientId, onRec
   return <details className="mb-3 rounded-xl border border-violet-200 bg-violet-50/60 p-3">
     <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-extrabold text-violet-900"><LockKeyhole size={14} /> رسالة سرية لزميل <span className="mr-auto text-[9px] font-normal text-violet-600">المسند يُختار تلقائيًا · للمصرّح لهم فقط</span></summary>
     <form onSubmit={onSubmit} className="mt-2 flex flex-col gap-2">
-      <label className="flex min-h-10 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 text-xs"><UserRound size={15} className="shrink-0 text-violet-600" /><select aria-label="الزميل المستلم" value={recipientId} onChange={(event) => onRecipientChange(event.target.value)} disabled={!recipients.length || sending} className="min-w-0 flex-1 bg-transparent py-2 outline-none disabled:text-stone-400"><option value="">{recipients.length ? "اختر الزميل" : "لا يوجد زملاء ضمن صلاحية هذه المحادثة"}</option>{recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{recipient.branch?.name ? ` · ${recipient.branch.name}` : ""}{presenceLabels[recipient.presence] ? ` · ${presenceLabels[recipient.presence]}` : ""}</option>)}</select></label>
+      <label className="flex min-h-10 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 text-xs"><UserRound size={15} className="shrink-0 text-violet-600" /><select aria-label="الزميل المستلم" value={recipientId} onChange={(event) => onRecipientChange(event.target.value)} disabled={!recipients.length || sending} className="min-w-0 flex-1 bg-transparent py-2 outline-none disabled:text-stone-400"><option value="">{recipients.length ? "اختر الزميل" : "لا يوجد زملاء ضمن صلاحية هذه المحادثة"}</option>{recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.name}{presenceLabels[recipient.presence] ? ` · ${presenceLabels[recipient.presence]}` : ""}</option>)}</select></label>
       <textarea aria-label="نص الرسالة السرية" value={text} onChange={(event) => onTextChange(event.target.value)} maxLength={4000} rows={2} placeholder="اكتب رسالة لا يراها العميل أو بقية الفريق..." disabled={sending} className="min-h-10 min-w-0 flex-1 resize-y rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs leading-5 outline-none placeholder:text-stone-400 focus:border-violet-400 disabled:bg-stone-100" />
       <button type="submit" disabled={sending || !hasRecipient || !text.trim()} className="flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-700 px-4 text-[10px] font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><Send size={13} />{sending ? "جارٍ الإرسال..." : "إرسال سري"}</button>
     </form>

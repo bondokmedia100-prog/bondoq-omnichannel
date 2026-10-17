@@ -344,8 +344,8 @@ export async function sendBaileysWhatsAppMessage(input: { to: string; message: s
   return socket.sendMessage(jid, { document: media.buffer, fileName, mimetype: media.contentType, caption: input.message || undefined });
 }
 
-async function handleIncomingMessage(message: any) {
-  if (!message?.message || message.key?.fromMe) return;
+async function handleIncomingMessage(message: any, historySync = false) {
+  if (!message?.message || (!historySync && message.key?.fromMe)) return;
   const content = unwrapMessage(message);
   const remoteJid = String(message.key?.remoteJid || "");
   if (!remoteJid || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) return;
@@ -367,6 +367,19 @@ async function handleIncomingMessage(message: any) {
   const text = content.conversation || extended || poll?.name || image?.caption || video?.caption || document?.caption || audio?.caption || "";
   const kind = location ? MessageKind.LOCATION : poll ? MessageKind.POLL : sticker ? MessageKind.STICKER : image ? MessageKind.IMAGE : video ? MessageKind.VIDEO : audio ? MessageKind.AUDIO : document ? MessageKind.FILE : MessageKind.TEXT;
   const mediaMessage = image || video || audio || document || sticker;
+  const id = String(message.key?.id || "");
+  const externalId = message.key?.fromMe
+    ? serializeBaileysMessageKey(message.key) || `baileys:${remoteJid}:${id}`
+    : `baileys:${remoteJid}:${id}`;
+  if (historySync) {
+    if (!id || !text && !mediaMessage && !location && !poll) return;
+    const storedIds = [`WHATSAPP:${externalId}`, ...(message.key?.fromMe ? [`WHATSAPP:${id}`] : [])];
+    const duplicate = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, ...(message.key?.fromMe ? { direction: "OUTBOUND" } : {}) }, select: { id: true } });
+    if (duplicate) return;
+  }
+  const timestampSeconds = Number(message.messageTimestamp || 0);
+  const messageTimestamp = timestampSeconds > 0 && timestampSeconds < Date.now() / 1000 + 300
+    ? new Date(timestampSeconds * 1000) : undefined;
   let mediaBuffer: Buffer | undefined;
   let mediaContentType = String(mediaMessage?.mimetype || "application/octet-stream").split(";")[0].toLowerCase();
   if (mediaMessage) {
@@ -375,11 +388,15 @@ async function handleIncomingMessage(message: any) {
       reuploadRequest: (staleMessage: any) => currentSocket.updateMediaMessage(staleMessage),
       logger: { info: () => undefined } as any
     } : undefined;
-    mediaBuffer = Buffer.from(await downloadMediaMessage(message, "buffer", {}, retrieval));
-    if (!mediaBuffer.length) throw new Error("WhatsApp returned an empty media file");
-    if (mediaBuffer.length > inboundMediaLimit) throw new Error("رسالة واتساب الواردة تتجاوز حد التخزين البالغ 12 ميجابايت");
+    try {
+      mediaBuffer = Buffer.from(await downloadMediaMessage(message, "buffer", {}, retrieval));
+      if (!mediaBuffer.length) throw new Error("WhatsApp returned an empty media file");
+      if (mediaBuffer.length > inboundMediaLimit) throw new Error("رسالة واتساب الواردة تتجاوز حد التخزين البالغ 12 ميجابايت");
+    } catch (error) {
+      if (!historySync) throw error;
+      console.warn("Historical WhatsApp media is unavailable", error);
+    }
   }
-  const id = String(message.key?.id || `${remoteJid}:${Date.now()}`);
   const inbound = {
     channel: Channel.WHATSAPP,
     externalConversationId: remoteJid,
@@ -391,19 +408,41 @@ async function handleIncomingMessage(message: any) {
     kind,
     latitude: location?.degreesLatitude,
     longitude: location?.degreesLongitude,
-    externalId: `baileys:${remoteJid}:${id}`,
+    externalId: id ? externalId : `baileys:${remoteJid}:${Date.now()}`,
+    ...(historySync ? { direction: message.key?.fromMe ? "OUTBOUND" as const : "INBOUND" as const, isHistorySync: true, ...(messageTimestamp ? { messageTimestamp } : {}) } : {}),
     ...(mediaBuffer ? { mediaBuffer, mediaContentType, mediaFileName: String(mediaMessage?.fileName || "") || undefined } : {}),
     metadata: {
       provider: "baileys",
       remoteJid,
+      ...(historySync ? { historySync: true } : {}),
       voiceNote: Boolean(audio?.ptt),
       mediaMimeType: mediaContentType,
       pollOptions: Array.isArray(poll?.options) ? poll.options.map((option: any) => String(option.optionName || option.name || "")).filter(Boolean) : undefined,
-      messageTimestamp: Number(message.messageTimestamp || 0)
+      messageTimestamp: timestampSeconds
     }
   };
   const { ingestMessage } = await import("./ingestion");
-  await ingestMessage(inbound);
+  return ingestMessage(inbound);
+}
+
+async function syncWhatsAppHistory(currentSocket: WASocket, messages: any[]) {
+  if (!Array.isArray(messages) || !messages.length) return;
+  const conversationIds = new Set<string>();
+  for (let offset = 0; offset < messages.length; offset += 6) {
+    if (socket !== currentSocket) return;
+    const results = await Promise.allSettled(messages.slice(offset, offset + 6).map((message) => handleIncomingMessage(message, true)));
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value?.conversationId) conversationIds.add(result.value.conversationId);
+      else if (result.status === "rejected") console.warn("Historical WhatsApp message could not be synchronized", result.reason);
+    }
+  }
+  if (!conversationIds.size || socket !== currentSocket) return;
+  const conversations = await prisma.conversation.findMany({ where: { id: { in: [...conversationIds] } }, select: { id: true, assignedAgentId: true } });
+  const payload = { conversationIds: conversations.map((conversation) => conversation.id) };
+  io?.to("admins").emit("whatsapp:history-synced", payload);
+  for (const agentId of new Set(conversations.flatMap((conversation) => conversation.assignedAgentId ? [conversation.assignedAgentId] : []))) {
+    io?.to(`agent:${agentId}`).emit("whatsapp:history-synced", payload);
+  }
 }
 
 async function handleIncomingCall(currentSocket: WASocket, call: any) {
@@ -535,12 +574,18 @@ async function startSocket() {
     })().catch((error) => console.warn("WhatsApp connection status update failed", error));
   });
   current.ev.on("messages.upsert", ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const message of messages) void handleIncomingMessage(message).catch((error) => console.warn("Baileys inbound message could not be stored", error));
+    if (type === "notify") {
+      for (const message of messages) void handleIncomingMessage(message).catch((error) => console.warn("Baileys inbound message could not be stored", error));
+    } else if (type === "append") {
+      void syncWhatsAppHistory(current, messages).catch((error) => console.warn("WhatsApp appended history could not be synchronized", error));
+    }
   });
   current.ev.on("contacts.upsert", (contacts) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("WhatsApp contact sync failed", error)); });
   current.ev.on("contacts.update", (contacts) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("WhatsApp contact update failed", error)); });
-  current.ev.on("messaging-history.set", ({ contacts }) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("Historical WhatsApp contact sync failed", error)); });
+  current.ev.on("messaging-history.set", ({ contacts, messages }) => {
+    void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("Historical WhatsApp contact sync failed", error));
+    void syncWhatsAppHistory(current, messages).catch((error) => console.warn("Historical WhatsApp message sync failed", error));
+  });
   current.ev.on("messages.update", (updates) => {
     for (const update of updates) void persistBaileysReceipt(update).catch((error) => console.warn("Baileys delivery update could not be stored", error));
   });

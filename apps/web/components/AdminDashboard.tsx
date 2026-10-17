@@ -21,7 +21,7 @@ import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, 
 type AnyRecord = Record<string, any>;
 const channelLabel: Record<string, string> = { WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" };
 const canReceiveChannel = (agent: AnyRecord, channel: string) => channel === "WHATSAPP" ? agent.canReceiveWhatsApp !== false : channel === "MESSENGER" ? agent.canReceiveMessenger !== false : channel === "TELEGRAM" ? agent.canReceiveTelegram !== false : false;
-const deptLabel: Record<string, string> = { CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "مستخدم فرع", ADMINISTRATION: "الإدارة" };
+const deptLabel: Record<string, string> = { CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "خدمة العملاء", ADMINISTRATION: "الإدارة" };
 const presenceLabel: Record<string, string> = { ONLINE: "متاح", BUSY: "مشغول", BREAK: "استراحة", OFFLINE: "غير متصل" };
 const categoryLabel: Record<string, string> = { EASTERN: "حلويات شرقية", WESTERN: "حلويات غربية", CAKES: "تورتات", BAKERY: "مخبوزات", KAHK: "كحك وبسكويت", CHOCOLATE: "شوكولاتة", MOULID: "حلاوة المولد", OCCASIONS: "مناسبات", MIX_BONDOQ: "ميكس بندق" };
 const businessDayOptions = [["SUNDAY", "الأحد"], ["MONDAY", "الاثنين"], ["TUESDAY", "الثلاثاء"], ["WEDNESDAY", "الأربعاء"], ["THURSDAY", "الخميس"], ["FRIDAY", "الجمعة"], ["SATURDAY", "السبت"]] as const;
@@ -34,7 +34,6 @@ export default function AdminDashboard() {
   const [data, setData] = useState<AnyRecord | null>(null);
   const [conversations, setConversations] = useState<AnyRecord[]>([]);
   const [agents, setAgents] = useState<AnyRecord[]>([]);
-  const [branches, setBranches] = useState<AnyRecord[]>([]);
   const [selected, setSelected] = useState<AnyRecord | null>(null);
   const [detail, setDetail] = useState<AnyRecord | null>(null);
   const [whisper, setWhisper] = useState("");
@@ -65,6 +64,7 @@ export default function AdminDashboard() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const detailRequest = useRef(0);
   const detailLoadingIdRef = useRef("");
+  const activeConversationRef = useRef("");
   const loadingMessagesRef = useRef(new Map<string, AnyRecord[]>());
   const loadRequest = useRef(0);
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -86,8 +86,8 @@ export default function AdminDashboard() {
   async function load(profile = user) {
     const request = ++loadRequest.current;
     try {
-      const [stats, chats, staff, branchList] = await Promise.all([allowed(profile, "canViewReports") ? api("/api/admin/dashboard") : Promise.resolve(null), api("/api/conversations"), api("/api/admin/agents"), api("/api/branches")]);
-      if (request === loadRequest.current) { setData(stats); setConversations(chats.map((chat: AnyRecord) => ({ ...chat, customer: withDisplayName(chat.customer) }))); setAgents(staff); setBranches(branchList); }
+      const [stats, chats, staff] = await Promise.all([allowed(profile, "canViewReports") ? api("/api/admin/dashboard") : Promise.resolve(null), api("/api/conversations"), api("/api/admin/agents")]);
+      if (request === loadRequest.current) { setData(stats); setConversations(chats.map((chat: AnyRecord) => ({ ...chat, customer: withDisplayName(chat.customer) }))); setAgents(staff); }
     } catch (e) { setError(e instanceof Error ? e.message : "تعذر تحميل لوحة التحكم"); }
   }
   useEffect(() => {
@@ -135,9 +135,17 @@ export default function AdminDashboard() {
           setIncomingNotifications((old) => [{ id: event.note.id, isPrivateNote: true, conversationId: event.conversationId, customerName: event.customerName || "محادثة", channel: event.channel, preview: `رسالة سرية من ${event.note.author?.name || "زميل"} إلى ${event.note.recipient?.name || "زميل"}: ${event.note.text}`, createdAt: event.note.createdAt }, ...old].slice(0, 8));
           setShowNotifications(true);
         });
-       connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
-        connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
-        for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached", "team:updated", "handoff:updated"]) connection.on(event, () => load(profile));
+         connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
+         connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
+         for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached", "team:updated", "handoff:updated"]) connection.on(event, () => load(profile));
+         connection.on("whatsapp:history-synced", ({ conversationIds = [] }) => {
+           void load(profile);
+           const activeId = activeConversationRef.current;
+           if (!activeId || !conversationIds.includes(activeId)) return;
+           void api(`/api/conversations/${activeId}`).then((conversation) => {
+             if (activeConversationRef.current === activeId) setDetail({ ...conversation, customer: withDisplayName(conversation.customer) });
+           }).catch(() => {});
+         });
        connection.on("conversation:deleted", (event) => {
          setConversations((items) => items.filter((item) => item.id !== event.conversationId));
          if (detailLoadingIdRef.current === event.conversationId) { ++detailRequest.current; detailLoadingIdRef.current = ""; }
@@ -163,7 +171,7 @@ export default function AdminDashboard() {
     if (selected && selected.id !== item.id) socket?.emit("conversation:leave", selected.id);
     const request = ++detailRequest.current;
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== item.id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
-     detailLoadingIdRef.current = item.id; stickToBottom.current = true; setShowJumpToBottom(false); setShowInternalNotes(false); setInternalNote(""); setSelected(item); setDetail(null); setError(""); socket?.emit("conversation:join", item.id);
+     activeConversationRef.current = item.id; detailLoadingIdRef.current = item.id; stickToBottom.current = true; setShowJumpToBottom(false); setShowInternalNotes(false); setInternalNote(""); setSelected(item); setDetail(null); setError(""); socket?.emit("conversation:join", item.id);
     try {
       const conversation = await api(`/api/conversations/${item.id}`);
       if (request === detailRequest.current) {
@@ -175,6 +183,7 @@ export default function AdminDashboard() {
   }
   function closeConversationPreview() {
     ++detailRequest.current;
+    activeConversationRef.current = "";
     if (selected) socket?.emit("conversation:leave", selected.id);
     if (selected) loadingMessagesRef.current.delete(selected.id);
     detailLoadingIdRef.current = "";
@@ -234,10 +243,10 @@ export default function AdminDashboard() {
   async function reassign(agentId: string) {
     if (!selected) return;
     const conversationId = selected.id;
-    const previousAssignment = { assignedAgentId: detail?.assignedAgentId || null, assignedAgent: detail?.assignedAgent || null, branchId: detail?.branchId || null };
+    const previousAssignment = { assignedAgentId: detail?.assignedAgentId || null, assignedAgent: detail?.assignedAgent || null };
     const nextAgent = agents.find((agent) => agent.id === agentId) || null;
     const nextStatus = agentId ? "OPEN" : "QUEUED";
-    setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, assignedAgentId: agentId || null, assignedAgent: nextAgent, branchId: nextAgent?.branchId || null, status: nextStatus } : old);
+    setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, assignedAgentId: agentId || null, assignedAgent: nextAgent, status: nextStatus } : old);
     try {
       const updated = await api(`/api/conversations/${conversationId}/assignment`, { method: "PATCH", body: JSON.stringify({ agentId: agentId || null }) });
       setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, ...updated, assignedAgent: updated.assignedAgent || (agentId ? nextAgent : null) } : old);
@@ -279,16 +288,6 @@ export default function AdminDashboard() {
       setSuccessMessage("حُذف العميل ومحادثاته وطلباته من النظام.");
       void load();
     } catch (e) { setError(e instanceof Error ? e.message : "تعذر حذف العميل"); }
-  }
-  async function routeToBranch(branchId: string) {
-    if (!selected || !branchId) return;
-    const conversationId = selected.id;
-    try {
-      const updated = await api(`/api/conversations/${conversationId}/assignment`, { method: "PATCH", body: JSON.stringify({ agentId: null, branchId }) });
-      setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, ...updated, assignedAgent: updated.assignedAgent || null } : old);
-      setSuccessMessage(`أُرسلت المحادثة إلى طابور ${branches.find((branch) => branch.id === branchId)?.name || "الفرع"}.`);
-      await load();
-    } catch (e) { setError(e instanceof Error ? e.message : "تعذر توجيه المحادثة إلى الفرع"); }
   }
   async function setAdminConversationStatus(status: "OPEN" | "RESOLVED" | "CLOSED") {
     if (!selected) return;
@@ -380,10 +379,10 @@ export default function AdminDashboard() {
         {!!detail.privateNotes?.length && <section className="border-b border-violet-100 bg-violet-50/60 px-5 py-3"><h4 className="mb-2 flex items-center gap-2 text-[11px] font-extrabold text-violet-950"><LockKeyhole size={14} /> الرسائل السرية بين الموظفين <span className="rounded-full bg-white px-2 py-0.5 text-[9px]">{detail.privateNotes.length}</span></h4><div className="soft-scroll max-h-36 space-y-2 overflow-y-auto">{detail.privateNotes.map((note: AnyRecord) => <article key={note.id} className="rounded-lg border border-violet-100 bg-white px-3 py-2"><p className="whitespace-pre-wrap text-xs leading-5 text-stone-700">{note.text}</p><p className="mt-1 flex items-center gap-1 text-[9px] text-violet-700"><span>{note.author?.name || "موظف"} → {note.recipient?.name || "زميل"}</span><span className="mr-auto text-stone-400">{timeAgo(note.createdAt)}</span></p></article>)}</div></section>}
           <div className="flex flex-wrap gap-2 border-b border-stone-100 bg-white px-5 py-2"><button type="button" onClick={() => void setAdminConversationStatus("RESOLVED")} className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-700"><CheckCircle2 size={14} /> حل المحادثة</button><button type="button" onClick={() => void setAdminConversationStatus(detail.status === "CLOSED" || detail.status === "RESOLVED" ? "OPEN" : "CLOSED")} className="flex items-center gap-1.5 rounded-lg bg-stone-100 px-3 py-2 text-[10px] font-bold text-stone-600">{detail.status === "CLOSED" || detail.status === "RESOLVED" ? <MessageCircle size={14} /> : <Archive size={14} />}{detail.status === "CLOSED" || detail.status === "RESOLVED" ? "إعادة فتح" : "إغلاق"}</button>{detail.channel === "WHATSAPP" && adminCallTarget && !detail.customer?.isBlocked && <button type="button" disabled={Boolean(callConversation)} onClick={() => setCallConversation(detail)} className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={14} />{callConversation ? "أنه المكالمة الحالية أولًا" : "اتصال WhatsApp"}</button>}<span className="mr-auto self-center text-[10px] text-stone-400">الحالة: {detail.status}</span></div>
          {detail.serviceTag && <div className="border-b border-amber-100 bg-amber-50/60 px-5 py-2 text-xs font-bold text-amber-900">الخدمة المطلوبة: {detail.serviceTag}</div>}
-          {allowed(user, "canTransferConversations") && <div className="border-b border-stone-100 bg-white px-5 py-2"><details><summary className="cursor-pointer text-xs font-bold text-stone-600">إدارة الإسناد يدويًا</summary><div className="mt-3 flex flex-wrap items-center gap-2"><label className="text-[10px] font-semibold text-stone-500">إسناد لموظف</label><select value={detail.assignedAgentId || ""} onChange={(event) => void reassign(event.target.value)} className="h-9 min-w-48 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إلغاء الإسناد وإعادة التوزيع</option>{agents.filter((agent) => agent.isActive && agent.presence === "ONLINE" && canReceiveChannel(agent, detail.channel)).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}{agent.branch?.name ? ` · ${agent.branch.name}` : ""}</option>)}</select><label className="text-[10px] font-semibold text-stone-500">نقل إلى فرع</label><select value={detail.branchId || ""} onChange={(event) => void routeToBranch(event.target.value)} className="h-9 min-w-40 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">اختر الفرع</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select><span className="text-[10px] text-stone-400">للمراقبة الحية لا يحتاج الأدمن إلى استلام المحادثة.</span></div></details></div>}
+          {allowed(user, "canTransferConversations") && <div className="border-b border-stone-100 bg-white px-5 py-2"><details><summary className="cursor-pointer text-xs font-bold text-stone-600">إدارة الإسناد يدويًا</summary><div className="mt-3 flex flex-wrap items-center gap-2"><label className="text-[10px] font-semibold text-stone-500">إسناد لموظف</label><select value={detail.assignedAgentId || ""} onChange={(event) => void reassign(event.target.value)} className="h-9 min-w-48 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إلغاء الإسناد وإعادة التوزيع</option>{agents.filter((agent) => agent.isActive && agent.presence === "ONLINE" && canReceiveChannel(agent, detail.channel)).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select><span className="text-[10px] text-stone-400">للمراقبة الحية لا يحتاج الأدمن إلى استلام المحادثة.</span></div></details></div>}
          {allowed(user, "canTransferConversations") && detail.assignedAgentId && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-100 bg-amber-50/50 px-5 py-2"><span className="text-[10px] text-stone-600">سحب المحادثة يوقف إسنادها للموظف الحالي ويعيدها للطابور.</span><button type="button" onClick={() => void removeAssignmentFromAgent()} className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-[10px] font-bold text-amber-900 hover:bg-amber-100">سحبها من الموظف</button></div>}
         {user?.role === "ADMIN" && <div className="flex flex-wrap gap-2 border-b border-stone-100 bg-white px-5 py-2"><button type="button" onClick={() => void deleteConversationPermanently()} className="rounded-lg border border-red-200 px-3 py-2 text-[10px] font-bold text-red-700 hover:bg-red-50">حذف المحادثة نهائيًا</button><button type="button" onClick={() => void deleteCustomerPermanently()} className="rounded-lg border border-red-200 px-3 py-2 text-[10px] font-bold text-red-700 hover:bg-red-50">حذف العميل وكل سجلاته</button></div>}
-        <div className="flex flex-wrap items-center gap-3 border-b border-stone-100 bg-[#fffdf7] px-5 py-3"><span className="text-xs font-bold text-stone-600">تحويل / استلام</span>{allowed(user, "canTransferConversations") && <><select value={detail.assignedAgentId || ""} onChange={(e) => reassign(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إبقاء في الطابور</option>{agents.filter((a) => a.isActive && canReceiveChannel(a, detail.channel)).map((a) => <option key={a.id} value={a.id}>{a.name}{a.branch?.name ? ` · ${a.branch.name}` : ""} · {presenceLabel[a.presence]}</option>)}</select><select value={detail.branchId || ""} onChange={(e) => void routeToBranch(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">توجيه إلى طابور فرع</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></>}<span className="mr-auto text-xs text-stone-400">{detail.slaBreachedAt ? "تجاوزت مهلة الرد" : "مراقبة مباشرة"}</span></div>
+        <div className="flex flex-wrap items-center gap-3 border-b border-stone-100 bg-[#fffdf7] px-5 py-3"><span className="text-xs font-bold text-stone-600">تحويل / استلام</span>{allowed(user, "canTransferConversations") && <select value={detail.assignedAgentId || ""} onChange={(e) => reassign(e.target.value)} className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-xs outline-none"><option value="">إبقاء في الطابور</option>{agents.filter((a) => a.isActive && canReceiveChannel(a, detail.channel)).map((a) => <option key={a.id} value={a.id}>{a.name} · {presenceLabel[a.presence]}</option>)}</select>}<span className="mr-auto text-xs text-stone-400">{detail.slaBreachedAt ? "تجاوزت مهلة الرد" : "مراقبة مباشرة"}</span></div>
        <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="soft-scroll relative flex-1 space-y-3 overflow-y-auto bg-[#fffdf7] px-5 py-4">{(detail.messages || []).map((message: AnyRecord) => <div key={message.id} className={`flex ${message.direction === "OUTBOUND" ? "justify-start" : "justify-end"}`}><div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-7 ${message.direction === "OUTBOUND" ? "rounded-tr-sm bg-white shadow-sm" : "rounded-tl-sm bg-[#fce8c5]"}`}>{["IMAGE", "AUDIO", "FILE"].includes(message.kind) && (message.mediaAssetId || message.direction === "INBOUND" ? <AdminProtectedMedia conversationId={detail.id} message={message} /> : message.kind === "IMAGE" && message.mediaUrl ? <img src={message.mediaUrl} alt="صورة مرفقة" className="mb-2 max-h-56 rounded-xl object-cover" /> : message.mediaUrl ? <a href={message.mediaUrl} target="_blank" rel="noreferrer" className="mb-2 block text-xs font-bold text-blue-700 underline">فتح المرفق</a> : null)}{message.text || (message.kind === "LOCATION" ? `موقع: ${message.latitude}, ${message.longitude}` : message.kind === "AUDIO" ? "رسالة صوتية" : "مرفق")}{message.transcription && <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs leading-6 text-stone-600">تفريغ صوتي: {message.transcription}</p>}{message.direction === "OUTBOUND" && <p className="mt-1 text-[10px] text-stone-400">{message.author?.name || "فريق بندق"} · {timeAgo(message.createdAt)}</p>}</div></div>)}<div ref={messageEndRef} />{showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}</div>
        {!!detail.messages?.some((message: AnyRecord) => message.kind === "VIDEO") && <details className="border-t border-stone-100 bg-white px-4 py-2"><summary className="cursor-pointer text-[10px] font-bold text-stone-600">مقاطع الفيديو ({detail.messages.filter((message: AnyRecord) => message.kind === "VIDEO").length})</summary><div className="mt-2 grid gap-3 sm:grid-cols-2">{detail.messages.filter((message: AnyRecord) => message.kind === "VIDEO").map((message: AnyRecord) => <div key={message.id} className="rounded-xl bg-stone-50 p-2"><AdminProtectedMedia conversationId={detail.id} message={message} /><p className="text-[9px] text-stone-400">{message.direction === "OUTBOUND" ? "مرسل" : "وارد"} · {timeAgo(message.createdAt)}</p></div>)}</div></details>}
        <div className="space-y-2 border-t border-stone-100 bg-white p-4"><form onSubmit={sendAdminReply} className="flex gap-2"><input value={adminReply} onChange={(e) => setAdminReply(e.target.value)} placeholder="رد مباشر للعميل بصفتك مديرًا..." className="min-w-0 flex-1 rounded-xl border border-stone-200 px-3 text-sm outline-none focus:border-red-200" /><button disabled={!adminReply.trim()} className="grid h-10 w-11 place-items-center rounded-xl bg-[#d32f2f] text-white hover:bg-[#b71c1c] disabled:opacity-40" title="إرسال رد مباشر"><Send size={16} /></button></form><form onSubmit={sendWhisper} className="flex gap-2"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#fff5d8] text-[#ae811e]"><Headset size={17} /></div><input value={whisper} onChange={(e) => setWhisper(e.target.value)} placeholder="توجيه سري للموظف... لا يظهر للعميل" className="min-w-0 flex-1 rounded-xl border border-[#efdda9] bg-[#fffaf0] px-3 text-sm outline-none focus:border-[#d6aa43]" /><button className="grid h-10 w-11 place-items-center rounded-xl bg-[#d5a52e] text-white hover:bg-[#be8d18]" title="إرسال همسة"><Send size={16} /></button></form><p className="pr-12 text-[10px] text-stone-400">الرد المباشر يظهر للعميل، والهمسة للموظف فقط.</p></div>

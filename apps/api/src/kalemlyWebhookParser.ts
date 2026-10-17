@@ -1,4 +1,4 @@
-import { Channel, Department, MessageKind } from "@prisma/client";
+import { Channel, Department, MessageDirection, MessageKind } from "@prisma/client";
 import { getServiceChoice } from "./autoReplies";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 
@@ -18,7 +18,9 @@ export type NormalizedInbound = {
   latitude?: number;
   longitude?: number;
   externalId: string;
-  direction?: "INBOUND" | "OUTBOUND";
+  direction?: MessageDirection;
+  isHistorySync?: boolean;
+  messageTimestamp?: Date;
   metadata?: Record<string, unknown>;
   routingDepartment?: Department;
   isComplaint?: boolean;

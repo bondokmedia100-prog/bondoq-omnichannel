@@ -5,7 +5,7 @@ import { Check, Clock3, KeyRound, X } from "lucide-react";
 import { api } from "@/lib/api";
 
 type ResetRequest = { id: string; status: "PENDING" | "APPROVED"; requestedAt: string; expiresAt: string | null; user: { id: string; name: string; email: string; username: string; role: string; isActive: boolean } };
-const roleNames: Record<string, string> = { ADMIN: "مدير النظام", SUPERVISOR: "قائد فريق", AGENT: "موظف", BRANCH_USER: "مستخدم فرع" };
+const roleNames: Record<string, string> = { ADMIN: "مدير النظام", SUPERVISOR: "قائد فريق", AGENT: "موظف", BRANCH_USER: "موظف" };
 
 export default function AdminPasswordResetRequestsModal({ onClose }: { onClose: () => void }) {
   const [requests, setRequests] = useState<ResetRequest[]>([]);
