@@ -2387,7 +2387,7 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
   };
   try {
     const user = await prisma.user.update({ where: { id: previous.id }, data, select: staffSelect });
-    if (parsed.data.isActive === false || revokeSessions && (previous.role === Role.AGENT || previous.role === Role.BRANCH_USER) || previous.role !== role || previous.branchId !== user.branchId || previous.department !== user.department) {
+    if (parsed.data.isActive === false || revokeSessions && (previous.role === Role.AGENT || previous.role === Role.BRANCH_USER) || previous.role !== role || previous.branchId !== null && role !== Role.BRANCH_USER || previous.department !== user.department) {
       await prisma.agentSession.updateMany({ where: { userId: user.id, endedAt: null }, data: { endedAt: new Date(), endState: Presence.OFFLINE } });
       await releaseAgentConversations(user.id);
     }
