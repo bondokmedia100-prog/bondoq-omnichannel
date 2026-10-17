@@ -42,8 +42,18 @@ export default function AgentWorkspace() {
   const [messageFilter, setMessageFilter] = useState("ALL");
   const [chatLoadError, setChatLoadError] = useState("");
   const [search, setSearch] = useState("");
+  const [phoneSearchResult, setPhoneSearchResult] = useState<AnyRecord | null>(null);
+  const [phoneSearchError, setPhoneSearchError] = useState("");
+  const [searchingPhone, setSearchingPhone] = useState(false);
+  const phoneSearchRequestRef = useRef(0);
+  const [startingPhoneChat, setStartingPhoneChat] = useState(false);
   const [chatFontSize, setChatFontSize] = useState(18);
-  const [text, setText] = useState("");
+  const [text, setTextState] = useState("");
+  const replyDraftRevisionRef = useRef(0);
+  function setText(next: string | ((current: string) => string)) {
+    replyDraftRevisionRef.current += 1;
+    setTextState(next);
+  }
   const [showCanned, setShowCanned] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
   const [showContactCard, setShowContactCard] = useState(false);
@@ -90,6 +100,7 @@ export default function AgentWorkspace() {
   const [imageEditor, setImageEditor] = useState<{ file: File; url: string } | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [failedRecording, setFailedRecording] = useState<{ file: File; previewUrl: string; conversationId: string } | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [sending, setSending] = useState(false);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -223,6 +234,42 @@ export default function AgentWorkspace() {
       await openChat(result.conversationId);
       void loadChats();
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر فتح محادثة WhatsApp لهذا العميل"); }
+  }
+  async function searchPhoneHistory() {
+    if (searchingPhone) return;
+    const query = search.trim();
+    if (search.replace(/[^\d٠-٩۰-۹]/g, "").length < 7) {
+      setPhoneSearchResult(null);
+      setPhoneSearchError("اكتب رقم الهاتف كاملًا مع رمز الدولة، ثم ابحث في السجل.");
+      return;
+    }
+    const request = ++phoneSearchRequestRef.current;
+    setSearchingPhone(true);
+    setPhoneSearchError("");
+    setPhoneSearchResult(null);
+    try {
+      const result = await api<AnyRecord>(`/api/contacts/phone-search?phone=${encodeURIComponent(query)}`);
+      if (request === phoneSearchRequestRef.current) setPhoneSearchResult(result);
+    } catch (error) {
+      if (request === phoneSearchRequestRef.current) {
+        setPhoneSearchResult(null);
+        setPhoneSearchError(error instanceof Error ? error.message : "تعذر البحث عن هذا الرقم");
+      }
+    } finally { if (request === phoneSearchRequestRef.current) setSearchingPhone(false); }
+  }
+  async function startChatFromPhone() {
+    if (!phoneSearchResult?.phone || startingPhoneChat || user?.canReceiveWhatsApp === false) return;
+    setStartingPhoneChat(true);
+    try {
+      const result = await api<{ conversationId: string; created: boolean; readOnly?: boolean }>("/api/contacts/whatsapp-conversation", {
+        method: "POST", body: JSON.stringify({ phone: phoneSearchResult.phone })
+      });
+      setPhoneSearchResult(null);
+      setPhoneSearchError("");
+      await openChat(result.conversationId);
+      void loadChats();
+    } catch (error) { setPhoneSearchError(error instanceof Error ? error.message : "تعذر بدء محادثة WhatsApp لهذا الرقم"); }
+    finally { setStartingPhoneChat(false); }
   }
   async function sendContactCard(contact: AnyRecord) {
     if (!activeId || !contact.phone || sendingContactId) return;
@@ -653,6 +700,13 @@ export default function AgentWorkspace() {
   }, [showContacts, showContactCard, contactQuery]);
 
   useEffect(() => {
+    phoneSearchRequestRef.current += 1;
+    setSearchingPhone(false);
+    setPhoneSearchResult(null);
+    setPhoneSearchError("");
+  }, [search]);
+
+  useEffect(() => {
     const saved = Number(localStorage.getItem("bondoq_chat_font_size"));
     if (Number.isFinite(saved) && saved >= 14 && saved <= 28) setChatFontSize(saved);
   }, []);
@@ -697,6 +751,11 @@ export default function AgentWorkspace() {
     const timer = window.setInterval(() => setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000)), 250);
     return () => window.clearInterval(timer);
   }, [recording]);
+
+  useEffect(() => {
+    const previewUrl = failedRecording?.previewUrl;
+    return () => { if (previewUrl) URL.revokeObjectURL(previewUrl); };
+  }, [failedRecording?.previewUrl]);
 
   useEffect(() => () => {
     const recorder = recorderRef.current;
@@ -756,27 +815,28 @@ export default function AgentWorkspace() {
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث الحالة"); }
   }
-  async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; previewUrl?: string; latitude?: number; longitude?: number; quotedMessageId?: string }, conversationId = activeId, alreadyLocked = false) {
-    if (!conversationId) { if (alreadyLocked) { sendingRef.current = false; setSending(false); } return; }
-    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } return; }
-    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل الرد."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } return; }
-    if (!alreadyLocked && sendingRef.current) return;
+  async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; previewUrl?: string; latitude?: number; longitude?: number; quotedMessageId?: string; draftRevision?: number }, conversationId = activeId, alreadyLocked = false): Promise<boolean> {
+    if (!conversationId) { if (alreadyLocked) { sendingRef.current = false; setSending(false); } return false; }
+    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } return false; }
+    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل الرد."); if (alreadyLocked) { sendingRef.current = false; setSending(false); } return false; }
+    if (!alreadyLocked && sendingRef.current) return false;
     if (!alreadyLocked) { sendingRef.current = true; setSending(true); }
     const localId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const pendingMessage = { id: localId, conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind: payload.kind || "TEXT", text: payload.text, mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId, localPreviewUrl: payload.previewUrl, deliveryStatus: "PENDING" };
     setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old);
-    setText((current) => current === payload.text ? "" : current);
     setShowCanned(false); setNotice("");
     try {
       const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId }) });
       setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => item.id !== localId), message) } : old);
       if (payload.quotedMessageId) setReplyingTo((old) => old?.id === payload.quotedMessageId ? null : old);
       if (message.deliveryStatus === "FAILED") setNotice("تعذر إضافة الرسالة إلى قائمة الإرسال. تحقق من اتصال WhatsApp.");
+      else if (payload.text !== undefined && payload.draftRevision === replyDraftRevisionRef.current) setText((current) => current.trim() === payload.text ? "" : current);
       void loadChats();
+      return message.deliveryStatus !== "FAILED";
     } catch (error) {
       setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== localId) } : old);
-      setText((current) => current || payload.text || "");
       setNotice(error instanceof Error ? error.message : "تعذر إرسال الرد. تحقق من إعداد ربط القناة.");
+      return false;
     } finally {
       sendingRef.current = false; setSending(false);
       if (payload.previewUrl) URL.revokeObjectURL(payload.previewUrl);
@@ -785,7 +845,7 @@ export default function AgentWorkspace() {
   async function submitReply() {
     const message = text.trim();
     if (!message) return;
-    await deliverReply({ text: message, quotedMessageId: replyingTo?.id });
+    await deliverReply({ text: message, quotedMessageId: replyingTo?.id, draftRevision: replyDraftRevisionRef.current });
   }
   function sendReply(event: FormEvent) { event.preventDefault(); void submitReply(); }
   function shareLocation() {
@@ -807,14 +867,26 @@ export default function AgentWorkspace() {
       setNotice(error.code === error.PERMISSION_DENIED ? "لم تسمح بمشاركة الموقع." : error.code === error.POSITION_UNAVAILABLE ? "تعذر تحديد الموقع من الجهاز." : "انتهت مهلة تحديد الموقع. حاول مجددًا.");
     }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
   }
-  async function uploadAndSend(file: File) {
-    if (!activeId) return;
-    if (detail?.readOnly) { setNotice("هذه المحادثة للقراءة فقط."); return; }
-    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); return; }
-    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل إرسال الملف."); return; }
-    if (sendingRef.current) return;
-    if (file.size > 12 * 1024 * 1024) { setNotice("حجم الملف الأقصى 12 ميجابايت."); return; }
-    const conversationId = activeId;
+  function keepFailedRecording(file: File, conversationId: string) {
+    if (file.size) setFailedRecording({ file, previewUrl: URL.createObjectURL(file), conversationId });
+  }
+  function retryFailedRecording() {
+    const failed = failedRecording;
+    if (!failed || failed.conversationId !== activeId) return;
+    setFailedRecording(null);
+    void uploadAndSend(failed.file, true, failed.conversationId);
+  }
+  async function uploadAndSend(file: File, preserveRecording = false, targetConversationId = activeId) {
+    const conversationId = targetConversationId;
+    const draftRevision = replyDraftRevisionRef.current;
+    const keepRecording = () => { if (preserveRecording) keepFailedRecording(file, conversationId); };
+    if (!conversationId) { keepRecording(); return; }
+    if (detail?.readOnly) { setNotice("هذه المحادثة للقراءة فقط."); keepRecording(); return; }
+    if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); keepRecording(); return; }
+    if (!metaWindowOpen) { setNotice("انتهت نافذة رد Messenger. انتظر رسالة جديدة من العميل قبل إرسال الملف."); keepRecording(); return; }
+    if (sendingRef.current) { setNotice("انتظر انتهاء الإرسال الحالي قبل إرسال التسجيل."); keepRecording(); return; }
+    if (!file.size) { setNotice("التسجيل فارغ. سجّل رسالة صوتية أطول ثم أرسلها."); return; }
+    if (file.size > 12 * 1024 * 1024) { setNotice("حجم الملف الأقصى 12 ميجابايت."); keepRecording(); return; }
      const extensionType: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", webm: file.type.startsWith("audio/") ? "audio/webm" : "application/octet-stream", aac: "audio/aac", mp4: "video/mp4", "3gp": "video/3gpp", mov: "video/quicktime", pdf: "application/pdf", txt: "text/plain", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
     const extension = file.name.split(".").pop()?.toLowerCase() || "";
     const contentType = (file.type || extensionType[extension] || "").split(";")[0].toLowerCase();
@@ -826,10 +898,15 @@ export default function AgentWorkspace() {
       const uploaded = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(uploaded.error || `تعذر رفع الملف (${response.status})`);
       setNotice("");
-      await deliverReply({ text: text.trim() || undefined, kind, mediaAssetId: uploaded.id, previewUrl }, conversationId, true);
+      const sent = await deliverReply({ text: text.trim() || undefined, kind, mediaAssetId: uploaded.id, previewUrl, draftRevision }, conversationId, true);
+      if (preserveRecording) {
+        if (sent) setFailedRecording(null);
+        else keepRecording();
+      }
     } catch (error) {
       sendingRef.current = false; setSending(false);
       if (previewUrl) URL.revokeObjectURL(previewUrl);
+      keepRecording();
       setNotice(error instanceof Error ? error.message : "تعذر رفع الملف أو إرساله");
     }
   }
@@ -857,6 +934,7 @@ export default function AgentWorkspace() {
   }
    async function startRecording() {
       if (recorderRef.current || !activeId || sendingRef.current) return;
+      if (failedRecording?.conversationId === activeId) { setNotice("أعد إرسال التسجيل المحفوظ أو أزله قبل بدء تسجيل جديد."); return; }
       if (detail?.customer?.isBlocked) { setNotice("هذا العميل محظور داخل النظام. ألغِ الحظر قبل إرسال أي رسالة."); return; }
      try {
        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -870,7 +948,7 @@ export default function AgentWorkspace() {
          if (recordingCancelledRef.current) { recordingCancelledRef.current = false; return; }
          const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
          const extension = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
-         void uploadAndSend(new File([blob], `voice-note-${Date.now()}.${extension}`, { type: blob.type }));
+          void uploadAndSend(new File([blob], `voice-note-${Date.now()}.${extension}`, { type: blob.type }), true);
        };
        recordingCancelledRef.current = false; recordingStartedAtRef.current = Date.now(); recorderRef.current = recorder; recorder.start(); setRecording(true); setRecordingSeconds(0); setNotice("التسجيل جارٍ. أرسل التسجيل أو ألغِه عند الانتهاء.");
      } catch { setNotice("تعذر بدء التسجيل. تحقق من إذن استخدام الميكروفون في المتصفح."); }
@@ -996,7 +1074,14 @@ export default function AgentWorkspace() {
 
     <section data-chat-open={Boolean(activeId)} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
        <aside className="workspace-list panel flex min-h-0 flex-col overflow-hidden">
-           <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="بحث عن عميل..." className="w-full bg-transparent text-xs outline-none" /></label>
+            <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="بحث عن عميل..." className="w-full bg-transparent text-xs outline-none" /></label>
+              {search.replace(/[^\d٠-٩۰-۹]/g, "").length >= 7 && <button type="button" onClick={() => void searchPhoneHistory()} disabled={searchingPhone} className="mt-2 w-full rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-800 disabled:opacity-50">{searchingPhone ? "جارٍ البحث في سجل WhatsApp..." : "بحث شامل برقم الهاتف"}</button>}
+              {phoneSearchError && <p role="alert" className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-[10px] leading-5 text-red-700">{phoneSearchError}</p>}
+              {phoneSearchResult && <div className="mt-2 rounded-xl border border-emerald-100 bg-white p-2.5">
+                <div className="mb-2 flex items-center justify-between gap-2"><span className="truncate text-[10px] font-extrabold">{phoneSearchResult.customer ? customerDisplayName(phoneSearchResult.customer) : `+${phoneSearchResult.phone}`}</span><span className="shrink-0 text-[9px] text-stone-400">{phoneSearchResult.conversations.length ? `${phoneSearchResult.conversations.length} محادثة` : "لا يوجد سجل سابق"}</span></div>
+                <div className="soft-scroll max-h-32 space-y-1 overflow-y-auto">{phoneSearchResult.conversations.map((conversation: AnyRecord) => <button key={conversation.id} type="button" onClick={() => { setPhoneSearchResult(null); void openChat(conversation.id); }} className="flex w-full items-center justify-between gap-2 rounded-lg bg-stone-50 px-2.5 py-2 text-right hover:bg-emerald-50"><span className="min-w-0"><span className="block truncate text-[10px] font-bold">{customerDisplayName(conversation.customer)}</span><span className="mt-0.5 block truncate text-[9px] text-stone-400">{conversation.messages?.[0]?.text || "مرفق أو رسالة"}{conversation.readOnly ? " · قراءة فقط" : ""}</span></span><span className="shrink-0 text-[9px] text-stone-400">{ago(conversation.lastMessageAt)}</span></button>)}</div>
+                <button type="button" onClick={() => void startChatFromPhone()} disabled={startingPhoneChat || user?.canReceiveWhatsApp === false || Boolean(phoneSearchResult.customer?.isBlocked)} className="mt-2 w-full rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-300">{startingPhoneChat ? "جارٍ فتح WhatsApp..." : phoneSearchResult.customer?.isBlocked ? "العميل محظور" : "فتح أو بدء محادثة WhatsApp"}</button>
+              </div>}
             <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
               <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
           </div>
@@ -1035,7 +1120,8 @@ export default function AgentWorkspace() {
               {detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={privateNoteRecipients} recipientId={privateNoteRecipientId} onRecipientChange={setPrivateNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
             {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
-              {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
+               {recording && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2"><span className="flex items-center gap-2 text-xs font-bold text-red-700"><span className="h-2 w-2 animate-pulse rounded-full bg-red-600"/>تسجيل جارٍ · {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}</span><div className="flex gap-2"><button type="button" onClick={cancelRecording} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" onClick={sendRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">إرسال التسجيل</button></div></div>}
+              {failedRecording?.conversationId === detail.id && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2"><span className="text-[10px] font-bold text-amber-900">لم يُرسل التسجيل بعد؛ احتفظنا به لتتمكن من المحاولة مجددًا.</span><audio controls src={failedRecording.previewUrl} className="h-8 max-w-full" /><button type="button" disabled={sending} onClick={retryFailedRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white disabled:opacity-50">إعادة الإرسال</button><button type="button" onClick={() => setFailedRecording(null)} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إزالة</button></div>}
               {replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
               {detail.channel !== "MESSENGER" && <div className="mb-2 flex justify-end"><button type="button" disabled={!metaWindowOpen || sendingPoll} onClick={() => setShowPollComposer(true)} className="flex items-center gap-1 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[10px] font-bold text-sky-700 disabled:opacity-40"><ListChecks size={14} /> إنشاء استطلاع</button></div>}
                <div className="mb-2 flex flex-wrap justify-start gap-2"><button type="button" onClick={() => setShowQuickReplyManager(true)} className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100">إدارة ردودي السريعة</button>{detail.channel === "WHATSAPP" && <button type="button" onClick={() => { setContactQuery(""); setContactResults([]); setShowContactCard(true); }} className="flex items-center gap-1 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[10px] font-bold text-sky-800 hover:bg-sky-100"><BookUser size={13} /> إرسال جهة اتصال</button>}</div>

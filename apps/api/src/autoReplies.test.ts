@@ -89,6 +89,12 @@ test("starts the bot on the first inbound even if the conversation was created b
   assert.equal(shouldStartBotFlow(null, false, new Date("2026-10-16T00:00:00.000Z")), true);
 });
 
+test("does not start a bot flow for a manually initiated conversation", () => {
+  const starting = shouldStartBotFlow(null, false, new Date("2026-10-16T00:00:00.000Z"), true);
+  assert.equal(starting, false);
+  assert.deepEqual(decideBotAction({ enabled: true, state: "ASSIGNED_TO_AGENT", starting, text: "مرحبا", settings: DEFAULT_CHATBOT_SETTINGS }), { action: "NONE", nextState: "ASSIGNED_TO_AGENT" });
+});
+
 test("restarts the bot after an hour since the last customer message, including after handoff", () => {
   const lastInboundAt = new Date("2026-10-16T00:00:00.000Z");
   const beforeTimeout = new Date(lastInboundAt.getTime() + BOT_MENU_IDLE_TIMEOUT_MS - 1);

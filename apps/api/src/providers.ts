@@ -2,7 +2,7 @@ import { Channel, MessageKind } from "@prisma/client";
 import { enqueueKalemlyMessage, getKalemlySettings } from "./KalemlyWaService";
 import { AUTO_REPLY_MENU_TEXT } from "./autoReplies";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
-import { deleteBaileysWhatsAppMessage, editBaileysWhatsAppMessage, getWhatsAppMode, reactToBaileysWhatsAppMessage } from "./BaileysWhatsAppService";
+import { deleteBaileysWhatsAppMessage, editBaileysWhatsAppMessage, getWhatsAppMode, reactToBaileysWhatsAppMessage, transcodeVoiceToOgg } from "./BaileysWhatsAppService";
 import { routeChoice } from "./kalemlyWebhookParser";
 import type { NormalizedInbound } from "./kalemlyWebhookParser";
 export { parseKalemlyWebhook } from "./kalemlyWebhookParser";
@@ -18,7 +18,7 @@ async function postJson(url: string, payload: unknown, token: string) {
   return response.json();
 }
 
-export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaAssetId?: string; mediaContentType?: string; latitude?: number; longitude?: number; pollOptions?: string[]; contactCard?: { name: string; phone: string }; outboundMessageId?: string }) {
+export async function sendToChannel(input: { channel: Channel; recipient: string; text?: string; kind?: MessageKind; mediaUrl?: string; mediaAssetId?: string; mediaContentType?: string; mediaBuffer?: Uint8Array; latitude?: number; longitude?: number; pollOptions?: string[]; contactCard?: { name: string; phone: string }; outboundMessageId?: string }) {
   const kind = input.kind || MessageKind.TEXT;
   if (input.contactCard && input.channel !== Channel.WHATSAPP) throw new Error("بطاقات جهات الاتصال متاحة عبر WhatsApp فقط");
   if (input.channel === Channel.WHATSAPP) {
@@ -60,9 +60,11 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
   }
   const settings = await getTelegramSettings();
   if (!settings.botToken) throw new Error("Telegram bot token is not configured");
-  const audioMethod = kind !== MessageKind.AUDIO || !input.mediaContentType ? "sendAudio"
-    : input.mediaContentType === "audio/ogg" ? "sendVoice"
-      : input.mediaContentType === "audio/mpeg" || input.mediaContentType === "audio/mp4" ? "sendAudio" : "sendDocument";
+  const audioContentType = input.mediaContentType?.split(";")[0].toLowerCase();
+  const convertTelegramVoice = kind === MessageKind.AUDIO && Boolean(input.mediaBuffer) && !["audio/mpeg", "audio/mp4"].includes(audioContentType || "");
+  const audioMethod = convertTelegramVoice ? "sendVoice" : kind !== MessageKind.AUDIO || !audioContentType ? "sendAudio"
+    : audioContentType === "audio/ogg" ? "sendVoice"
+      : audioContentType === "audio/mpeg" || audioContentType === "audio/mp4" ? "sendAudio" : "sendDocument";
   const method = kind === MessageKind.POLL ? "sendPoll" : kind === MessageKind.STICKER ? "sendSticker" : kind === MessageKind.IMAGE ? "sendPhoto" : kind === MessageKind.AUDIO ? audioMethod : kind === MessageKind.FILE ? "sendDocument" : kind === MessageKind.LOCATION ? "sendLocation" : "sendMessage";
   const payload = kind === MessageKind.LOCATION ? { chat_id: input.recipient, latitude: input.latitude, longitude: input.longitude }
     : kind === MessageKind.POLL ? { chat_id: input.recipient, question: input.text || "", options: input.pollOptions || [], is_anonymous: true, allows_multiple_answers: false }
@@ -71,7 +73,17 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
     : kind === MessageKind.AUDIO ? { chat_id: input.recipient, [audioMethod === "sendVoice" ? "voice" : audioMethod === "sendDocument" ? "document" : "audio"]: input.mediaUrl, caption: input.text }
     : kind === MessageKind.FILE ? { chat_id: input.recipient, document: input.mediaUrl, caption: input.text }
     : { chat_id: input.recipient, text: input.text || "" };
-  const response = await fetch(`https://api.telegram.org/bot${settings.botToken}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  let response: Response;
+  if (convertTelegramVoice) {
+    const audio = await transcodeVoiceToOgg(Buffer.from(input.mediaBuffer!), audioContentType || "audio/webm");
+    const form = new FormData();
+    form.set("chat_id", input.recipient);
+    form.set("voice", new Blob([Uint8Array.from(audio)], { type: "audio/ogg" }), "voice.ogg");
+    if (input.text) form.set("caption", input.text);
+    response = await fetch(`https://api.telegram.org/bot${settings.botToken}/${method}`, { method: "POST", body: form, signal: AbortSignal.timeout(45_000) });
+  } else {
+    response = await fetch(`https://api.telegram.org/bot${settings.botToken}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  }
   const result = await response.json() as { ok?: boolean; description?: string };
   if (!response.ok || result.ok === false) throw new Error(`Telegram send failed (${response.status}): ${result.description || "provider rejected the request"}`);
   return result;

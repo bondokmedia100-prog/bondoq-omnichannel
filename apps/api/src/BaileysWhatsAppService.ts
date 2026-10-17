@@ -275,7 +275,7 @@ function unwrapMessage(message: any) {
   return content;
 }
 
-async function transcodeVoiceToOgg(buffer: Buffer, contentType: string) {
+export async function transcodeVoiceToOgg(buffer: Buffer, contentType: string) {
   const inputFormat = contentType.includes("webm") ? "webm"
     : contentType.includes("mp4") ? "mp4"
       : contentType.includes("wav") ? "wav"

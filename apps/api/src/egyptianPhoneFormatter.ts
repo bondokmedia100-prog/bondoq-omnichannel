@@ -32,6 +32,16 @@ export function phoneNumbersMatch(left: string, right: string): boolean {
   catch { return false; }
 }
 
+export function phoneNumberLookupVariants(phone: string): string[] {
+  const normalized = normalizePhoneNumber(phone);
+  const variants = new Set([normalized, `00${normalized}`]);
+  if (egyptianMobile.test(normalized)) {
+    variants.add(`0${normalized.slice(2)}`);
+    variants.add(normalized.slice(2));
+  }
+  return [...variants];
+}
+
 export function formatEgyptianPhone(phone: string): string {
   const formatted = normalizePhoneNumber(phone);
   if (!egyptianMobile.test(formatted)) throw new RangeError("أدخل رقم موبايل مصريًا صحيحًا");

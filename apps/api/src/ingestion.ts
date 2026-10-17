@@ -180,20 +180,29 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     ? Number(ratingText.match(/[1-5]/)?.[0]) : undefined;
   const isRatingReply = Boolean(pendingSurvey && pendingSurvey.rating === null && customerRating);
   const isTerminal = conversation.status === ConversationStatus.CLOSED || conversation.status === ConversationStatus.RESOLVED;
+  const priorAgentOutreach = !isWhatsAppGroup ? await prisma.message.findFirst({ where: {
+    conversationId: conversation.id, direction: MessageDirection.OUTBOUND, authorId: { not: null },
+    createdAt: { ...(previousInboundAt ? { gt: previousInboundAt } : {}), lte: message.createdAt },
+    OR: [{ deliveryStatus: { not: "FAILED" } }, { deliveryStatus: null }],
+    NOT: { metadata: { path: ["automation"], equals: "agent-handoff-greeting" } }
+  }, select: { id: true } }) : null;
+  const agentRepliedSinceLastInbound = Boolean(conversation.lastAgentResponseAt && conversation.lastAgentResponseAt <= message.createdAt
+    && (!previousInboundAt || conversation.lastAgentResponseAt > previousInboundAt));
+  const manuallyInitiated = !isWhatsAppGroup && (conversation.serviceTag === "تواصل مباشر" || agentRepliedSinceLastInbound || Boolean(priorAgentOutreach));
   const chatbotSettings = await getChatbotSettings();
-  const outsideBusinessHours = !isWhatsAppGroup && chatbotSettings.businessHoursEnabled && !isWithinBusinessHours(chatbotSettings, message.createdAt);
+  const outsideBusinessHours = !isWhatsAppGroup && !manuallyInitiated && chatbotSettings.businessHoursEnabled && !isWithinBusinessHours(chatbotSettings, message.createdAt);
   const priorOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled ? await prisma.message.findFirst({ where: {
     conversationId: conversation.id, direction: MessageDirection.OUTBOUND, createdAt: { gte: startOfCairoDay(message.createdAt) },
     metadata: { path: ["automation"], equals: "off-hours-reply" }
   }, select: { id: true } }) : null;
   const shouldSendOffHoursReply = outsideBusinessHours && chatbotSettings.offHoursReplyEnabled && !priorOffHoursReply;
   const currentBotState: BotState = conversation.awaitingRouting ? "BOT_MENU" : conversation.botState;
-  const starting = !isWhatsAppGroup && !isRatingReply && shouldStartBotFlow(previousInboundAt, isTerminal, message.createdAt);
-  const decision = isWhatsAppGroup
+  const starting = !isWhatsAppGroup && !isRatingReply && shouldStartBotFlow(previousInboundAt, isTerminal, message.createdAt, manuallyInitiated);
+  const decision = isWhatsAppGroup || manuallyInitiated
     ? { action: "NONE" as const, nextState: "ASSIGNED_TO_AGENT" as const }
     : decideBotAction({ enabled: chatbotSettings.enabled, state: currentBotState, starting, text: inbound.text, settings: chatbotSettings });
   const serviceChoice = decision.action === "HANDOFF" ? decision.choice : undefined;
-  const autoRules = !isWhatsAppGroup && decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
+  const autoRules = !isWhatsAppGroup && !manuallyInitiated && decision.action === "NONE" && !conversation.assignedAgentId && !conversation.serviceTag && inbound.text
     ? await prisma.autoReplyRule.findMany({ where: { isActive: true, isWelcome: false }, orderBy: [{ priority: "desc" }, { createdAt: "asc" }] })
     : [];
   const autoReply = findMatchingAutoReply(autoRules, inbound.text);
