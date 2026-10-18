@@ -493,7 +493,7 @@ export default function AgentWorkspace() {
   }
   async function copySelectedMessages() {
     if (!selectedMessages.length) return;
-    const copyText = selectedMessages.map((message) => {
+    const copyText = selectedMessages.map((message: AnyRecord) => {
       const label = ({ IMAGE: "[صورة]", STICKER: "[ملصق]", AUDIO: "[رسالة صوتية]", VIDEO: "[فيديو]", FILE: "[ملف]", LOCATION: "[موقع]", POLL: "[استطلاع]", SYSTEM: "[رسالة نظام]" } as Record<string, string>)[message.kind] || "[رسالة]";
       return `${message.author?.name || (message.direction === "OUTBOUND" ? "الموظف" : "العميل")} · ${formatCairoTime(message.createdAt)}\n${message.text?.trim() || label}`;
     }).join("\n\n");
