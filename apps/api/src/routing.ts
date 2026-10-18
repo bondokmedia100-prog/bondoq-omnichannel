@@ -1,6 +1,7 @@
 import { Channel, ConversationStatus, Department, MessageDirection, Presence, Role } from "@prisma/client";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
+import { canViewChannel, loadSessionUser } from "./auth";
 import { config } from "./config";
 import { prisma } from "./prisma";
 import { emitConversationEvent, io } from "./realtime";
@@ -18,6 +19,11 @@ type AssignmentOptions = {
   forceReassign?: boolean;
   expectedUnanswered?: { messageId: string; assignedAgentId: string };
 };
+
+async function canNotifyAgentOfChannel(agentId: string, channel: Channel) {
+  const agent = await loadSessionUser(agentId);
+  return Boolean(agent && canViewChannel(agent, channel));
+}
 
 export function withInboundConversationLock<T>(channel: string, externalConversationId: string, work: () => Promise<T>) {
   return withRedisLock(connection, `inbound:${channel}:${externalConversationId}`, work, { leaseMs: 120_000, waitMs: 120_000 });
@@ -91,7 +97,7 @@ export async function assignConversation(conversationId: string, department?: De
       const waiting = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
       if (released.count && previousAgentId) {
         await recordConversationAssignment(conversationId, previousAgentId);
-        io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", waiting);
+        if (await canNotifyAgentOfChannel(previousAgentId, waiting.channel)) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", waiting);
       }
       if (waiting.status === ConversationStatus.QUEUED && !waiting.assignedAgentId) await emitConversationEvent(waiting.id, waiting.channel, "conversation:queued", waiting);
       return waiting;
@@ -125,7 +131,7 @@ export async function assignConversation(conversationId: string, department?: De
     await recordConversationAssignment(conversationId, agent.id);
     const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
     await prisma.auditLog.create({ data: { conversationId, action: previousAgentId ? "CONVERSATION_AUTO_REASSIGNED" : "CONVERSATION_AUTO_ASSIGNED", details: { from: previousAgentId, agentId: agent.id } } });
-    if (previousAgentId && previousAgentId !== agent.id) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", conversation);
+    if (previousAgentId && previousAgentId !== agent.id && await canNotifyAgentOfChannel(previousAgentId, conversation.channel)) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", conversation);
     io?.to(`agent:${agent.id}`).emit("conversation:assigned", { ...conversation, isAutoReassignment: Boolean(options.expectedUnanswered) });
     await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", conversation);
     return conversation;
@@ -170,7 +176,10 @@ export async function releaseAgentConversations(agentId: string) {
     return current;
   });
   if (!assigned.length) return 0;
-  for (const conversation of assigned) await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
+  for (const conversation of assigned) {
+    if (await canNotifyAgentOfChannel(agentId, conversation.channel)) io?.to(`agent:${agentId}`).emit("conversation:unassigned", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
+    await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
+  }
   await dispatchQueued();
   return assigned.length;
 }

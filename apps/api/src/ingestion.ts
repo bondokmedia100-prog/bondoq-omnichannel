@@ -327,7 +327,11 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     conversation = await assignConversation(conversation.id, routeDepartment);
   }
 
-  if (io && conversation.assignedAgentId && conversation.assignedAgentId !== previousAssignedAgentId) {
+  const viewerWhere = await channelViewerWhere(conversation.channel);
+  const assignedViewer = conversation.assignedAgentId ? await prisma.user.findFirst({
+    where: { id: conversation.assignedAgentId, isActive: true, OR: [{ role: Role.ADMIN }, viewerWhere] }, select: { id: true }
+  }) : null;
+  if (io && assignedViewer && conversation.assignedAgentId !== previousAssignedAgentId) {
     io.to(`agent:${conversation.assignedAgentId}`).emit("message:new", payload);
   }
   const adminScope = { OR: [
@@ -337,12 +341,12 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   ] };
   const admins = await prisma.user.findMany({ where: {
     isActive: true,
-    AND: [adminScope, { OR: [{ role: Role.ADMIN }, await channelViewerWhere(conversation.channel)] }]
+    AND: [adminScope, { OR: [{ role: Role.ADMIN }, viewerWhere] }]
   }, select: { id: true } });
   const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.STICKER ? "ملصق" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
   const tag = `inbound-${conversation.id}`;
   void sendPushNotification(admins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
-  if (conversation.assignedAgentId) void sendPushNotification([conversation.assignedAgentId], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
+  if (assignedViewer) void sendPushNotification([assignedViewer.id], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
   if (conversation.assignedAgentId) {
     await scheduleSla(conversation.id, message.id);
     await scheduleUnansweredReassignment(conversation.id, message.id, conversation.assignedAgentId);

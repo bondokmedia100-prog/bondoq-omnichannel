@@ -8,7 +8,7 @@ import IORedis from "ioredis";
 import { z } from "zod";
 import { Channel, ConversationHandoffStatus, ConversationStatus, Department, MessageDirection, MessageKind, MessengerAccessMode, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
 import { config } from "./config";
-import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
+import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, loadSessionUser, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
 import { broadcastPresence, emitConversationEvent, initRealtime, io, refreshChannelAccessForDepartments, revokeConversationRoomAccess } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations, scheduleUnansweredReassignment, withConversationAssignmentLock, withInboundConversationLock } from "./routing";
@@ -1491,9 +1491,12 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
   if (conversation.assignedAgentId && conversation.assignedAgentId !== updated.assignedAgentId) {
     const managerTitle = req.user!.role === Role.ADMIN ? "مدير النظام" : "المشرف";
     const body = updated.assignedAgent?.name ? `سحب ${managerTitle} (${req.user!.name}) المحادثة من متابعتك وأسندها إلى ${updated.assignedAgent.name}.` : `سحب ${managerTitle} (${req.user!.name}) المحادثة من متابعتك.`;
-    io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:unassigned", { ...updated, adminReassigned: true, managerName: req.user!.name });
-    io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:admin-reassigned", { conversationId: conversation.id, customerName: updated.customer?.displayName || updated.customer?.name || "عميل", managerName: req.user!.name, nextAgentName: updated.assignedAgent?.name || null, body });
-    void sendPushNotification([conversation.assignedAgentId], { title: "تغيير إسناد محادثة", body, url: "/agent/workspace", tag: `admin-reassigned-${conversation.id}` }).catch((error) => console.warn("Admin reassignment push notification failed", error));
+    const formerAgent = await loadSessionUser(conversation.assignedAgentId);
+    if (formerAgent && canViewChannel(formerAgent, conversation.channel)) {
+      io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:unassigned", { ...updated, adminReassigned: true, managerName: req.user!.name });
+      io.to(`agent:${conversation.assignedAgentId}`).emit("conversation:admin-reassigned", { conversationId: conversation.id, customerName: updated.customer?.displayName || updated.customer?.name || "عميل", managerName: req.user!.name, nextAgentName: updated.assignedAgent?.name || null, body });
+      void sendPushNotification([conversation.assignedAgentId], { title: "تغيير إسناد محادثة", body, url: "/agent/workspace", tag: `admin-reassigned-${conversation.id}` }).catch((error) => console.warn("Admin reassignment push notification failed", error));
+    }
   }
   if (parsed.data.agentId) io.to(`agent:${parsed.data.agentId}`).emit("conversation:assigned", updated);
    await emitConversationEvent(updated.id, updated.channel, "conversation:updated", updated);
@@ -2745,15 +2748,16 @@ new Worker("conversation-sla", async (job) => {
   const updated = await prisma.conversation.update({ where: { id: conversationId }, data: { slaBreachedAt: new Date() } });
   await audit(null, "SLA_BREACHED", conversationId, { assignedAgentId: conversation.assignedAgentId, thresholdMinutes: config.slaResponseMinutes });
   await emitConversationEvent(conversation.id, conversation.channel, "sla:breached", { conversation: updated, assignedAgentId: conversation.assignedAgentId }, { audience: "managers" });
-  if (conversation.assignedAgentId) io.to(`agent:${conversation.assignedAgentId}`).emit("sla:breached", updated);
-   const managerScope = { OR: [{ role: Role.ADMIN }, { role: Role.SUPERVISOR, canViewAllConversations: true }, { role: Role.SUPERVISOR, canViewAllConversations: null }] };
-   const recipients = await prisma.user.findMany({ where: {
-     isActive: true,
-      AND: [managerScope, { OR: [{ role: Role.ADMIN }, await channelViewerWhere(conversation.channel)] }]
-   }, select: { id: true } });
+  const viewerWhere = await channelViewerWhere(conversation.channel);
+  const managerScope = { OR: [{ role: Role.ADMIN }, { role: Role.SUPERVISOR, canViewAllConversations: true }, { role: Role.SUPERVISOR, canViewAllConversations: null }] };
+  const [recipients, assignedViewer] = await Promise.all([
+    prisma.user.findMany({ where: { isActive: true, AND: [managerScope, { OR: [{ role: Role.ADMIN }, viewerWhere] }] }, select: { id: true } }),
+    conversation.assignedAgentId ? prisma.user.findFirst({ where: { id: conversation.assignedAgentId, isActive: true, OR: [{ role: Role.ADMIN }, viewerWhere] }, select: { id: true } }) : Promise.resolve(null)
+  ]);
+  if (assignedViewer) io.to(`agent:${assignedViewer.id}`).emit("sla:breached", updated);
   const customerLabel = conversation.customer.name || conversation.customer.phone || "عميل";
   void sendPushNotification(recipients.map((recipient) => recipient.id), { title: "تنبيه مهلة الرد", body: `لم يصل رد للعميل ${customerLabel} خلال ${config.slaResponseMinutes} دقائق.`, url: `/admin/dashboard?conversation=${encodeURIComponent(conversationId)}`, tag: `sla-${conversationId}` }).catch((error) => console.warn("SLA push notification failed", error));
-  if (conversation.assignedAgentId) void sendPushNotification([conversation.assignedAgentId], { title: "تنبيه مهلة الرد", body: `لم يصل رد للعميل ${customerLabel} خلال ${config.slaResponseMinutes} دقائق.`, url: `/agent/workspace?conversation=${encodeURIComponent(conversationId)}`, tag: `sla-${conversationId}` }).catch((error) => console.warn("Agent SLA push notification failed", error));
+  if (assignedViewer) void sendPushNotification([assignedViewer.id], { title: "تنبيه مهلة الرد", body: `لم يصل رد للعميل ${customerLabel} خلال ${config.slaResponseMinutes} دقائق.`, url: `/agent/workspace?conversation=${encodeURIComponent(conversationId)}`, tag: `sla-${conversationId}` }).catch((error) => console.warn("Agent SLA push notification failed", error));
 }, { connection: redis });
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
