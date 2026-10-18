@@ -45,6 +45,12 @@ enum Channel {
   TELEGRAM
 }
 
+enum ChannelAccess {
+  FULL
+  READ_ONLY
+  EXCLUDED
+}
+
 enum ConversationStatus {
   OPEN
   PENDING
@@ -123,6 +129,9 @@ model User {
   canReceiveWhatsApp       Boolean                @default(true)
   canReceiveMessenger       Boolean                @default(true)
   canReceiveTelegram        Boolean                @default(true)
+  whatsappAccess           ChannelAccess?
+  messengerAccess          ChannelAccess?
+  telegramAccess           ChannelAccess?
   presence                 Presence               @default(OFFLINE)
   isActive                 Boolean                @default(true)
   lastSeenAt               DateTime?
@@ -181,6 +190,15 @@ model Branch {
   updatedAt     DateTime       @updatedAt
   users         User[]         @relation("BranchUsers")
   conversations Conversation[] @relation("BranchConversations")
+}
+
+model DepartmentChannelAccess {
+  department Department
+  channel    Channel
+  access     ChannelAccess @default(FULL)
+  updatedAt  DateTime      @updatedAt
+
+  @@id([department, channel])
 }
 
 model AgentSession {

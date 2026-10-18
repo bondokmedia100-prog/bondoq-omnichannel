@@ -1,8 +1,8 @@
 import type { Server as HttpServer } from "node:http";
 import jwt from "jsonwebtoken";
 import { Server } from "socket.io";
-import { Department, Presence, Role } from "@prisma/client";
-import { canReadConversation, canReadTeamConversations, hasPermission, type SessionUser } from "./auth";
+import { Channel, Department, Presence, Role } from "@prisma/client";
+import { canReadChannel, canReadConversation, canReadTeamConversations, hasPermission, resolvedChannelAccess, type SessionUser } from "./auth";
 import { config } from "./config";
 import { prisma } from "./prisma";
 
@@ -15,13 +15,13 @@ export function broadcastPresence(userId: string, presence: Presence, department
   recipients.emit("presence:updated", { userId, presence });
 }
 
-export async function revokeConversationRoomAccess(conversationId: string, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+export async function revokeConversationRoomAccess(conversationId: string, conversation: { assignedAgentId: string | null; branchId?: string | null; channel: Channel }) {
   if (!io) return;
   const room = `conversation:${conversationId}`;
   const sockets = await io.in(room).fetchSockets();
   for (const socket of sockets) {
     const user = socket.data.user as SessionUser | undefined;
-    if (!user || !canReadConversation(user, conversation) && !canReadTeamConversations(user, conversation)) {
+    if (!user || !canReadChannel(user, conversation.channel) || !canReadConversation(user, conversation) && !canReadTeamConversations(user, conversation)) {
       socket.emit("conversation:access-revoked", { conversationId });
       await socket.leave(room);
     }
@@ -35,9 +35,9 @@ export function initRealtime(server: HttpServer) {
       const token = socket.handshake.auth.token as string;
       if (!token) return next(new Error("unauthorized"));
       const claims = jwt.verify(token, config.jwtSecret, { issuer: "bondoq-support" }) as { id: string; authVersion: number };
-      const user = await prisma.user.findFirst({ where: { id: claims.id, isActive: true }, select: { id: true, role: true, name: true, authVersion: true, department: true, branchId: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true } });
+      const user = await prisma.user.findFirst({ where: { id: claims.id, isActive: true }, select: { id: true, role: true, name: true, authVersion: true, department: true, branchId: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true } });
       if (!user || user.authVersion !== claims.authVersion) return next(new Error("unauthorized"));
-      socket.data.user = user;
+      socket.data.user = { ...user, channelAccess: await resolvedChannelAccess(user) };
       next();
     } catch { next(new Error("unauthorized")); }
   });
@@ -49,8 +49,8 @@ export function initRealtime(server: HttpServer) {
     if (canObserveAllConversations) socket.join("admins");
     if (user.department) socket.join(`department:${user.department}`);
     socket.on("conversation:join", async (conversationId: string) => {
-      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, status: true } });
-      if (!conversation || !canReadConversation(user, conversation) && !canReadTeamConversations(user, conversation)) return;
+      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, status: true, channel: true } });
+      if (!conversation || !canReadChannel(user, conversation.channel) || !canReadConversation(user, conversation) && !canReadTeamConversations(user, conversation)) return;
       socket.join(`conversation:${conversationId}`);
       if (canObserveAllConversations) {
         io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: true, userId: user.id });

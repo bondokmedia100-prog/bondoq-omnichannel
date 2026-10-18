@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canReceiveChannel, channelEligibilityWhere, chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
+import { canReadChannel, canReceiveChannel, chooseRoundRobinAgent, defaultDepartmentChannelAccess, effectiveChannelAccess, shouldReassignUnansweredConversation } from "./routingSelection";
 
 test("round-robins across every online agent in order", () => {
   const agents = [{ id: "a" }, { id: "b" }, { id: "c" }];
@@ -13,15 +13,20 @@ test("returns no assignee for an empty online pool", () => {
   assert.equal(chooseRoundRobinAgent([], 0), undefined);
 });
 
-test("maps supported channels to the matching agent eligibility field", () => {
+test("resolves channel overrides and department defaults", () => {
   const agent = { canReceiveWhatsApp: true, canReceiveMessenger: false, canReceiveTelegram: true };
-  assert.deepEqual(channelEligibilityWhere("WHATSAPP"), { canReceiveWhatsApp: true });
-  assert.deepEqual(channelEligibilityWhere("MESSENGER"), { canReceiveMessenger: true });
-  assert.deepEqual(channelEligibilityWhere("TELEGRAM"), { canReceiveTelegram: true });
   assert.equal(canReceiveChannel(agent, "WHATSAPP"), true);
   assert.equal(canReceiveChannel(agent, "MESSENGER"), false);
   assert.equal(canReceiveChannel(agent, "TELEGRAM"), true);
-  assert.equal(canReceiveChannel({}, "WHATSAPP"), false);
+  assert.equal(canReadChannel({ ...agent, canReceiveMessenger: true, department: "CUSTOMER_CARE" }, "MESSENGER"), true);
+  assert.equal(canReadChannel({ department: "CUSTOMER_CARE" }, "MESSENGER"), true);
+  assert.equal(canReceiveChannel({ department: "CUSTOMER_CARE" }, "MESSENGER"), false);
+  assert.equal(canReceiveChannel({ department: "CUSTOMER_CARE" }, "MESSENGER", "FULL"), true);
+  assert.equal(canReceiveChannel({ department: "WORK_FROM_HOME" }, "MESSENGER"), true);
+  assert.equal(effectiveChannelAccess({ department: "WORK_FROM_HOME" }, "MESSENGER"), "FULL");
+  assert.equal(effectiveChannelAccess({ whatsappAccess: "EXCLUDED", canReceiveWhatsApp: true }, "WHATSAPP"), "EXCLUDED");
+  assert.equal(effectiveChannelAccess({ whatsappAccess: "FULL", canReceiveWhatsApp: false }, "WHATSAPP"), "FULL");
+  assert.equal(defaultDepartmentChannelAccess("CUSTOMER_CARE", "MESSENGER"), "READ_ONLY");
 });
 
 test("reassigns only the same active conversation when its latest inbound is unanswered", () => {

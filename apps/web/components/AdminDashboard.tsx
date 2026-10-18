@@ -20,8 +20,10 @@ import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, 
 
 type AnyRecord = Record<string, any>;
 const channelLabel: Record<string, string> = { WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" };
-const canReceiveChannel = (agent: AnyRecord, channel: string) => channel === "WHATSAPP" ? agent.canReceiveWhatsApp !== false : channel === "MESSENGER" ? agent.canReceiveMessenger !== false : channel === "TELEGRAM" ? agent.canReceiveTelegram !== false : false;
-const deptLabel: Record<string, string> = { CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "خدمة العملاء", ADMINISTRATION: "الإدارة" };
+const canReceiveChannel = (agent: AnyRecord, channel: string) => agent.channelAccess
+  ? agent.channelAccess[channel] === "FULL"
+  : channel === "WHATSAPP" ? agent.canReceiveWhatsApp !== false : channel === "MESSENGER" ? agent.canReceiveMessenger !== false : channel === "TELEGRAM" ? agent.canReceiveTelegram !== false : false;
+const deptLabel: Record<string, string> = { CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "مستخدم فرع", ADMINISTRATION: "الإدارة" };
 const presenceLabel: Record<string, string> = { ONLINE: "متاح", BUSY: "مشغول", BREAK: "استراحة", OFFLINE: "غير متصل" };
 const categoryLabel: Record<string, string> = { EASTERN: "حلويات شرقية", WESTERN: "حلويات غربية", CAKES: "تورتات", BAKERY: "مخبوزات", KAHK: "كحك وبسكويت", CHOCOLATE: "شوكولاتة", MOULID: "حلاوة المولد", OCCASIONS: "مناسبات", MIX_BONDOQ: "ميكس بندق" };
 const businessDayOptions = [["SUNDAY", "الأحد"], ["MONDAY", "الاثنين"], ["TUESDAY", "الثلاثاء"], ["WEDNESDAY", "الأربعاء"], ["THURSDAY", "الخميس"], ["FRIDAY", "الجمعة"], ["SATURDAY", "السبت"]] as const;
@@ -175,17 +177,17 @@ export default function AdminDashboard() {
           setIncomingNotifications((old) => [{ id: event.note.id, isPrivateNote: true, conversationId: event.conversationId, customerName: event.customerName || "محادثة", channel: event.channel, preview: `رسالة سرية من ${event.note.author?.name || "زميل"} إلى ${event.note.recipient?.name || "زميل"}: ${event.note.text}`, createdAt: event.note.createdAt }, ...old].slice(0, 8));
           setShowNotifications(true);
         });
-         connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
+       connection.on("whatsapp:incoming-call", (call) => setIncomingCall(call));
          connection.on("whatsapp:call-ended", (event) => setIncomingCall((current) => current?.callId === event.callId ? null : current));
          for (const event of ["conversation:updated", "conversation:queued", "presence:updated", "sla:breached", "team:updated", "handoff:updated"]) connection.on(event, () => load(profile));
-         connection.on("whatsapp:history-synced", ({ conversationIds = [] }) => {
-           void load(profile);
-           const activeId = activeConversationRef.current;
-           if (!activeId || !conversationIds.includes(activeId)) return;
-           void api(`/api/conversations/${activeId}`).then((conversation) => {
-             if (activeConversationRef.current === activeId) setDetail({ ...conversation, customer: withDisplayName(conversation.customer) });
-           }).catch(() => {});
-         });
+       connection.on("whatsapp:history-synced", ({ conversationIds = [] }) => {
+         void load(profile);
+         const activeId = activeConversationRef.current;
+         if (!activeId || !conversationIds.includes(activeId)) return;
+         void api(`/api/conversations/${activeId}`).then((conversation) => {
+           if (activeConversationRef.current === activeId) setDetail({ ...conversation, customer: withDisplayName(conversation.customer) });
+         }).catch(() => {});
+       });
        connection.on("conversation:deleted", (event) => {
          setConversations((items) => items.filter((item) => item.id !== event.conversationId));
          if (detailLoadingIdRef.current === event.conversationId) { ++detailRequest.current; detailLoadingIdRef.current = ""; }
@@ -443,7 +445,7 @@ export default function AdminDashboard() {
           {showInternalNotes && <div className="space-y-2 pb-2 pt-3">
               <div className="soft-scroll max-h-32 space-y-2 overflow-y-auto">{(detail.internalNotes || []).map((note: AnyRecord) => <article key={note.id} className="rounded-lg bg-[#fff8e9] px-3 py-2"><p className="whitespace-pre-wrap text-xs leading-5 text-stone-700">{note.text}</p><p className="mt-1 text-[9px] text-stone-400">{note.author?.name || "الفريق"} · {timeAgo(note.createdAt)}</p></article>)}{!detail.internalNotes?.length && <p className="text-xs text-stone-400">لا توجد ملاحظات داخلية بعد.</p>}</div>
             <form onSubmit={sendInternalNote} className="flex gap-2"><textarea value={internalNote} onChange={(event) => setInternalNote(event.target.value)} maxLength={4000} rows={2} placeholder="أضف ملاحظة للفريق فقط..." className="min-w-0 flex-1 resize-y rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-amber-300" /><button disabled={!internalNote.trim()} className="grid h-10 w-10 shrink-0 place-items-center self-end rounded-lg bg-stone-800 text-white disabled:opacity-40" title="إضافة ملاحظة داخلية"><Send size={15} /></button></form>
-          </div>}
+         </div>}
         </div>
         {!!detail.privateNotes?.length && <section className="border-b border-violet-100 bg-violet-50/60 px-5 py-3"><h4 className="mb-2 flex items-center gap-2 text-[11px] font-extrabold text-violet-950"><LockKeyhole size={14} /> الرسائل السرية بين الموظفين <span className="rounded-full bg-white px-2 py-0.5 text-[9px]">{detail.privateNotes.length}</span></h4><div className="soft-scroll max-h-36 space-y-2 overflow-y-auto">{detail.privateNotes.map((note: AnyRecord) => <article key={note.id} className="rounded-lg border border-violet-100 bg-white px-3 py-2"><p className="whitespace-pre-wrap text-xs leading-5 text-stone-700">{note.text}</p><p className="mt-1 flex items-center gap-1 text-[9px] text-violet-700"><span>{note.author?.name || "موظف"} → {note.recipient?.name || "زميل"}</span><span className="mr-auto text-stone-400">{timeAgo(note.createdAt)}</span></p></article>)}</div></section>}
           <div className="flex flex-wrap gap-2 border-b border-stone-100 bg-white px-5 py-2"><button type="button" onClick={() => void setAdminConversationStatus("RESOLVED")} className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-700"><CheckCircle2 size={14} /> حل المحادثة</button><button type="button" onClick={() => void setAdminConversationStatus(detail.status === "CLOSED" || detail.status === "RESOLVED" ? "OPEN" : "CLOSED")} className="flex items-center gap-1.5 rounded-lg bg-stone-100 px-3 py-2 text-[10px] font-bold text-stone-600">{detail.status === "CLOSED" || detail.status === "RESOLVED" ? <MessageCircle size={14} /> : <Archive size={14} />}{detail.status === "CLOSED" || detail.status === "RESOLVED" ? "إعادة فتح" : "إغلاق"}</button>{detail.channel === "WHATSAPP" && adminCallTarget && !detail.customer?.isBlocked && <button type="button" disabled={Boolean(callConversation)} onClick={() => setCallConversation(detail)} className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={14} />{callConversation ? "أنه المكالمة الحالية أولًا" : "اتصال WhatsApp"}</button>}<span className="mr-auto self-center text-[10px] text-stone-400">الحالة: {detail.status}</span></div>

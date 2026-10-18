@@ -6,16 +6,16 @@ import bcrypt from "bcryptjs";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { z } from "zod";
-import { Channel, ConversationHandoffStatus, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
+import { Channel, ChannelAccess, ConversationBotState, ConversationHandoffStatus, ConversationStatus, Department, MessageDirection, MessageKind, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
 import { config } from "./config";
-import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
+import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadChannel, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, isWhatsAppGroupConversation, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
 import { broadcastPresence, initRealtime, io, revokeConversationRoomAccess } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations, scheduleUnansweredReassignment, withConversationAssignmentLock, withInboundConversationLock } from "./routing";
 import { answerTelegramCallback, channelRecipient, deleteProviderMessage, editProviderMessage, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, reactToProviderMessage, sendCsatPrompt, sendToChannel } from "./providers";
 import { ingestMessage, updateEditedInboundMessage } from "./ingestion";
 import { getKalemlySettings, safeProviderResponse, saveKalemlySettings, sendKalemlyTest, startKalemlyWaWorker, kalemlyExternalMessageId } from "./KalemlyWaService";
-import { defaultCallReply, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, logoutBaileysWhatsApp, markBaileysMessagesRead, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, type WhatsAppMode } from "./BaileysWhatsAppService";
+import { createBaileysWhatsAppGroup, defaultCallReply, getBaileysWhatsAppGroup, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, listBaileysWhatsAppGroups, logoutBaileysWhatsApp, markBaileysMessagesRead, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, updateBaileysWhatsAppGroupParticipants, type BaileysWhatsAppGroup, type WhatsAppMode } from "./BaileysWhatsAppService";
 import { startOfCairoDay } from "./cairoTime";
 import { getMessengerSettings, getTelegramSettings, saveMessengerSettings, saveTelegramSettings } from "./ChannelIntegrationService";
 import { allowedMediaTypes, imageSignatureMatches, publicMediaUrl, safeFileName, uploadLimitBytes, verifyPublicMediaUrl } from "./mediaStorage";
@@ -27,9 +27,9 @@ import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
 import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
 import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
 import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
-import { channelEligibilityWhere } from "./routingSelection";
+import { canReceiveChannel, channelAccessLevels, defaultDepartmentChannelAccess, effectiveChannelAccess, receivingChannels, type ChannelAccessLevel, type ReceivingChannel } from "./routingSelection";
 import { formatAgentHandoffGreeting } from "./autoReplies";
-import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
+import { normalizePhoneNumber, phoneNumberLookupVariants, phoneNumbersMatch } from "./egyptianPhoneFormatter";
 import { normalizeSearchDigits } from "./search";
 import { AiImageGenerationError, aiImagePromptSchema, generateAiImage } from "./aiImage";
 
@@ -57,8 +57,39 @@ const terminalStatuses: ConversationStatus[] = [ConversationStatus.CLOSED, Conve
 const httpsUrl = z.string().url().refine((value) => value.startsWith("https://"), "استخدم رابط HTTPS آمنًا");
 const usernameSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9._-]{3,32}$/, "اسم المستخدم من 3 إلى 32 حرفًا، ويقبل الحروف الإنجليزية والأرقام والنقطة والشرطة");
 const permissionFields = { canViewAllConversations: z.boolean().nullable().optional(), canTransferConversations: z.boolean().nullable().optional(), canManageCatalog: z.boolean().nullable().optional(), canViewReports: z.boolean().nullable().optional(), canManageTeam: z.boolean().nullable().optional() };
-const channelPermissionFields = { canReceiveWhatsApp: z.boolean().optional(), canReceiveMessenger: z.boolean().optional(), canReceiveTelegram: z.boolean().optional() };
-const staffSelect = { id: true, email: true, username: true, name: true, role: true, department: true, presence: true, isActive: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } as const;
+const legacyChannelPermissionFields = { canReceiveWhatsApp: z.boolean().optional(), canReceiveMessenger: z.boolean().optional(), canReceiveTelegram: z.boolean().optional() };
+const channelPermissionFields = { whatsappAccess: z.nativeEnum(ChannelAccess).nullable().optional(), messengerAccess: z.nativeEnum(ChannelAccess).nullable().optional(), telegramAccess: z.nativeEnum(ChannelAccess).nullable().optional() };
+const staffSelect = { id: true, email: true, username: true, name: true, role: true, department: true, branchId: true, branch: { select: { id: true, name: true } }, presence: true, isActive: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true } as const;
+const defaultBranches = Array.from({ length: 8 }, (_, index) => ({ id: `branch-${index + 1}`, name: `الفرع ${index + 1}` }));
+function effectiveEmployeeChannelAccess(employee: Parameters<typeof effectiveChannelAccess>[0], policies: Map<Channel, ChannelAccessLevel> = new Map()) {
+  return Object.fromEntries(receivingChannels.map((channel) => [channel, effectiveChannelAccess(employee, channel, policies.get(channel))])) as Record<ReceivingChannel, ChannelAccessLevel>;
+}
+async function channelAccessForEmployee(employee: Parameters<typeof effectiveChannelAccess>[0]) {
+  const policies = employee.department ? await prisma.departmentChannelAccess.findMany({ where: { department: employee.department } }) : [];
+  return effectiveEmployeeChannelAccess(employee, new Map(policies.map((policy) => [policy.channel, policy.access])));
+}
+function canSeeAllCustomerData(user: NonNullable<AuthedRequest["user"]>) {
+  return user.role === Role.ADMIN || user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations");
+}
+function customerConversationWhere(user: NonNullable<AuthedRequest["user"]>, fullAccessOnly = false): Prisma.ConversationWhereInput {
+  const frontline = user.role === Role.AGENT || user.role === Role.BRANCH_USER;
+  const channels = receivingChannels.filter((channel) => !frontline
+    || (fullAccessOnly ? user.channelAccess[channel] === "FULL" : user.channelAccess[channel] !== "EXCLUDED")) as Channel[];
+  return {
+    assignedAgentId: user.id,
+    channel: { in: channels },
+    ...(user.role === Role.BRANCH_USER ? { branchId: user.branchId || "" } : {})
+  };
+}
+function customerAccessWhere(user: NonNullable<AuthedRequest["user"]>, fullAccessOnly = false): Prisma.CustomerWhereInput {
+  return canSeeAllCustomerData(user) ? {} : { conversations: { some: customerConversationWhere(user, fullAccessOnly) } };
+}
+async function employeeCanReceiveChannel(employeeId: string, channel: Channel) {
+  const employee = await prisma.user.findUnique({ where: { id: employeeId }, select: { department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } });
+  if (!employee) return false;
+  const access = await channelAccessForEmployee(employee);
+  return access[channel] === "FULL";
+}
 function encodePageCursor(date: Date, id: string) {
   return Buffer.from(`${date.toISOString()}|${id}`).toString("base64url");
 }
@@ -77,6 +108,56 @@ function pageLimit(value: unknown, fallback = 50) {
   const parsed = typeof value === "string" ? Number(value) : NaN;
   return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, 100) : fallback;
 }
+function phoneSearchDigits(value: string) {
+  return value.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+    .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+    .replace(/\D/g, "");
+}
+function phoneSearchTerms(value: string) {
+  const digits = phoneSearchDigits(value);
+  const terms = new Set(digits ? [digits] : []);
+  let canonicalPhone = "";
+  try { canonicalPhone = normalizePhoneNumber(value); } catch {}
+  if (canonicalPhone) {
+    terms.add(canonicalPhone);
+    if (canonicalPhone.startsWith("20")) terms.add(`0${canonicalPhone.slice(2)}`);
+    for (const length of [8, 6, 4]) if (canonicalPhone.length > length) terms.add(canonicalPhone.slice(-length));
+  }
+  return [...terms];
+}
+async function findWhatsAppConversationByPhone(phone: string, branchId?: string | null) {
+  const suffixes = [...new Set([phone.slice(-8), phone.slice(-6), phone.slice(-4)])];
+  const candidates = await prisma.conversation.findMany({
+    where: { channel: Channel.WHATSAPP, ...(branchId ? { branchId } : {}), OR: suffixes.flatMap((suffix) => [
+      { externalCustomerId: { contains: suffix } }, { externalConversationId: { contains: suffix } },
+      { customer: { is: { phone: { contains: suffix } } } }
+    ]) },
+    select: { id: true, externalCustomerId: true, externalConversationId: true, assignedAgentId: true, branchId: true, status: true, channel: true, customer: { select: { phone: true } } },
+    orderBy: { lastMessageAt: "desc" }
+  });
+  return candidates.find((conversation) => [conversation.externalCustomerId, conversation.externalConversationId, conversation.customer.phone]
+    .some((candidate) => candidate && phoneNumbersMatch(candidate, phone))) || null;
+}
+async function ensureBranches() {
+  await Promise.all(defaultBranches.map((branch) => prisma.branch.upsert({ where: { id: branch.id }, update: {}, create: branch })));
+}
+async function ensureWhatsAppGroupConversation(group: BaileysWhatsAppGroup) {
+  const customerId = `external_whatsapp_${group.id}`;
+  const customer = await prisma.customer.upsert({
+    where: { id: customerId },
+    update: { name: group.subject, displayName: group.subject, phone: null, channelIdentifiers: { whatsapp: group.id, whatsappGroup: true } },
+    create: { id: customerId, name: group.subject, displayName: group.subject, channelIdentifiers: { whatsapp: group.id, whatsappGroup: true } }
+  });
+  return prisma.conversation.upsert({
+    where: { channel_externalConversationId: { channel: Channel.WHATSAPP, externalConversationId: group.id } },
+    update: { subject: group.subject },
+    create: {
+      customerId: customer.id, channel: Channel.WHATSAPP, externalConversationId: group.id, externalCustomerId: group.id,
+      subject: group.subject, status: ConversationStatus.QUEUED, awaitingRouting: false, botState: ConversationBotState.ASSIGNED_TO_AGENT,
+      routingDepartment: Department.CUSTOMER_CARE
+    }
+  });
+}
 function callIceServers(subject: string) {
   return createIceServers({ stunUrls: config.webRtcStunUrls, turnUrls: config.webRtcTurnUrls, turnSharedSecret: config.webRtcTurnSharedSecret, subject });
 }
@@ -91,7 +172,8 @@ async function lastInboundAt(conversationId: string, stored?: Date | null) {
   const latest = await prisma.message.findFirst({ where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
   return latest?.createdAt || null;
 }
-async function canReadConversationOrHistory(user: NonNullable<AuthedRequest["user"]>, conversation: { id: string; assignedAgentId: string | null; branchId?: string | null; status: ConversationStatus }) {
+async function canReadConversationOrHistory(user: NonNullable<AuthedRequest["user"]>, conversation: { id: string; assignedAgentId: string | null; branchId?: string | null; status: ConversationStatus; channel: Channel }) {
+  if (!canReadChannel(user, conversation.channel)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (canReadConversation(user, conversation) || canReadTeamConversations(user, conversation)) return true;
   if (user.role !== Role.AGENT && user.role !== Role.BRANCH_USER) return false;
@@ -108,7 +190,7 @@ async function canReadConversationOrHistory(user: NonNullable<AuthedRequest["use
 class ContactConversationError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
-async function customersMatchingPhone(phone: string) {
+async function customersMatchingPhone(phone: string, actor: NonNullable<AuthedRequest["user"]>) {
   const variants = phoneNumberLookupVariants(phone);
   const rows = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT "id" FROM "Customer"
@@ -117,18 +199,18 @@ async function customersMatchingPhone(phone: string) {
   `);
   if (!rows.length) return [];
   return prisma.customer.findMany({
-    where: { id: { in: rows.map((row) => row.id) } },
+    where: { id: { in: rows.map((row) => row.id) }, ...customerAccessWhere(actor) },
     select: { id: true, name: true, displayName: true, phone: true, email: true, avatarUrl: true, isBlocked: true },
     orderBy: { updatedAt: "desc" }
   });
 }
-async function conversationsMatchingPhone(phone: string, customerIds: string[] = []) {
+async function conversationsMatchingPhone(phone: string, actor: NonNullable<AuthedRequest["user"]>, customerIds: string[] = []) {
   const variants = phoneNumberLookupVariants(phone);
   const externalIds = [...new Set([
     ...variants, `+${phone}`, ...variants.map((value) => `${value}@s.whatsapp.net`), ...variants.map((value) => `${value}@c.us`)
   ])];
   return prisma.conversation.findMany({
-    where: { channel: Channel.WHATSAPP, OR: [
+    where: { channel: Channel.WHATSAPP, ...(actor.role === Role.BRANCH_USER ? { branchId: actor.branchId || "" } : {}), OR: [
       { externalCustomerId: { in: externalIds } }, { externalConversationId: { in: externalIds } },
       ...(customerIds.length ? [{ customerId: { in: customerIds } }] : [])
     ] },
@@ -137,22 +219,21 @@ async function conversationsMatchingPhone(phone: string, customerIds: string[] =
   });
 }
 async function startWhatsAppConversation(actor: NonNullable<AuthedRequest["user"]>, rawPhone: string, displayName = "", preferredCustomerId?: string, source: "PHONE" | "CONTACT" = "PHONE") {
-  const receiver = await prisma.user.findFirst({ where: { id: actor.id, canReceiveWhatsApp: true }, select: { id: true } });
-  if (!receiver) throw new ContactConversationError(403, "حسابك غير مخصص لاستقبال محادثات WhatsApp");
+  if (!canReadChannel(actor, Channel.WHATSAPP) || actor.channelAccess.WHATSAPP !== "FULL") throw new ContactConversationError(403, "صلاحية القراءة فقط لا تسمح ببدء محادثة WhatsApp");
   if (actor.role === Role.BRANCH_USER && !actor.branchId) throw new ContactConversationError(409, "اربط حسابك بفرع قبل بدء محادثة");
 
   let phone: string;
   try { phone = normalizePhoneNumber(rawPhone); }
   catch (error) { throw new ContactConversationError(400, error instanceof Error ? error.message : "أدخل رقمًا دوليًا صحيحًا"); }
   return withInboundConversationLock(Channel.WHATSAPP, phone, async () => {
-    const customers = await customersMatchingPhone(phone);
+    const customers = await customersMatchingPhone(phone, actor);
     let preferredCustomer = preferredCustomerId ? customers.find((customer) => customer.id === preferredCustomerId) : undefined;
     if (preferredCustomerId && !preferredCustomer) {
-      preferredCustomer = await prisma.customer.findUnique({ where: { id: preferredCustomerId }, select: { id: true, name: true, displayName: true, phone: true, email: true, avatarUrl: true, isBlocked: true } }) || undefined;
+      preferredCustomer = await prisma.customer.findFirst({ where: { id: preferredCustomerId, ...customerAccessWhere(actor) }, select: { id: true, name: true, displayName: true, phone: true, email: true, avatarUrl: true, isBlocked: true } }) || undefined;
       if (!preferredCustomer) throw new ContactConversationError(404, "جهة الاتصال غير موجودة");
     }
     const customerIds = [...new Set([...customers.map((customer) => customer.id), ...(preferredCustomer ? [preferredCustomer.id] : [])])];
-    const existingConversations = await conversationsMatchingPhone(phone, customerIds);
+    const existingConversations = await conversationsMatchingPhone(phone, actor, customerIds);
     let existing: (typeof existingConversations)[number] | undefined;
     for (const candidate of existingConversations) {
       if (await canReadConversationOrHistory(actor, candidate)) { existing = candidate; break; }
@@ -233,7 +314,7 @@ app.post("/api/media", agentGuard, express.raw({ type: () => true, limit: upload
   if (req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) {
     const conversationId = req.header("x-conversation-id");
     if (!conversationId) return res.status(400).json({ error: "يلزم تحديد المحادثة قبل رفع الملف" });
-    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true } });
+    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, channel: true, externalConversationId: true } });
     if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
     if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية رفع ملف لهذه المحادثة" });
   }
@@ -276,7 +357,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
   if (isWorkUser) await dispatchQueued();
   const token = signToken({ id: user.id, role: user.role, name: user.name, authVersion: user.authVersion });
-  res.json({ token, user: { id: user.id, name: user.name, email: user.email, username: user.username, role: user.role, department: user.department, branchId: user.branchId, canViewAllConversations: user.canViewAllConversations, canTransferConversations: user.canTransferConversations, canManageCatalog: user.canManageCatalog, canViewReports: user.canViewReports, canManageTeam: user.canManageTeam } });
+  res.json({ token, user: { id: user.id, name: user.name, email: user.email, username: user.username, role: user.role, department: user.department, branchId: user.branchId, canViewAllConversations: user.canViewAllConversations, canTransferConversations: user.canTransferConversations, canManageCatalog: user.canManageCatalog, canViewReports: user.canViewReports, canManageTeam: user.canManageTeam, channelAccess: await channelAccessForEmployee(user) } });
 });
 
 app.post("/api/auth/logout", authenticate, async (req: AuthedRequest, res) => {
@@ -295,7 +376,7 @@ app.post("/api/auth/logout", authenticate, async (req: AuthedRequest, res) => {
 app.get("/api/auth/me", authenticate, async (req: AuthedRequest, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { id: true, username: true, name: true, email: true, role: true, department: true, branchId: true, branch: { select: { name: true } }, presence: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } });
   if (!user) return res.status(401).json({ error: "الحساب غير موجود" });
-  res.json(user);
+  res.json({ ...user, channelAccess: req.user!.channelAccess });
 });
 
 app.patch("/api/auth/me", authenticate, async (req: AuthedRequest, res: express.Response) => {
@@ -490,16 +571,32 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
   ] : [{ assignedAgentId: actor.id }];
   const channel = typeof req.query.channel === "string" ? req.query.channel : undefined;
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
   const paginated = req.query.limit !== undefined || req.query.cursor !== undefined;
   const cursor = req.query.cursor === undefined ? null : decodePageCursor(req.query.cursor);
   if (req.query.cursor !== undefined && !cursor) return res.status(400).json({ error: "مؤشر صفحة المحادثات غير صالح" });
   const limit = pageLimit(req.query.limit);
+  const queryFilters: Prisma.ConversationWhereInput[] = [...scope];
+  queryFilters.push({ channel: { in: receivingChannels.filter((item) => canReadChannel(actor, item)) as Channel[] } });
+  if (cursor) queryFilters.push({ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] });
+  if (q) {
+    const phoneTerms = phoneSearchTerms(q);
+    const customerSearch: Prisma.CustomerWhereInput[] = [
+      { displayName: { contains: q, mode: "insensitive" } }, { name: { contains: q, mode: "insensitive" } },
+      { phone: { contains: q } }, ...phoneTerms.map((term) => ({ phone: { contains: term } }))
+    ];
+    queryFilters.push({ OR: [
+      { customer: { is: { OR: customerSearch } } },
+      ...(phoneTerms.length ? phoneTerms.flatMap((term) => [{ externalCustomerId: { contains: term } }, { externalConversationId: { contains: term } }]) : [
+        { externalCustomerId: { contains: q, mode: "insensitive" as const } }, { externalConversationId: { contains: q, mode: "insensitive" as const } }
+      ])
+    ] });
+  }
   const conversations = await prisma.conversation.findMany({
     where: {
-      ...(scope.length ? { AND: [...scope, ...(cursor ? [{ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] }] : [])] } : {}),
+      ...(queryFilters.length ? { AND: queryFilters } : {}),
       ...(channel && channel !== "ALL" ? { channel: channel as Channel } : {}),
-      ...(status && status !== "ALL" ? { status: status as ConversationStatus } : {}),
-      ...(!scope.length && cursor ? { OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] } : {})
+      ...(status && status !== "ALL" ? { status: status as ConversationStatus } : {})
     },
     include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } },
     orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }], take: paginated ? limit + 1 : 100
@@ -517,7 +614,7 @@ app.get("/api/conversations/favorites", agentGuard, async (req: AuthedRequest, r
     include: { conversation: { include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: { createdAt: "desc" }, take: 1 } } } },
     orderBy: { createdAt: "desc" }, take: 100
   });
-  res.json(favorites.map((favorite) => favorite.conversation));
+  res.json(favorites.map((favorite) => favorite.conversation).filter((conversation) => canReadConversation(req.user!, conversation)));
 });
 
 app.get("/api/conversations/pins", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -527,13 +624,13 @@ app.get("/api/conversations/pins", agentGuard, async (req: AuthedRequest, res: e
     include: { conversation: { include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } },
     orderBy: { createdAt: "desc" }, take: 100
   });
-  res.json(pins.map((pin) => pin.conversation));
+  res.json(pins.map((pin) => pin.conversation).filter((conversation) => canReadConversation(req.user!, conversation)));
 });
 
 app.put("/api/conversations/:id/favorite", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ favorite: z.boolean() }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة المفضلة غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   if (parsed.data.favorite) await prisma.conversationFavorite.upsert({ where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } }, create: { userId: req.user!.id, conversationId: conversation.id }, update: {} });
@@ -545,7 +642,7 @@ app.put("/api/conversations/:id/favorite", agentGuard, async (req: AuthedRequest
 app.put("/api/conversations/:id/pin", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ pinned: z.boolean() }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة التثبيت غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   if (parsed.data.pinned) {
@@ -660,11 +757,14 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   const readOnly = !canWorkOnConversation(req.user!, conversation);
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  const canAddInternalNote = (req.user!.role !== Role.AGENT && req.user!.role !== Role.BRANCH_USER || req.user!.channelAccess[conversation.channel] === "FULL")
+    && canReadChannel(req.user!, conversation.channel)
+    && (canReadConversation(req.user!, conversation) || canReadTeamConversations(req.user!, conversation));
   conversation.privateNotes = conversation.privateNotes.filter((note) => canViewPrivateConversationNote(req.user!, note));
   if (!canReadConversation(req.user!, conversation)) conversation.whisperNotes = [];
   if (readOnly) conversation.customer.orders = conversation.customer.orders.filter((order) => order.conversationId === conversation!.id);
   const openedConversation = conversation;
-  if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && openedConversation.assignedAgentId === req.user!.id && openedConversation.serviceTag && openedConversation.serviceTag !== "تواصل مباشر") {
+  if (!readOnly && (req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && openedConversation.assignedAgentId === req.user!.id && openedConversation.serviceTag && openedConversation.serviceTag !== "تواصل مباشر") {
     try {
       await withInboundConversationLock(openedConversation.channel, openedConversation.externalConversationId, async () => {
         const customerName = openedConversation.customer.displayName || openedConversation.customer.name;
@@ -725,7 +825,7 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   conversation.internalNotes.reverse();
   conversation.privateNotes.reverse();
   if (!readOnly) void markBaileysMessagesRead(conversation.messages.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
-  res.json(messageLimit ? { ...conversation, hasMoreMessages, readOnly, canSendPrivateNote: true } : { ...conversation, readOnly, canSendPrivateNote: true });
+  res.json(messageLimit ? { ...conversation, hasMoreMessages, readOnly, canAddInternalNote, canSendPrivateNote: true } : { ...conversation, readOnly, canAddInternalNote, canSendPrivateNote: true });
 });
 
 app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -806,7 +906,7 @@ app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest
 app.patch("/api/conversations/:id/customer", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = customerProfileSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات ملف العميل غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, customerId: true, assignedAgentId: true, branchId: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, customerId: true, assignedAgentId: true, branchId: true, channel: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل بيانات هذا العميل" });
   const customer = await prisma.customer.update({ where: { id: conversation.customerId }, data: parsed.data });
@@ -817,13 +917,13 @@ app.patch("/api/conversations/:id/customer", agentGuard, async (req: AuthedReque
   res.json(customer);
 });
 
-app.get("/api/contacts", agentGuard, async (req: express.Request, res: express.Response) => {
+app.get("/api/contacts", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
   const contacts = await prisma.customer.findMany({
-    where: q ? { OR: [
+    where: { ...customerAccessWhere(req.user!), ...(q ? { OR: [
       { displayName: { contains: q, mode: "insensitive" } }, { name: { contains: q, mode: "insensitive" } },
       { phone: { contains: q } }, { email: { contains: q, mode: "insensitive" } }
-    ] } : {},
+    ] } : {}) },
     select: { id: true, name: true, displayName: true, phone: true, email: true, avatarUrl: true },
     orderBy: [{ displayName: "asc" }, { name: "asc" }], take: 100
   });
@@ -835,8 +935,8 @@ app.get("/api/contacts/phone-search", agentGuard, async (req: AuthedRequest, res
   let phone: string;
   try { phone = normalizePhoneNumber(rawPhone); }
   catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "أدخل رقمًا دوليًا صحيحًا" }); }
-  const customers = await customersMatchingPhone(phone);
-  const candidates = await conversationsMatchingPhone(phone, customers.map((customer) => customer.id));
+  const customers = await customersMatchingPhone(phone, req.user!);
+  const candidates = await conversationsMatchingPhone(phone, req.user!, customers.map((customer) => customer.id));
   const conversations: Array<(typeof candidates)[number] & { readOnly: boolean }> = [];
   for (const conversation of candidates) {
     if (await canReadConversationOrHistory(req.user!, conversation)) {
@@ -849,6 +949,7 @@ app.get("/api/contacts/phone-search", agentGuard, async (req: AuthedRequest, res
 app.post("/api/contacts/whatsapp-conversation", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ phone: z.string().trim().min(1).max(64), displayName: z.string().trim().max(120).optional() }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "أدخل رقم الهاتف واسمًا اختياريًا صالحين" });
+  if (!canReadChannel(req.user!, Channel.WHATSAPP)) return res.status(403).json({ error: "قناة WhatsApp غير متاحة لحسابك" });
   try {
     const result = await startWhatsAppConversation(req.user!, parsed.data.phone, parsed.data.displayName || "");
     return res.status(result.created ? 201 : 200).json(result);
@@ -858,8 +959,94 @@ app.post("/api/contacts/whatsapp-conversation", agentGuard, async (req: AuthedRe
   }
 });
 
+app.get("/api/whatsapp/groups", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  if (!canReadChannel(req.user!, Channel.WHATSAPP)) return res.status(403).json({ error: "قناة WhatsApp غير متاحة لحسابك" });
+  if (await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "عرض جروبات WhatsApp يتطلب وضع Baileys" });
+  let groups: BaileysWhatsAppGroup[];
+  try { groups = await listBaileysWhatsAppGroups(); }
+  catch (error) { return res.status(503).json({ error: error instanceof Error ? error.message : "تعذر تحميل جروبات WhatsApp" }); }
+  for (const group of groups) await ensureWhatsAppGroupConversation(group);
+  const actor = req.user!;
+  const canSeeAll = actor.role === Role.ADMIN || actor.role === Role.SUPERVISOR && hasPermission(actor, "canViewAllConversations");
+  const scope: Prisma.ConversationWhereInput = actor.role === Role.BRANCH_USER
+    ? { branchId: actor.branchId || "" }
+    : canReadTeamConversations(actor) || canSeeAll ? {} : { assignedAgentId: actor.id };
+  const conversations = await prisma.conversation.findMany({
+    where: { channel: Channel.WHATSAPP, externalConversationId: { endsWith: "@g.us" }, ...scope },
+    include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } },
+    orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }]
+  });
+  res.json(conversations.map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation) })));
+});
+
+app.post("/api/whatsapp/groups", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ subject: z.string().trim().min(1).max(100), participants: z.array(z.string().trim().min(1).max(32)).min(1).max(50) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "أدخل اسم المجموعة ورقم عضو واحد على الأقل" });
+  if (await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "إنشاء جروبات WhatsApp يتطلب وضع Baileys" });
+  if (req.user!.channelAccess.WHATSAPP !== "FULL") return res.status(403).json({ error: "حسابك غير مخصص لاستقبال محادثات WhatsApp" });
+  if (req.user!.role === Role.BRANCH_USER && !req.user!.branchId) return res.status(409).json({ error: "اربط حسابك بفرع قبل إنشاء مجموعة" });
+  let participants: string[];
+  try { participants = [...new Set(parsed.data.participants.map(normalizePhoneNumber))]; }
+  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "رقم عضو غير صالح" }); }
+  try {
+    const group = await createBaileysWhatsAppGroup(parsed.data.subject, participants);
+    const conversation = await ensureWhatsAppGroupConversation(group);
+    const updated = await prisma.conversation.update({ where: { id: conversation.id }, data: {
+      assignedAgentId: req.user!.id, status: ConversationStatus.OPEN,
+      ...(req.user!.role === Role.BRANCH_USER ? { branchId: req.user!.branchId } : {})
+    } });
+    await audit(req.user!.id, "WHATSAPP_GROUP_CREATED", updated.id, { groupId: group.id, participantCount: participants.length });
+    io.to("admins").emit("conversation:updated", updated);
+    io.to(`agent:${req.user!.id}`).emit("conversation:updated", updated);
+    return res.status(201).json({ group, conversationId: updated.id });
+  } catch (error) { return res.status(502).json({ error: error instanceof Error ? error.message : "تعذر إنشاء مجموعة WhatsApp" }); }
+});
+
+app.get("/api/whatsapp/groups/:groupId", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const groupId = String(req.params.groupId);
+  if (!/^[^@\s]+@g\.us$/i.test(groupId)) return res.status(400).json({ error: "معرّف مجموعة WhatsApp غير صالح" });
+  const conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: Channel.WHATSAPP, externalConversationId: groupId } } });
+  if (!conversation) return res.status(404).json({ error: "مجموعة WhatsApp غير موجودة في النظام" });
+  if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المجموعة ليست ضمن محادثاتك" });
+  try { return res.json(await getBaileysWhatsAppGroup(groupId)); }
+  catch (error) { return res.status(503).json({ error: error instanceof Error ? error.message : "تعذر تحميل أعضاء المجموعة" }); }
+});
+
+app.patch("/api/whatsapp/groups/:groupId/participants", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const groupId = String(req.params.groupId);
+  const parsed = z.object({ action: z.enum(["add", "remove", "promote", "demote"]), participants: z.array(z.string().trim().min(1).max(32)).min(1).max(50) }).strict().safeParse(req.body);
+  if (!/^[^@\s]+@g\.us$/i.test(groupId) || !parsed.success) return res.status(400).json({ error: "إجراء أو بيانات أعضاء المجموعة غير صالحة" });
+  const conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: Channel.WHATSAPP, externalConversationId: groupId } } });
+  if (!conversation) return res.status(404).json({ error: "مجموعة WhatsApp غير موجودة في النظام" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية إدارة هذه المجموعة" });
+  if (await getWhatsAppMode() !== "BAILEYS") return res.status(409).json({ error: "إدارة جروبات WhatsApp تتطلب وضع Baileys" });
+  let participants: string[];
+  try { participants = [...new Set(parsed.data.participants.map(normalizePhoneNumber))]; }
+  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "رقم عضو غير صالح" }); }
+  try {
+    const group = await updateBaileysWhatsAppGroupParticipants(groupId, participants, parsed.data.action);
+    await audit(req.user!.id, "WHATSAPP_GROUP_PARTICIPANTS_UPDATED", conversation.id, { action: parsed.data.action, participantCount: participants.length });
+    io.to(`conversation:${conversation.id}`).to("admins").emit("whatsapp:group-updated", { conversationId: conversation.id, group });
+    return res.json(group);
+  } catch (error) { return res.status(502).json({ error: error instanceof Error ? error.message : "تعذر تحديث أعضاء المجموعة" }); }
+});
+
+app.post("/api/whatsapp/conversations/by-phone", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ phone: z.string().trim().min(1).max(32) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "أدخل رقم هاتف صالحًا" });
+  if (!canReadChannel(req.user!, Channel.WHATSAPP)) return res.status(403).json({ error: "قناة WhatsApp غير متاحة لحسابك" });
+  try {
+    const result = await startWhatsAppConversation(req.user!, parsed.data.phone);
+    return res.status(result.created ? 201 : 200).json(result);
+  } catch (error) {
+    if (error instanceof ContactConversationError) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
+});
+
 app.post("/api/contacts/:id/whatsapp-conversation", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const customer = await prisma.customer.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, displayName: true, phone: true } });
+  if (!canReadChannel(req.user!, Channel.WHATSAPP)) return res.status(403).json({ error: "قناة WhatsApp غير متاحة لحسابك" });
+  const customer = await prisma.customer.findFirst({ where: { id: req.params.id, ...customerAccessWhere(req.user!) }, select: { id: true, name: true, displayName: true, phone: true } });
   if (!customer) return res.status(404).json({ error: "جهة الاتصال غير موجودة" });
   if (!customer.phone) return res.status(409).json({ error: "أضف رقم واتساب دوليًا صالحًا لجهة الاتصال أولًا" });
   try {
@@ -877,7 +1064,6 @@ app.get("/api/customers", agentGuard, async (req: AuthedRequest, res: express.Re
   const favoriteOnly = req.query.favoritesOnly === "true";
   const pageValue = Number(req.query.page || 1);
   const page = Number.isInteger(pageValue) ? Math.max(1, Math.min(pageValue, 10_000)) : 1;
-  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
   const where: Prisma.CustomerWhereInput = {
     ...(q ? { OR: [
       { displayName: { contains: q, mode: "insensitive" } }, { name: { contains: q, mode: "insensitive" } },
@@ -885,7 +1071,7 @@ app.get("/api/customers", agentGuard, async (req: AuthedRequest, res: express.Re
     ] } : {}),
     ...(tagId ? { tags: { some: { tagId } } } : {}),
     ...(favoriteOnly ? { favorites: { some: { userId: req.user!.id } } } : {}),
-    ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {})
+    ...customerAccessWhere(req.user!)
   };
   const [customers, total] = await prisma.$transaction([
     prisma.customer.findMany({ where, include: { tags: { include: { tag: true } } }, orderBy: { updatedAt: "desc" }, skip: (page - 1) * 50, take: 50 }),
@@ -895,9 +1081,8 @@ app.get("/api/customers", agentGuard, async (req: AuthedRequest, res: express.Re
 });
 
 app.get("/api/customers/favorites", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
   const favorites = await prisma.customerFavorite.findMany({
-    where: { userId: req.user!.id, ...(!canSeeAll ? { customer: { is: { conversations: { some: { assignedAgentId: req.user!.id } } } } } : {}) },
+    where: { userId: req.user!.id, ...(canSeeAllCustomerData(req.user!) ? {} : { customer: { is: customerAccessWhere(req.user!) } }) },
     select: { customerId: true }, orderBy: { createdAt: "desc" }
   });
   res.json({ ids: favorites.map((favorite) => favorite.customerId) });
@@ -906,9 +1091,8 @@ app.get("/api/customers/favorites", agentGuard, async (req: AuthedRequest, res: 
 app.put("/api/customers/:id/favorite", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ favorite: z.boolean() }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة المفضلة غير صالحة" });
-  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
   const customer = await prisma.customer.findFirst({
-    where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) },
+    where: { id: req.params.id, ...customerAccessWhere(req.user!) },
     select: { id: true }
   });
   if (!customer) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
@@ -927,9 +1111,8 @@ app.put("/api/customers/:id/favorite", agentGuard, async (req: AuthedRequest, re
 app.patch("/api/customers/:id/flags", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ isVip: z.boolean().optional(), isBlocked: z.boolean().optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة العميل غير صالحة" });
-  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
   const customer = await prisma.customer.findFirst({
-    where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) },
+    where: { id: req.params.id, ...customerAccessWhere(req.user!, true) },
     select: { id: true }
   });
   if (!customer) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
@@ -1002,10 +1185,11 @@ app.post("/api/admin/customers/import", permissionGuard("canManageTeam"), async 
 });
 
 app.get("/api/customers/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
-  const customer = await prisma.customer.findFirst({ where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) }, include: {
-     tags: { include: { tag: true } }, orders: { where: canSeeAll ? {} : { conversation: { is: { assignedAgentId: req.user!.id } } }, orderBy: { createdAt: "desc" }, take: 50 },
-    conversations: { where: canSeeAll ? {} : { assignedAgentId: req.user!.id }, select: { id: true, channel: true, status: true, subject: true, lastMessageAt: true }, orderBy: { lastMessageAt: "desc" }, take: 50 }
+  const canSeeAll = canSeeAllCustomerData(req.user!);
+  const conversationWhere = canSeeAll ? {} : customerConversationWhere(req.user!);
+  const customer = await prisma.customer.findFirst({ where: { id: req.params.id, ...customerAccessWhere(req.user!) }, include: {
+     tags: { include: { tag: true } }, orders: { where: canSeeAll ? {} : { conversation: { is: conversationWhere } }, orderBy: { createdAt: "desc" }, take: 50 },
+    conversations: { where: conversationWhere, select: { id: true, channel: true, status: true, subject: true, lastMessageAt: true }, orderBy: { lastMessageAt: "desc" }, take: 50 }
   } });
   if (!customer) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
   res.json(customer);
@@ -1014,12 +1198,11 @@ app.get("/api/customers/:id", agentGuard, async (req: AuthedRequest, res: expres
 app.patch("/api/customers/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = customerProfileSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات ملف العميل غير صالحة" });
-  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
-  const existing = await prisma.customer.findFirst({ where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) }, select: { id: true } });
+  const existing = await prisma.customer.findFirst({ where: { id: req.params.id, ...customerAccessWhere(req.user!, true) }, select: { id: true } });
   if (!existing) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
   const customer = await prisma.customer.update({ where: { id: existing.id }, data: parsed.data, include: { tags: { include: { tag: true } } } });
   await audit(req.user!.id, "CUSTOMER_PROFILE_UPDATED", undefined, { customerId: customer.id });
-  const conversations = await prisma.conversation.findMany({ where: { customerId: customer.id, ...(!canSeeAll ? { assignedAgentId: req.user!.id } : {}) }, select: { id: true } });
+  const conversations = await prisma.conversation.findMany({ where: { customerId: customer.id, ...(canSeeAllCustomerData(req.user!) ? {} : customerConversationWhere(req.user!, true)) }, select: { id: true } });
   for (const conversation of conversations) io.to(`conversation:${conversation.id}`).emit("customer:updated", { conversationId: conversation.id, customerId: customer.id, customer });
   io.to("admins").emit("customer:updated", { customerId: customer.id, customer });
   res.json(customer);
@@ -1068,8 +1251,7 @@ app.delete("/api/admin/customer-tags/:id", permissionGuard("canManageCatalog"), 
 app.put("/api/customers/:id/tags", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ tagIds: z.array(z.string().min(1)).max(30) }).strict().safeParse(req.body);
   if (!parsed.success || new Set(parsed.data?.tagIds || []).size !== parsed.data?.tagIds.length) return res.status(400).json({ error: "قائمة الوسوم غير صالحة" });
-  const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
-  const customer = await prisma.customer.findFirst({ where: { id: req.params.id, ...(!canSeeAll ? { conversations: { some: { assignedAgentId: req.user!.id } } } : {}) }, select: { id: true } });
+  const customer = await prisma.customer.findFirst({ where: { id: req.params.id, ...customerAccessWhere(req.user!, true) }, select: { id: true } });
   if (!customer) return res.status(404).json({ error: "العميل غير موجود أو ليس ضمن محادثاتك" });
   const validTags = await prisma.customerTag.count({ where: { id: { in: parsed.data.tagIds } } });
   if (validTags !== new Set(parsed.data.tagIds).size) return res.status(400).json({ error: "أحد الوسوم المحددة غير موجود" });
@@ -1079,7 +1261,7 @@ app.put("/api/customers/:id/tags", agentGuard, async (req: AuthedRequest, res: e
   });
   const tags = await prisma.customerTagAssignment.findMany({ where: { customerId: customer.id }, include: { tag: true } });
   await audit(req.user!.id, "CUSTOMER_TAGS_UPDATED", undefined, { customerId: customer.id, tagIds: parsed.data.tagIds });
-  const conversations = await prisma.conversation.findMany({ where: { customerId: customer.id, ...(!canSeeAll ? { assignedAgentId: req.user!.id } : {}) }, select: { id: true } });
+  const conversations = await prisma.conversation.findMany({ where: { customerId: customer.id, ...(canSeeAllCustomerData(req.user!) ? {} : customerConversationWhere(req.user!, true)) }, select: { id: true } });
   const payload = { customerId: customer.id, tags };
   for (const conversation of conversations) io.to(`conversation:${conversation.id}`).emit("customer:tags-updated", payload);
   io.to("admins").emit("customer:tags-updated", payload);
@@ -1339,7 +1521,7 @@ app.post("/api/conversations/:id/messages/:messageId/forward", agentGuard, async
   const source = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true, mediaAsset: { select: { id: true, contentType: true } } } });
   const target = await prisma.conversation.findUnique({ where: { id: parsed.data.targetConversationId }, include: { customer: { select: { isBlocked: true } } } });
   if (!source || !target) return res.status(404).json({ error: "الرسالة أو المحادثة المستهدفة غير موجودة" });
-  if (!canReadConversation(req.user!, source.conversation) || !canWorkOnConversation(req.user!, target)) return res.status(403).json({ error: "لا تملك صلاحية تحويل هذه الرسالة بين المحادثتين" });
+  if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && req.user!.channelAccess[source.conversation.channel] !== "FULL" || !canReadConversation(req.user!, source.conversation) || !canWorkOnConversation(req.user!, target)) return res.status(403).json({ error: "لا تملك صلاحية تحويل هذه الرسالة بين المحادثتين" });
   if (target.customer.isBlocked) return res.status(409).json({ error: "لا يمكن إرسال رسالة إلى عميل محظور داخل النظام" });
   if (source.direction === MessageDirection.INTERNAL || source.kind === MessageKind.SYSTEM || source.kind === MessageKind.LOCATION && (source.latitude === null || source.longitude === null)) return res.status(409).json({ error: "لا يمكن تحويل هذا النوع من الرسائل" });
   const receivedAt = await lastInboundAt(target.id, target.lastInboundAt);
@@ -1494,10 +1676,11 @@ app.patch("/api/admin/products/:id", permissionGuard("canManageCatalog"), async 
 app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ text: z.string().min(1).max(2000) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اكتب الملاحظة السرية" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { assignedAgent: { select: { role: true } } } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { assignedAgent: { select: { role: true, department: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   const assignedRole = conversation.assignedAgent?.role;
   if (!conversation.assignedAgentId || assignedRole !== Role.AGENT && assignedRole !== Role.BRANCH_USER) return res.status(409).json({ error: "أسند المحادثة لموظف قبل إرسال توجيه سري" });
+  if ((await channelAccessForEmployee(conversation.assignedAgent!))[conversation.channel] === "EXCLUDED") return res.status(409).json({ error: "الموظف المسند إليه لا يملك صلاحية هذه القناة" });
   const note = await prisma.whisperNote.create({ data: { conversationId: conversation.id, authorId: req.user!.id, text: parsed.data.text } });
   await audit(req.user!.id, "WHISPER_SENT", conversation.id);
   io.to(`agent:${conversation.assignedAgentId}`).to("admins").emit("whisper:new", note);
@@ -1505,17 +1688,19 @@ app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest
 });
 
 app.get("/api/conversations/:id/private-note-recipients", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
   const recipientFilters: Prisma.UserWhereInput[] = [{ role: Role.AGENT }];
   if (conversation.branchId) recipientFilters.push({ role: Role.BRANCH_USER, branchId: conversation.branchId });
   const recipients = await prisma.user.findMany({
     where: { id: { not: req.user!.id }, isActive: true, OR: recipientFilters },
-    select: { id: true, name: true, presence: true, branch: { select: { name: true } } },
+    select: { id: true, name: true, role: true, department: true, presence: true, branch: { select: { name: true } }, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true },
     orderBy: { name: "asc" }
   });
-  res.json(recipients);
+  const policies = await prisma.departmentChannelAccess.findMany({ where: { channel: conversation.channel }, select: { department: true, access: true } });
+  const policyByDepartment = new Map(policies.map((policy) => [policy.department, policy.access]));
+  res.json(recipients.filter((recipient) => effectiveChannelAccess(recipient, conversation.channel, recipient.department ? policyByDepartment.get(recipient.department) : undefined) !== "EXCLUDED"));
 });
 
 app.post("/api/conversations/:id/private-notes", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -1524,8 +1709,8 @@ app.post("/api/conversations/:id/private-notes", agentGuard, async (req: AuthedR
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, customer: { select: { name: true, displayName: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
-  const recipient = await prisma.user.findUnique({ where: { id: parsed.data.recipientId }, select: { id: true, name: true, role: true, branchId: true, isActive: true } });
-  if (!recipient || recipient.id === req.user!.id || !canReceivePrivateConversationNote(recipient, conversation)) return res.status(400).json({ error: "الزميل المحدد غير متاح لهذه المحادثة" });
+  const recipient = await prisma.user.findUnique({ where: { id: parsed.data.recipientId }, select: { id: true, name: true, role: true, branchId: true, isActive: true, department: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true } });
+  if (!recipient || recipient.id === req.user!.id || !canReceivePrivateConversationNote(recipient, conversation) || (await channelAccessForEmployee(recipient))[conversation.channel] === "EXCLUDED") return res.status(400).json({ error: "الزميل المحدد غير متاح لهذه المحادثة" });
   const note = await prisma.conversationPrivateNote.create({
     data: { conversationId: conversation.id, authorId: req.user!.id, recipientId: recipient.id, text: parsed.data.text },
     include: { author: { select: { id: true, name: true } }, recipient: { select: { id: true, name: true } } }
@@ -1552,7 +1737,8 @@ app.post("/api/conversations/:id/notes", agentGuard, async (req: AuthedRequest, 
   if (!parsed.success) return res.status(400).json({ error: "اكتب ملاحظة داخلية لا تتجاوز 4000 حرف" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
-  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية إضافة ملاحظة لهذه المحادثة" });
+  if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && req.user!.channelAccess[conversation.channel] !== "FULL") return res.status(403).json({ error: "لا يمكن إضافة ملاحظة داخلية بقناة القراءة فقط" });
+  if (!canReadChannel(req.user!, conversation.channel) || !canReadConversation(req.user!, conversation) && !canReadTeamConversations(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية إضافة ملاحظة لهذه المحادثة" });
   const note = await prisma.conversationNote.create({ data: { conversationId: conversation.id, authorId: req.user!.id, text: parsed.data.text }, include: { author: { select: { id: true, name: true } } } });
   await audit(req.user!.id, "CONVERSATION_NOTE_ADDED", conversation.id, { noteId: note.id });
   io.to(`conversation:${conversation.id}`).to("admins").emit("conversation-note:new", { conversationId: conversation.id, note });
@@ -1567,10 +1753,12 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
     const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: { assignedAgent: { select: { id: true, name: true } } } });
     if (!conversation) return { error: res.status(404).json({ error: "المحادثة غير موجودة" }) };
     if (!canReadConversation(req.user!, conversation)) return { error: res.status(403).json({ error: "لا تملك صلاحية لتحويل هذه المحادثة" }) };
+    if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && req.user!.channelAccess[conversation.channel] !== "FULL") return { error: res.status(403).json({ error: "صلاحية القراءة فقط لا تسمح بتحويل المحادثة" }) };
     let assignee: { id: string; role: Role; presence: Presence; branchId: string | null } | null = null;
     if (parsed.data.agentId) {
-      assignee = await prisma.user.findFirst({ where: { id: parsed.data.agentId, role: { in: [Role.AGENT, Role.BRANCH_USER] }, isActive: true, ...channelEligibilityWhere(conversation.channel) }, select: { id: true, role: true, presence: true, branchId: true } });
+      assignee = await prisma.user.findFirst({ where: { id: parsed.data.agentId, role: { in: [Role.AGENT, Role.BRANCH_USER] }, isActive: true }, select: { id: true, role: true, presence: true, branchId: true } });
       if (!assignee) return { error: res.status(400).json({ error: "الموظف المحدد غير متاح" }) };
+      if (!await employeeCanReceiveChannel(assignee.id, conversation.channel)) return { error: res.status(400).json({ error: "الموظف المحدد لا يملك صلاحية كاملة لهذه القناة" }) };
       if (assignee.presence !== Presence.ONLINE) return { error: res.status(409).json({ error: "لا يمكن إسناد محادثة لموظف غير متصل" }) };
       if (assignee.role === Role.BRANCH_USER && !assignee.branchId) return { error: res.status(409).json({ error: "اربط الموظف بفرع قبل إسناد المحادثة" }) };
     }
@@ -1622,41 +1810,46 @@ app.patch("/api/conversations/:id/assignment", permissionGuard("canTransferConve
   res.json(updated);
 });
 
-app.get("/api/agents/customer-care-colleagues", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "التحويل متاح لموظفي خدمة العملاء فقط" });
+app.get("/api/agents/handoff-colleagues", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  if (req.user!.role !== Role.AGENT) return res.status(403).json({ error: "التحويل متاح للموظفين فقط" });
   const conversationId = typeof req.query.conversationId === "string" ? req.query.conversationId : "";
   const conversation = conversationId ? await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, channel: true } }) : null;
   if (!conversation || conversation.assignedAgentId !== req.user!.id) return res.status(404).json({ error: "المحادثة غير موجودة أو ليست مسندة إليك" });
+  if (req.user!.channelAccess[conversation.channel] !== "FULL") return res.status(403).json({ error: "صلاحية القراءة فقط لا تسمح بتحويل المحادثة" });
   const colleagues = await prisma.user.findMany({
-    where: { id: { not: req.user!.id }, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE, ...channelEligibilityWhere(conversation.channel) },
-    select: { id: true, name: true, presence: true }, orderBy: { name: "asc" }
+    where: { id: { not: req.user!.id }, role: Role.AGENT, isActive: true, presence: Presence.ONLINE },
+    select: { id: true, name: true, presence: true, department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true }, orderBy: { name: "asc" }
   });
-  res.json(colleagues);
+  const policies = await prisma.departmentChannelAccess.findMany({ where: { channel: conversation.channel }, select: { department: true, access: true } });
+  const policyByDepartment = new Map(policies.map((policy) => [policy.department, policy.access]));
+  res.json(colleagues.filter((colleague) => canReceiveChannel(colleague, conversation.channel, colleague.department ? policyByDepartment.get(colleague.department) : undefined))
+    .map(({ id, name, presence, department }) => ({ id, name, presence, department })));
 });
 
 app.get("/api/agents/handoff-requests", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "طلبات التحويل متاحة لموظفي خدمة العملاء فقط" });
+  if (req.user!.role !== Role.AGENT) return res.status(403).json({ error: "طلبات التحويل متاحة للموظفين فقط" });
   const requests = await prisma.conversationHandoffRequest.findMany({
     where: { toAgentId: req.user!.id, status: ConversationHandoffStatus.PENDING },
-    include: { fromAgent: { select: { id: true, name: true } }, conversation: { include: { customer: { select: { name: true, displayName: true } } } } },
+    include: { fromAgent: { select: { id: true, name: true } }, conversation: { select: { channel: true, customer: { select: { name: true, displayName: true } } } } },
     orderBy: { createdAt: "desc" }
   });
-  res.json(requests);
+  res.json(requests.filter((request) => req.user!.channelAccess[request.conversation.channel] === "FULL"));
 });
 
 app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "التحويل متاح لموظفي خدمة العملاء فقط" });
+  if (req.user!.role !== Role.AGENT) return res.status(403).json({ error: "التحويل متاح للموظفين فقط" });
   const parsed = z.object({ agentId: z.string().min(1) }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "اختر زميلًا من خدمة العملاء" });
+  if (!parsed.success) return res.status(400).json({ error: "اختر زميلًا مؤهلًا" });
   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (conversation.assignedAgentId !== req.user!.id) return res.status(403).json({ error: "يمكنك تحويل المحادثات المسندة إليك فقط" });
+  if (req.user!.channelAccess[conversation.channel] !== "FULL") return res.status(403).json({ error: "صلاحية القراءة فقط لا تسمح بتحويل المحادثة" });
   if (conversation.status !== ConversationStatus.OPEN && conversation.status !== ConversationStatus.PENDING) return res.status(409).json({ error: "لا يمكن تحويل محادثة مغلقة أو منتهية" });
   const colleague = await prisma.user.findFirst({
-    where: { id: { equals: parsed.data.agentId, not: req.user!.id }, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE, ...channelEligibilityWhere(conversation.channel) },
-    select: { id: true, name: true }
+    where: { id: { equals: parsed.data.agentId, not: req.user!.id }, role: Role.AGENT, isActive: true, presence: Presence.ONLINE },
+    select: { id: true, name: true, department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true }
   });
-  if (!colleague) return res.status(409).json({ error: "الزميل المحدد لم يعد متاحًا" });
+  if (!colleague || (await channelAccessForEmployee(colleague))[conversation.channel] !== "FULL") return res.status(409).json({ error: "الزميل المحدد لم يعد مؤهلًا لهذه القناة" });
   const existing = await prisma.conversationHandoffRequest.findUnique({ where: { conversationId: conversation.id } });
   if (existing?.status === ConversationHandoffStatus.PENDING) return res.status(409).json({ error: "يوجد طلب تحويل بانتظار رد الزميل" });
   const handoffData = { fromAgentId: req.user!.id, toAgentId: colleague.id, status: ConversationHandoffStatus.PENDING, createdAt: new Date(), resolvedAt: null };
@@ -1681,7 +1874,7 @@ app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest
 });
 
 app.post("/api/conversations/:id/handoff-response", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "الرد على طلبات التحويل متاح لموظفي خدمة العملاء فقط" });
+  if (req.user!.role !== Role.AGENT) return res.status(403).json({ error: "الرد على طلبات التحويل متاح للموظفين فقط" });
   const parsed = z.object({ decision: z.enum(["ACCEPT", "DECLINE"]) }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اختر قبول الطلب أو رفضه" });
   const request = await prisma.conversationHandoffRequest.findUnique({ where: { conversationId: req.params.id }, include: { fromAgent: { select: { id: true, name: true } }, conversation: { include: { customer: true } } } });
@@ -1699,11 +1892,8 @@ app.post("/api/conversations/:id/handoff-response", agentGuard, async (req: Auth
     return res.json({ status: ConversationHandoffStatus.DECLINED, conversationId: request.conversationId });
   }
 
-  const eligibleRecipient = await prisma.user.findFirst({
-    where: { id: req.user!.id, role: Role.AGENT, department: Department.CUSTOMER_CARE, isActive: true, presence: Presence.ONLINE, ...channelEligibilityWhere(request.conversation.channel) },
-    select: { id: true }
-  });
-  if (!eligibleRecipient) return res.status(409).json({ error: "لم تعد مؤهلًا لاستقبال محادثات هذه القناة" });
+  const eligibleRecipient = await prisma.user.findFirst({ where: { id: req.user!.id, role: Role.AGENT, isActive: true, presence: Presence.ONLINE }, select: { id: true } });
+  if (!eligibleRecipient || !canReceiveChannel(req.user!, request.conversation.channel)) return res.status(409).json({ error: "لم تعد مؤهلًا لاستقبال محادثات هذه القناة" });
 
   let updated;
   try {
@@ -1798,7 +1988,7 @@ app.put("/api/conversations/:id/messages/:messageId/reaction", agentGuard, async
   if (!parsed.success) return res.status(400).json({ error: "اختر تفاعلًا صالحًا" });
   const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
   if (!message) return res.status(404).json({ error: "الرسالة غير موجودة" });
-  if (!canReadConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية التفاعل مع هذه الرسالة" });
+  if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && req.user!.channelAccess[message.conversation.channel] !== "FULL" || !canReadConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية التفاعل مع هذه الرسالة" });
   let providerSynced = false;
   try {
     if (message.externalId) providerSynced = await reactToProviderMessage({ channel: message.conversation.channel, recipient: channelRecipient(message.conversation.channel, message.conversation.externalConversationId, message.conversation.externalCustomerId), externalId: message.externalId, direction: message.direction === MessageDirection.OUTBOUND ? "OUTBOUND" : "INBOUND", emoji: parsed.data.emoji });
@@ -1815,7 +2005,7 @@ app.put("/api/conversations/:id/messages/:messageId/reaction", agentGuard, async
 app.delete("/api/conversations/:id/messages/:messageId/reaction", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
   if (!message) return res.status(404).json({ error: "الرسالة غير موجودة" });
-  if (!canReadConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل التفاعل" });
+  if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && req.user!.channelAccess[message.conversation.channel] !== "FULL" || !canReadConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل التفاعل" });
   const existing = await prisma.messageReaction.findUnique({ where: { messageId_userId: { messageId: message.id, userId: req.user!.id } } });
   let providerSynced = false;
   try {
@@ -2570,12 +2760,80 @@ app.get("/api/admin/dashboard", permissionGuard("canViewReports"), async (_req: 
   res.json({ kpis: { openChats, queue, slaBreached, avgResponseSeconds: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length / 1000) : null, closedToday, avgCsat: ratings.length ? Number((ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)) : null, csatCount: ratings.length }, agents: employeeStats, recentAudit, pendingHandoffs });
 });
 
-app.get("/api/admin/agents", adminGuard, async (_req: express.Request, res: express.Response) => res.json(await prisma.user.findMany({ where: { role: { in: [Role.AGENT, Role.BRANCH_USER] } }, select: { id: true, name: true, role: true, department: true, presence: true, isActive: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true }, orderBy: { name: "asc" } })));
+app.get("/api/admin/agents", adminGuard, async (_req: express.Request, res: express.Response) => {
+  const agents = await prisma.user.findMany({ where: { role: { in: [Role.AGENT, Role.BRANCH_USER] } }, select: { id: true, name: true, role: true, department: true, presence: true, isActive: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true }, orderBy: { name: "asc" } });
+  const departments = [...new Set(agents.flatMap((agent) => agent.department ? [agent.department] : []))];
+  const policies = departments.length ? await prisma.departmentChannelAccess.findMany({ where: { department: { in: departments } } }) : [];
+  const policiesByDepartment = new Map<Department, Map<Channel, ChannelAccessLevel>>();
+  for (const policy of policies) {
+    const channels = policiesByDepartment.get(policy.department) || new Map<Channel, ChannelAccessLevel>();
+    channels.set(policy.channel, policy.access);
+    policiesByDepartment.set(policy.department, channels);
+  }
+  res.json(agents.map((agent) => ({ ...agent, channelAccess: effectiveEmployeeChannelAccess(agent, agent.department ? policiesByDepartment.get(agent.department) : undefined) })));
+});
+
+app.get("/api/admin/department-channel-access", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => {
+  const policies = await prisma.departmentChannelAccess.findMany();
+  const byDepartment = new Map<Department, Map<Channel, ChannelAccessLevel>>();
+  for (const policy of policies) {
+    const channels = byDepartment.get(policy.department) || new Map<Channel, ChannelAccessLevel>();
+    channels.set(policy.channel, policy.access);
+    byDepartment.set(policy.department, channels);
+  }
+  res.json(Object.values(Department).map((department) => ({
+    department,
+    channelAccess: Object.fromEntries(receivingChannels.map((channel) => [
+      channel,
+      byDepartment.get(department)?.get(channel) || defaultDepartmentChannelAccess(department, channel)
+    ]))
+  })));
+});
+
+app.patch("/api/admin/department-channel-access/:department", permissionGuard("canManageTeam"), async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ channelAccess: z.object({
+    WHATSAPP: z.enum(channelAccessLevels), MESSENGER: z.enum(channelAccessLevels), TELEGRAM: z.enum(channelAccessLevels)
+  }).strict() }).strict().safeParse(req.body);
+  const department = z.nativeEnum(Department).safeParse(req.params.department);
+  if (!department.success || !parsed.success) return res.status(400).json({ error: "إعدادات القنوات أو القسم غير صالحة" });
+  await prisma.$transaction(receivingChannels.map((channel) => prisma.departmentChannelAccess.upsert({
+    where: { department_channel: { department: department.data, channel } },
+    create: { department: department.data, channel, access: parsed.data.channelAccess[channel] },
+    update: { access: parsed.data.channelAccess[channel] }
+  })));
+  const employees = await prisma.user.findMany({ where: { department: department.data, role: { in: [Role.AGENT, Role.BRANCH_USER] } }, select: {
+    id: true, department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true,
+    canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true
+  } });
+  const employeeById = new Map(employees.map((employee) => [employee.id, employee]));
+  const assigned = await prisma.conversation.findMany({
+    where: { assignedAgentId: { in: employees.map((employee) => employee.id) }, channel: { in: [...receivingChannels] as Channel[] }, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
+    select: { assignedAgentId: true, channel: true }
+  });
+  const releaseByChannel = new Map<Channel, Set<string>>();
+  for (const conversation of assigned) {
+    const employee = conversation.assignedAgentId ? employeeById.get(conversation.assignedAgentId) : undefined;
+    if (employee && !canReceiveChannel(employee, conversation.channel, parsed.data.channelAccess[conversation.channel])) {
+      const agentIds = releaseByChannel.get(conversation.channel) || new Set<string>();
+      agentIds.add(employee.id);
+      releaseByChannel.set(conversation.channel, agentIds);
+    }
+  }
+  for (const [channel, agentIds] of releaseByChannel) {
+    await Promise.all([...agentIds].map((agentId) => releaseAgentConversations(agentId, channel)));
+  }
+  for (const employee of employees) io.in(`user:${employee.id}`).disconnectSockets(true);
+  const channelAccess = parsed.data.channelAccess;
+  await audit(req.user!.id, "DEPARTMENT_CHANNEL_ACCESS_UPDATED", undefined, { department: department.data, channelAccess });
+  io.to("admins").emit("team:channel-access-updated", { department: department.data, channelAccess });
+  res.json({ department: department.data, channelAccess });
+});
+
 app.get("/api/admin/team", permissionGuard("canManageTeam"), async (_req: express.Request, res: express.Response) => res.json(await prisma.user.findMany({ where: { role: { not: Role.ADMIN } }, select: staffSelect, orderBy: { name: "asc" } })));
 app.post("/api/admin/agents", permissionGuard("canManageTeam"), async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({
     name: z.string().trim().min(2).max(100), email: z.string().trim().email().max(254), username: usernameSchema.optional(), password: z.string().min(10).max(128),
-    role: z.nativeEnum(Role).default(Role.AGENT), department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields, ...channelPermissionFields
+    role: z.nativeEnum(Role).default(Role.AGENT), department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields, ...legacyChannelPermissionFields, ...channelPermissionFields
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "راجع بيانات الموظف" });
   const { password, email, name, username: suppliedUsername, role, department, branchId, ...permissions } = parsed.data;
@@ -2587,7 +2845,11 @@ app.post("/api/admin/agents", permissionGuard("canManageTeam"), async (req: Auth
   if (role === Role.ADMIN && req.user!.role !== Role.ADMIN) return res.status(403).json({ error: "إنشاء مدير نظام يتطلب صلاحية مدير النظام" });
   try {
     const user = await prisma.user.create({
-      data: { email: normalizedEmail, username, name, role, department: department ?? null, branchId: null, passwordHash: await bcrypt.hash(password, 12), ...permissions } as Prisma.UserUncheckedCreateInput,
+      data: { email: normalizedEmail, username, name, role, department: department ?? null, branchId: null, passwordHash: await bcrypt.hash(password, 12), ...permissions,
+        ...(parsed.data.whatsappAccess === undefined ? {} : { canReceiveWhatsApp: parsed.data.whatsappAccess !== ChannelAccess.EXCLUDED }),
+        ...(parsed.data.messengerAccess === undefined ? {} : { canReceiveMessenger: parsed.data.messengerAccess !== ChannelAccess.EXCLUDED }),
+        ...(parsed.data.telegramAccess === undefined ? {} : { canReceiveTelegram: parsed.data.telegramAccess !== ChannelAccess.EXCLUDED })
+      } as Prisma.UserUncheckedCreateInput,
       select: staffSelect
     });
     await audit(req.user!.id, "TEAM_MEMBER_CREATED", undefined, { userId: user.id, role: user.role });
@@ -2603,11 +2865,11 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
   const parsed = z.object({
     name: z.string().trim().min(2).max(100).optional(), email: z.string().trim().email().max(254).optional(), username: usernameSchema.optional(),
     isActive: z.boolean().optional(), password: z.string().min(10).max(128).optional(), role: z.nativeEnum(Role).optional(),
-    department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields, ...channelPermissionFields
+    department: z.nativeEnum(Department).nullable().optional(), branchId: z.string().nullable().optional(), ...permissionFields, ...legacyChannelPermissionFields, ...channelPermissionFields
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "بيانات التعديل غير صالحة" });
   if (!Object.keys(parsed.data).length) return res.status(400).json({ error: "لا توجد تغييرات لحفظها" });
-  const previous = await prisma.user.findUnique({ where: { id: req.params.id }, select: { id: true, role: true, department: true, branchId: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } });
+  const previous = await prisma.user.findUnique({ where: { id: req.params.id }, select: { id: true, role: true, department: true, branchId: true, canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true } });
   if (!previous) return res.status(404).json({ error: "حساب الموظف غير موجود" });
   if (previous.role === Role.ADMIN) return res.status(403).json({ error: "حساب مدير النظام محمي من التعديل عبر إدارة الفريق" });
   const role = parsed.data.role ?? previous.role;
@@ -2624,7 +2886,7 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
       const defaultValue = previous.role === Role.ADMIN || previous.role === Role.SUPERVISOR;
       return (previous[key] ?? defaultValue) !== requested;
     });
-  const channelPolicyChanged = (Object.keys(channelPermissionFields) as Array<keyof typeof channelPermissionFields>).some((key) => {
+  const channelPolicyChanged = ([...Object.keys(channelPermissionFields), ...Object.keys(legacyChannelPermissionFields)] as Array<keyof typeof parsed.data>).some((key) => {
     const requested = parsed.data[key];
     return requested !== undefined && previous[key] !== requested;
   });
@@ -2639,7 +2901,10 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
     ...(parsed.data.isActive === undefined ? {} : { isActive: parsed.data.isActive }),
     ...((parsed.data.isActive === false || role !== Role.AGENT && role !== Role.BRANCH_USER || parsed.data.isActive === true) ? { presence: Presence.OFFLINE } : {}),
     ...(parsed.data.password ? { passwordHash: await bcrypt.hash(parsed.data.password, 12) } : {}),
-    ...Object.fromEntries([...Object.keys(permissionFields), ...Object.keys(channelPermissionFields)].filter((key) => parsed.data[key as keyof typeof parsed.data] !== undefined).map((key) => [key, parsed.data[key as keyof typeof parsed.data]])),
+    ...Object.fromEntries([...Object.keys(permissionFields), ...Object.keys(channelPermissionFields), ...Object.keys(legacyChannelPermissionFields)].filter((key) => parsed.data[key as keyof typeof parsed.data] !== undefined).map((key) => [key, parsed.data[key as keyof typeof parsed.data]])),
+    ...(parsed.data.whatsappAccess === undefined ? {} : { canReceiveWhatsApp: parsed.data.whatsappAccess !== ChannelAccess.EXCLUDED }),
+    ...(parsed.data.messengerAccess === undefined ? {} : { canReceiveMessenger: parsed.data.messengerAccess !== ChannelAccess.EXCLUDED }),
+    ...(parsed.data.telegramAccess === undefined ? {} : { canReceiveTelegram: parsed.data.telegramAccess !== ChannelAccess.EXCLUDED }),
     ...(revokeSessions ? { authVersion: { increment: 1 }, ...(role === Role.AGENT || role === Role.BRANCH_USER ? { presence: Presence.OFFLINE } : {}) } : {})
   };
   try {

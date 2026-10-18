@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { Department, Role } from "@prisma/client";
 import { config } from "./config";
 import { prisma } from "./prisma";
+import { canReadChannel as hasChannelReadAccess, effectiveChannelAccess, receivingChannels, type ChannelAccessLevel, type ChannelEligibility, type ReceivingChannel } from "./routingSelection";
 
 export type PermissionName = "canViewAllConversations" | "canTransferConversations" | "canManageCatalog" | "canViewReports" | "canManageTeam";
 export type SessionUser = {
@@ -17,8 +18,18 @@ export type SessionUser = {
   canManageCatalog: boolean | null;
   canViewReports: boolean | null;
   canManageTeam: boolean | null;
+  channelAccess: Record<ReceivingChannel, ChannelAccessLevel>;
 };
 export type AuthedRequest = Request & { user?: SessionUser };
+
+export async function resolvedChannelAccess(user: ChannelEligibility & { department: Department | null }) {
+  const departmentPolicies = user.department ? await prisma.departmentChannelAccess.findMany({ where: { department: user.department } }) : [];
+  const policies = new Map(departmentPolicies.map((policy) => [policy.channel, policy.access as ChannelAccessLevel]));
+  return Object.fromEntries(receivingChannels.map((channel) => [
+    channel,
+    effectiveChannelAccess(user, channel, policies.get(channel))
+  ])) as Record<ReceivingChannel, ChannelAccessLevel>;
+}
 
 export function signToken(user: Pick<SessionUser, "id" | "role" | "name" | "authVersion">) {
   return jwt.sign(user, config.jwtSecret, { issuer: "bondoq-support" });
@@ -35,10 +46,13 @@ export async function authenticate(req: AuthedRequest, res: Response, next: Next
   }
   const user = await prisma.user.findFirst({ where: { id: claims.id, isActive: true }, select: {
     id: true, role: true, name: true, authVersion: true, department: true, branchId: true,
-    canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true
+    canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true,
+    canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true,
+    whatsappAccess: true, messengerAccess: true, telegramAccess: true
   } });
   if (!user || user.authVersion !== claims.authVersion) return res.status(401).json({ error: "الجلسة منتهية أو تم إبطالها" });
-  req.user = user;
+  const channelAccess = await resolvedChannelAccess(user);
+  req.user = { ...user, channelAccess };
   next();
 }
 
@@ -64,9 +78,14 @@ export function permissionGuard(permission: PermissionName): RequestHandler[] {
   }) as RequestHandler];
 }
 
-export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+export function canReadChannel(user: SessionUser, channel: ReceivingChannel) {
+  return user.role !== Role.AGENT && user.role !== Role.BRANCH_USER || hasChannelReadAccess(user, channel);
+}
+
+export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: ReceivingChannel }) {
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
+  if ((user.role === Role.AGENT || user.role === Role.BRANCH_USER) && (!conversation.channel || !canReadChannel(user, conversation.channel))) return false;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
   return conversation.assignedAgentId === user.id;
 }
@@ -77,10 +96,16 @@ export function canReadTeamConversations(user: SessionUser, conversation?: { bra
     && (!conversation || conversation.branchId === user.branchId);
 }
 
-export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+export function isWhatsAppGroupConversation(conversation: { externalConversationId?: string | null }) {
+  return Boolean(conversation.externalConversationId?.endsWith("@g.us"));
+}
+
+export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: ReceivingChannel; externalConversationId?: string | null }) {
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
+  if ((user.role === Role.AGENT || user.role === Role.BRANCH_USER) && (!conversation.channel || user.channelAccess[conversation.channel] !== "FULL")) return false;
+  if ((user.role === Role.AGENT || user.role === Role.BRANCH_USER) && isWhatsAppGroupConversation(conversation)) return true;
   return conversation.assignedAgentId === user.id;
 }
 

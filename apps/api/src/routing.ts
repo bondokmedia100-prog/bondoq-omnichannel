@@ -1,10 +1,10 @@
-import { ConversationStatus, Department, MessageDirection, Presence, Role } from "@prisma/client";
+import { Channel, ConversationStatus, Department, MessageDirection, Presence, Role } from "@prisma/client";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 import { config } from "./config";
 import { prisma } from "./prisma";
 import { io } from "./realtime";
-import { channelEligibilityWhere, chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
+import { canReceiveChannel, chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
 import { withRedisLock } from "./redisLock";
 
 const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -56,25 +56,28 @@ export async function assignConversation(conversationId: string, department?: De
     const previousAgentId = currentConversation.assignedAgentId;
     const hqAndRemote = targetDepartment === Department.HEADQUARTERS || targetDepartment === Department.WORK_FROM_HOME;
     const isBranchQueue = targetDepartment === Department.BRANCH || (!targetDepartment && Boolean(currentConversation.branchId));
-    const agents = await prisma.user.findMany({
+    const candidates = await prisma.user.findMany({
       where: {
         role: isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
         isActive: true,
         presence: Presence.ONLINE,
-        ...channelEligibilityWhere(currentConversation.channel),
         ...(isBranchQueue
           ? { branchId: currentConversation.branchId || "__unassigned_branch__" }
           : targetDepartment === Department.CUSTOMER_CARE
-            ? { department: Department.CUSTOMER_CARE }
+            ? { department: currentConversation.channel === "MESSENGER" ? { in: [Department.CUSTOMER_CARE, Department.WORK_FROM_HOME] } : Department.CUSTOMER_CARE }
             : hqAndRemote
             ? { department: { in: [Department.HEADQUARTERS, Department.WORK_FROM_HOME, Department.CUSTOMER_CARE] } }
             : targetDepartment
               ? { department: { in: [targetDepartment, Department.HEADQUARTERS, Department.WORK_FROM_HOME] } }
               : { department: { not: Department.ADMINISTRATION } })
       },
-      select: { id: true },
+      select: { id: true, department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true },
       orderBy: { id: "asc" }
     });
+    const departments = [...new Set(candidates.flatMap((agent) => agent.department ? [agent.department] : []))];
+    const departmentPolicies = departments.length ? await prisma.departmentChannelAccess.findMany({ where: { department: { in: departments }, channel: currentConversation.channel } }) : [];
+    const policyByDepartment = new Map(departmentPolicies.map((policy) => [policy.department, policy.access]));
+    const agents = candidates.filter((agent) => canReceiveChannel(agent, currentConversation.channel, agent.department ? policyByDepartment.get(agent.department) : undefined));
     if (previousAgentId && agents.some((agent) => agent.id === previousAgentId) && !options.forceReassign) return currentConversation;
     const assignableAgents = options.forceReassign && previousAgentId ? agents.filter((agent) => agent.id !== previousAgentId) : agents;
     if (options.forceReassign && previousAgentId && agents.some((agent) => agent.id === previousAgentId) && !assignableAgents.length) return currentConversation;
@@ -148,10 +151,10 @@ export async function dispatchQueued() {
   }
 }
 
-export async function releaseAgentConversations(agentId: string) {
+export async function releaseAgentConversations(agentId: string, channel?: Channel) {
   const assigned = await prisma.$transaction(async (tx) => {
     const current = await tx.conversation.findMany({
-      where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
+      where: { assignedAgentId: agentId, ...(channel ? { channel } : {}), status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
       select: { id: true }
     });
     if (!current.length) return current;
@@ -160,7 +163,7 @@ export async function releaseAgentConversations(agentId: string) {
       skipDuplicates: true
     });
     await tx.conversation.updateMany({
-      where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
+      where: { assignedAgentId: agentId, ...(channel ? { channel } : {}), status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
       data: { assignedAgentId: null, status: ConversationStatus.QUEUED }
     });
     return current;
