@@ -8,7 +8,7 @@ import IORedis from "ioredis";
 import { z } from "zod";
 import { Channel, ConversationHandoffStatus, ConversationStatus, Department, MessageDirection, MessageKind, MessengerAccessMode, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
 import { config } from "./config";
-import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewChannel, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
+import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
 import { broadcastPresence, emitConversationEvent, initRealtime, io, refreshChannelAccessForDepartments, revokeConversationRoomAccess } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations, scheduleUnansweredReassignment, withConversationAssignmentLock, withInboundConversationLock } from "./routing";
@@ -27,7 +27,7 @@ import { getChatbotSettings, saveChatbotSettings } from "./chatbotSettings";
 import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermission, normalizeCloudCallTarget, processCloudCallWebhooks, requestCloudCallPermission, startCloudCall, terminateCloudCall, WhatsAppCloudApiError } from "./whatsappCalling";
 import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
 import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
-import { canReplyChannel, channelAssignmentWhere, channelDepartmentPolicies, channelViewerWhere, effectiveChannelAccess, effectiveMessengerAccess, messengerDepartmentPolicies, messengerDepartments } from "./messengerAccess";
+import { canReplyChannel, canViewChannel, channelAssignmentWhere, channelDepartmentPolicies, channelViewerWhere, effectiveChannelAccess, effectiveMessengerAccess, messengerDepartmentPolicies, messengerDepartments } from "./messengerAccess";
 import { formatAgentHandoffGreeting } from "./autoReplies";
 import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
 
