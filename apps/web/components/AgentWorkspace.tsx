@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Clock3, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
@@ -106,6 +106,10 @@ export default function AgentWorkspace() {
   const [editingText, setEditingText] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingMessageId, setDeletingMessageId] = useState("");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
+  const [deletingSelectedMessages, setDeletingSelectedMessages] = useState(false);
+  const [forwardingMessages, setForwardingMessages] = useState(false);
   const [forwardMessage, setForwardMessage] = useState<AnyRecord | null>(null);
   const [forwardQuery, setForwardQuery] = useState("");
   const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
@@ -252,6 +256,8 @@ export default function AgentWorkspace() {
   }
   async function openChat(id: string, targetMessageId?: string) {
     pendingMessageJumpRef.current = null;
+    setSelectionMode(false);
+    setSelectedMessageIds([]);
     if (activeIdRef.current && activeIdRef.current !== id) socketRef.current?.emit("conversation:leave", activeIdRef.current);
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" }); setSelectedProductIds([]); }
@@ -574,7 +580,7 @@ export default function AgentWorkspace() {
     finally { setSavingEdit(false); }
   }
   async function deleteSentMessage(message: AnyRecord) {
-    if (!activeId || deletingMessageId) return;
+    if (!activeId || deletingMessageId || deletingSelectedMessages) return;
     if (!window.confirm("حذف هذه الرسالة من المحادثة والقناة؟ لا يمكن التراجع عن الحذف.")) return;
     const conversationId = activeId;
     setDeletingMessageId(message.id);
@@ -585,16 +591,75 @@ export default function AgentWorkspace() {
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر حذف الرسالة"); }
     finally { setDeletingMessageId(""); }
   }
-  async function forwardMessageTo(target: AnyRecord) {
-    if (!forwardMessage) return;
-    const source = forwardMessage;
+  function toggleMessageSelection(messageId: string) {
+    setSelectionMode(true);
+    setSelectedMessageIds((current) => current.includes(messageId) ? current.filter((id) => id !== messageId) : [...current, messageId]);
+  }
+  function clearMessageSelection() {
+    setSelectedMessageIds([]);
+    setSelectionMode(false);
+  }
+  async function copySelectedMessages() {
+    if (!selectedMessages.length) return;
+    const copyText = selectedMessages.map((message) => {
+      const label = ({ IMAGE: "[صورة]", STICKER: "[ملصق]", AUDIO: "[رسالة صوتية]", VIDEO: "[فيديو]", FILE: "[ملف]", LOCATION: "[موقع]", POLL: "[استطلاع]", SYSTEM: "[رسالة نظام]" } as Record<string, string>)[message.kind] || "[رسالة]";
+      return `${message.author?.name || (message.direction === "OUTBOUND" ? "الموظف" : "العميل")} · ${formatCairoTime(message.createdAt)}\n${message.text?.trim() || label}`;
+    }).join("\n\n");
     try {
-      const sent = await api(`/api/conversations/${source.conversationId}/messages/${source.id}/forward`, { method: "POST", body: JSON.stringify({ targetConversationId: target.id }) });
-      setDetail((current: AnyRecord) => current?.id === target.id ? { ...current, messages: mergeMessages(current.messages || [], sent) } : current);
-      setForwardMessage(null); setForwardQuery("");
-      setNotice(`تم تحويل الرسالة إلى ${customerDisplayName(target.customer)}.`);
-      void loadChats();
-    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحويل الرسالة"); }
+      await navigator.clipboard.writeText(copyText);
+      setNotice(`تم نسخ ${selectedMessages.length} رسالة.`);
+      clearMessageSelection();
+    } catch {
+      setNotice("تعذر النسخ من المتصفح. تحقق من إذن الحافظة ثم حاول مجددًا.");
+    }
+  }
+  async function deleteSelectedMessages() {
+    if (!activeId || deletingSelectedMessages || deletingMessageId || !deletableSelectedMessages.length) return;
+    const targets = deletableSelectedMessages;
+    if (!window.confirm(`حذف ${targets.length} رسالة من المحادثة والقناة؟ لا يمكن التراجع عن الحذف.`)) return;
+    const conversationId = activeId;
+    setDeletingSelectedMessages(true);
+    const deletedIds: string[] = [];
+    for (const message of targets) {
+      try {
+        await api(`/api/conversations/${conversationId}/messages/${message.id}`, { method: "DELETE" });
+        deletedIds.push(message.id);
+      } catch { /* Keep processing the remaining selected messages. */ }
+    }
+    if (deletedIds.length) {
+      setDetail((current: AnyRecord) => current?.id === conversationId ? { ...current, messages: (current.messages || []).filter((message: AnyRecord) => !deletedIds.includes(message.id)) } : current);
+      setSelectedMessageIds((current) => current.filter((id) => !deletedIds.includes(id)));
+      if (deletedIds.length === selectedMessages.length) setSelectionMode(false);
+    }
+    setNotice(deletedIds.length === targets.length
+      ? `حُذفت ${deletedIds.length} رسالة من المحادثة والقناة.`
+      : deletedIds.length
+        ? `حُذفت ${deletedIds.length} رسالة، وتعذر حذف ${targets.length - deletedIds.length} أخرى.`
+        : "تعذر حذف الرسائل المحددة.");
+    setDeletingSelectedMessages(false);
+  }
+  async function forwardMessageTo(target: AnyRecord) {
+    if (!forwardMessage || forwardingMessages) return;
+    const source = forwardMessage;
+    const messages = Array.isArray(source.messages) ? source.messages : [source];
+    setForwardingMessages(true);
+    let forwarded = 0;
+    let failureMessage = "";
+    for (const message of messages) {
+      try {
+        const sent = await api(`/api/conversations/${source.conversationId}/messages/${message.id}/forward`, { method: "POST", body: JSON.stringify({ targetConversationId: target.id }) });
+        setDetail((current: AnyRecord) => current?.id === target.id ? { ...current, messages: mergeMessages(current.messages || [], sent) } : current);
+        forwarded += 1;
+      } catch (error) {
+        failureMessage = error instanceof Error ? error.message : "تعذر تحويل الرسائل المحددة.";
+      }
+    }
+    setForwardingMessages(false);
+    if (!forwarded) { setNotice(failureMessage || "تعذر تحويل الرسائل المحددة."); return; }
+    setForwardMessage(null); setForwardQuery("");
+    if (Array.isArray(source.messages)) clearMessageSelection();
+    setNotice(forwarded === messages.length ? `تم تحويل ${forwarded} رسالة إلى ${customerDisplayName(target.customer)}.` : `تم تحويل ${forwarded} من ${messages.length} رسالة؛ تعذر تحويل الباقي.`);
+    void loadChats();
   }
   async function createPoll(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1102,6 +1167,9 @@ export default function AgentWorkspace() {
     || messageFilter === "VIDEO" && message.kind === "VIDEO"
     || messageFilter === "FILES" && message.kind === "FILE"
     || messageFilter === "LINKS" && hasMessageTextLinks(message.text));
+  const selectedMessages = (detail?.messages || []).filter((message: AnyRecord) => selectedMessageIds.includes(message.id));
+  const deletableSelectedMessages = selectedMessages.filter((message: AnyRecord) => message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus));
+  const forwardableSelectedMessages = selectedMessages.filter((message: AnyRecord) => message.kind !== "SYSTEM" && message.direction !== "INTERNAL" && !String(message.id).startsWith("pending-") && (message.kind !== "LOCATION" || message.latitude != null && message.longitude != null));
   const lastInboundAt = detail?.lastInboundAt || latestInbound?.createdAt;
   const metaChannel = detail?.channel === "MESSENGER";
   const callTarget = detail?.customer?.phone || detail?.externalCustomerId || "";
@@ -1576,8 +1644,9 @@ export default function AgentWorkspace() {
                    <select value={messageFilter} onChange={(event) => setMessageFilter(event.target.value)} className="h-8 max-w-36 rounded-lg border border-stone-200 bg-white px-2 text-[10px] font-bold text-stone-600 outline-none focus:border-amber-400">
                      {[{ id: "ALL", label: "كل الرسائل" }, { id: "IMAGES", label: "الصور" }, { id: "AUDIO", label: "الصوت" }, { id: "VIDEO", label: "الفيديو" }, { id: "FILES", label: "الملفات" }, { id: "LINKS", label: "الروابط" }].map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                    </select>
-                 </label>
-                 <details className="relative shrink-0">
+                  </label>
+                  <button type="button" aria-label={selectionMode ? "إلغاء تحديد الرسائل" : "تحديد رسائل متعددة"} aria-pressed={selectionMode} title={selectionMode ? "إلغاء تحديد الرسائل" : "تحديد رسائل متعددة"} onClick={() => selectionMode ? clearMessageSelection() : setSelectionMode(true)} className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg ${selectionMode ? "bg-emerald-700 text-white" : "bg-white text-stone-500 hover:bg-emerald-50 hover:text-emerald-800"}`}><ListChecks size={15} /></button>
+                  <details className="relative shrink-0">
                    <summary className="flex h-8 cursor-pointer list-none items-center gap-1 rounded-lg border border-stone-200 bg-white px-2 font-bold text-stone-600"><span aria-hidden="true">Aa</span><span>{chatFontSize}</span></summary>
                    <div role="group" aria-label="حجم خط الرسائل" className="absolute left-0 top-full z-20 mt-2 flex items-center gap-2 rounded-xl border border-stone-200 bg-white p-2 shadow-lg">
                      <span className="whitespace-nowrap text-[10px]">حجم الخط</span>
@@ -1590,14 +1659,25 @@ export default function AgentWorkspace() {
                <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="chat-message-list soft-scroll relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 py-3 sm:px-5">
               {detail.hasMoreMessages && <button type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlderMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingOlderMessages ? "جارٍ تحميل الرسائل..." : "تحميل الرسائل الأقدم"}</button>}
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
-                 {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} highlighted={highlightedMessageId === message.id} highlightQuery={highlightedMessageId === message.id ? conversationSearchQuery || search : ""} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
+                  {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} selectionMode={selectionMode} selected={selectedMessageIds.includes(message.id)} onToggleSelection={() => toggleMessageSelection(message.id)} highlighted={highlightedMessageId === message.id} highlightQuery={highlightedMessageId === message.id ? conversationSearchQuery || search : ""} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
                  {hasMoreNewerMessages && <button type="button" onClick={() => void loadNewerMessages()} disabled={loadingNewerMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingNewerMessages ? "جارٍ تحميل الرسائل الأحدث..." : "تحميل الرسائل الأحدث"}</button>}
              {(detail.whisperNotes || []).map((note: AnyRecord) => <div key={`whisper-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-[#f0d786] bg-[#fff8e1] px-4 py-3 text-xs leading-6 text-[#755916]"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><CakeSlice size={14} /> توجيه سري من {note.author?.name || "المدير"}<span className="mr-auto text-[9px] font-normal text-[#aa8a36]">{ago(note.createdAt)}</span></div>{note.text}</div>)}
               {(detail.privateNotes || []).map((note: AnyRecord) => <div key={`private-note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs leading-6 text-violet-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><LockKeyhole size={13} /> رسالة سرية {note.authorId === user?.id ? `إلى ${note.recipient?.name || "زميل"}` : `من ${note.author?.name || "زميل"}`}<span className="mr-auto text-[9px] font-normal text-violet-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
              <div className="mt-auto" /><div ref={messageEndRef} />
              {showJumpToBottom && <button type="button" onClick={() => { stickToBottom.current = true; messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); setShowJumpToBottom(false); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white shadow-lg"><ArrowDown size={13} /> الرسائل الجديدة</button>}
-          </div>
-             <div className="relative shrink-0 border-t border-stone-100 bg-white p-2 sm:p-2.5">
+           </div>
+           {selectionMode && <div role="toolbar" aria-label="إجراءات الرسائل المحددة" className="message-selection-toolbar flex shrink-0 items-center justify-between gap-2 border-t border-emerald-100 bg-white px-3 py-2 shadow-[0_-4px_14px_rgba(15,23,42,.04)]">
+             <div className="flex min-w-0 items-center gap-2">
+               <button type="button" onClick={clearMessageSelection} aria-label="إلغاء تحديد الرسائل" className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-stone-500 hover:bg-stone-100"><X size={17} /></button>
+               <span className="truncate text-xs font-bold text-stone-700">{selectedMessages.length} رسالة محددة</span>
+             </div>
+             <div className="flex shrink-0 items-center gap-1">
+               <button type="button" onClick={() => void copySelectedMessages()} aria-label="نسخ الرسائل المحددة" title="نسخ الرسائل المحددة" disabled={!selectedMessages.length} className="flex h-9 items-center gap-1.5 rounded-lg px-2 text-[10px] font-bold text-stone-600 hover:bg-stone-100 disabled:opacity-40"><Copy size={15} /><span className="hidden sm:inline">نسخ</span></button>
+               {!detail.readOnly && <button type="button" onClick={() => void deleteSelectedMessages()} aria-label="حذف الرسائل المحددة" title="حذف الرسائل المحددة" disabled={!deletableSelectedMessages.length || deletingSelectedMessages || Boolean(deletingMessageId)} className="flex h-9 items-center gap-1.5 rounded-lg px-2 text-[10px] font-bold text-red-700 hover:bg-red-50 disabled:opacity-40"><Trash2 size={15} /><span className="hidden sm:inline">حذف</span></button>}
+               {!detail.readOnly && <button type="button" onClick={() => { setForwardMessage({ conversationId: detail.id, messages: forwardableSelectedMessages }); setForwardQuery(""); }} aria-label="تحويل الرسائل المحددة" title="تحويل الرسائل المحددة" disabled={!forwardableSelectedMessages.length || forwardingMessages} className="flex h-9 items-center gap-1.5 rounded-lg px-2 text-[10px] font-bold text-emerald-800 hover:bg-emerald-50 disabled:opacity-40"><Forward size={15} /><span className="hidden sm:inline">تحويل</span></button>}
+             </div>
+           </div>}
+              <div className="relative shrink-0 border-t border-stone-100 bg-white p-2 sm:p-2.5">
               {detail.readOnly && detail.canSendPrivateNote && <SecretNoteComposer text={secretNote} onTextChange={setSecretNote} recipients={privateNoteRecipients} recipientId={privateNoteRecipientId} onRecipientChange={setPrivateNoteRecipientId} sending={sendingSecretNote} onSubmit={sendSecretNote} />}
             {detail.readOnly ? <div className="pt-3 text-center text-xs text-stone-500">للقراءة فقط · لا يمكن إرسال رد للعميل أو تعديل المحادثة.</div> : <>
              {!metaWindowOpen && detail.channel === "MESSENGER" && <div className="mb-3 rounded-xl border border-red-100 bg-red-50 p-3 text-[10px] leading-5 text-red-700">انتهت نافذة رد Messenger. يجب أن يرسل العميل رسالة جديدة قبل استئناف الردود الحرة.</div>}
@@ -1630,7 +1710,7 @@ export default function AgentWorkspace() {
                       </select>
                       <span className="hidden shrink-0 text-[9px] text-violet-600 sm:inline">لا يراها العميل</span>
                     </div>}
-                    <textarea ref={replyInputRef} rows={3} maxLength={privateNoteMode ? 4000 : undefined} value={privateNoteMode ? secretNote : text} disabled={privateNoteMode ? sendingSecretNote : !messagingEnabled} onChange={(event) => { if (privateNoteMode) setSecretNote(event.target.value); else { setText(event.target.value); setShowCanned(event.target.value.startsWith("/")); } }} onPaste={(event) => { if (privateNoteMode) return; const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/" )).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(event) => { if (!privateNoteMode && event.key === "ArrowUp" && !showCanned && !text.trim() && recallLastSentMessage()) { event.preventDefault(); return; } if (event.key === "Enter" && !event.shiftKey && (!showCanned || privateNoteMode)) { event.preventDefault(); if (privateNoteMode) void sendSecretNote(); else void submitReply(); } }} placeholder={privateNoteMode ? "اكتب رسالة سرية لا يراها العميل..." : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-40 min-h-[76px] w-full resize-none overflow-y-auto bg-transparent px-3 py-3 text-[13px] leading-6 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
+                    <textarea ref={replyInputRef} rows={1} maxLength={privateNoteMode ? 4000 : undefined} value={privateNoteMode ? secretNote : text} disabled={privateNoteMode ? sendingSecretNote : !messagingEnabled} onChange={(event) => { if (privateNoteMode) setSecretNote(event.target.value); else { setText(event.target.value); setShowCanned(event.target.value.startsWith("/")); } }} onPaste={(event) => { if (privateNoteMode) return; const images = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/" )).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!images.length) return; event.preventDefault(); void uploadSelectedFiles(images.map((file, index) => file.name ? file : new File([file], `pasted-image-${Date.now()}-${index}.png`, { type: file.type || "image/png" }))); }} onKeyDown={(event) => { if (!privateNoteMode && event.key === "ArrowUp" && !showCanned && !text.trim() && recallLastSentMessage()) { event.preventDefault(); return; } if (event.key === "Enter" && !event.shiftKey && (!showCanned || privateNoteMode)) { event.preventDefault(); if (privateNoteMode) void sendSecretNote(); else void submitReply(); } }} placeholder={privateNoteMode ? "اكتب رسالة سرية لا يراها العميل..." : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : metaWindowOpen ? "اكتب ردك هنا أو الصق صورة... اكتب / للردود الجاهزة" : "الرد الحر مقفل حتى يرد العميل"} className="max-h-28 min-h-[44px] w-full resize-none overflow-y-auto bg-transparent px-3 py-2 text-[13px] leading-5 outline-none placeholder:text-stone-300 disabled:cursor-not-allowed disabled:bg-stone-50" />
                     <div className="flex items-center justify-between gap-2 border-t border-stone-100 px-2 py-1.5">
                       <div className="flex items-center gap-1">
                         {detail.canSendPrivateNote && <button type="button" aria-label={privateNoteMode ? "إيقاف وضع الرسالة السرية" : "إرسال رسالة سرية لزميل"} aria-pressed={privateNoteMode} title={privateNoteMode ? "رسالة سرية لزميل" : "تبديل إلى رسالة سرية"} disabled={sending || sendingSecretNote || recording || requestingRecording} onClick={() => { setPrivateNoteMode((mode) => !mode); setShowCanned(false); setShowPlusMenu(false); }} className={`grid h-8 w-8 place-items-center rounded-lg disabled:opacity-40 ${privateNoteMode ? "bg-violet-100 text-violet-800" : "text-stone-500 hover:bg-violet-50 hover:text-violet-700"}`}><LockKeyhole size={16} /></button>}
@@ -1722,13 +1802,13 @@ function Avatar({ name, src }: { name: string; src?: string }) { return <span cl
 function AvatarLarge({ name, src }: { name: string; src?: string }) { return <span className="mx-auto grid h-16 w-16 place-items-center overflow-hidden rounded-[22px] bg-white text-2xl font-extrabold text-[#b67739] shadow-sm">{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : name?.[0] || "ع"}</span>; }
 function Info({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-xl bg-stone-50 p-2.5"><p className="text-[9px] text-stone-400">{label}</p><p className="mt-1 truncate text-[10px] font-bold text-stone-700" dir="auto">{value}</p></div>; }
 function ChannelIcon({ channel }: { channel: string }) { const config: Record<string, { label: string; className: string }> = { WHATSAPP: { label: "W", className: "bg-emerald-100 text-emerald-700" }, MESSENGER: { label: "M", className: "bg-blue-100 text-blue-700" }, TELEGRAM: { label: "T", className: "bg-sky-100 text-sky-700" } }; const item = config[channel] || config.WHATSAPP; return <span title={channelName(channel)} className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-md text-[9px] font-black ${item.className}`}>{item.label}</span>; }
-  function Message({ message, conversationId, readOnly = false, highlighted = false, highlightQuery = "", onQuote, onEdit, onDelete, deleting = false, onForward, editing = false, editingText = "", onEditingTextChange, onSaveEdit, onCancelEdit, savingEdit = false, onReact, onOpenImage }: { message: AnyRecord; conversationId: string; readOnly?: boolean; highlighted?: boolean; highlightQuery?: string; onQuote?: () => void; onEdit?: () => void; onDelete?: () => void; deleting?: boolean; onForward?: () => void; editing?: boolean; editingText?: string; onEditingTextChange?: (value: string) => void; onSaveEdit?: () => void; onCancelEdit?: () => void; savingEdit?: boolean; onReact?: (emoji: string) => void; onOpenImage?: (url: string) => void }) {
+function Message({ message, conversationId, readOnly = false, selectionMode = false, selected = false, onToggleSelection, highlighted = false, highlightQuery = "", onQuote, onEdit, onDelete, deleting = false, onForward, editing = false, editingText = "", onEditingTextChange, onSaveEdit, onCancelEdit, savingEdit = false, onReact, onOpenImage }: { message: AnyRecord; conversationId: string; readOnly?: boolean; selectionMode?: boolean; selected?: boolean; onToggleSelection?: () => void; highlighted?: boolean; highlightQuery?: string; onQuote?: () => void; onEdit?: () => void; onDelete?: () => void; deleting?: boolean; onForward?: () => void; editing?: boolean; editingText?: string; onEditingTextChange?: (value: string) => void; onSaveEdit?: () => void; onCancelEdit?: () => void; savingEdit?: boolean; onReact?: (emoji: string) => void; onOpenImage?: (url: string) => void }) {
   const outgoing = message.direction === "OUTBOUND";
   const hasMedia = ["IMAGE", "AUDIO", "VIDEO", "FILE", "STICKER"].includes(message.kind);
   const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
   const contactCard = metadata.contactCard && typeof metadata.contactCard === "object" ? metadata.contactCard : null;
   const deliveryLabel = message.deliveryStatus === "UPLOADING" ? "جارٍ رفع الملف" : message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
-       return <div id={`message-${message.id}`} className={`agent-message-row flex ${outgoing ? "justify-start" : "justify-end"} ${highlighted ? "search-message-highlight" : ""}`}><div className="group relative w-fit max-w-[80%]"><div className={`agent-message-bubble ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-full rounded-2xl px-3 py-2 shadow-sm`}>
+        return <div id={`message-${message.id}`} className={`agent-message-row flex items-center gap-2 ${outgoing ? "justify-start" : "justify-end"} ${highlighted ? "search-message-highlight" : ""}`}>{selectionMode && outgoing && <MessageSelectionControl selected={selected} onToggle={onToggleSelection} />}<div className="group relative w-fit max-w-[80%]" style={selectionMode ? { maxWidth: "calc(80% - 2.25rem)" } : undefined}><div className={`agent-message-bubble ${selected ? "ring-2 ring-emerald-500 ring-offset-1" : ""} ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-full rounded-2xl px-3 py-2 shadow-sm`}>
     {message.quotedMessage && <div className="mb-2 rounded-lg border-r-2 border-[#d32f2f] bg-stone-50/80 px-2.5 py-1.5 text-[10px] text-stone-500"><b>{message.quotedMessage.author?.name || "رسالة مقتبسة"}</b><p className="mt-0.5 line-clamp-2">{message.quotedMessage.text || (message.quotedMessage.kind === "IMAGE" ? "صورة" : "مرفق")}</p></div>}
     {hasMedia && (message.localPreviewUrl ? ["IMAGE", "STICKER"].includes(message.kind) ? <button type="button" onClick={() => onOpenImage?.(message.localPreviewUrl)} className="mb-2 block"><img src={message.localPreviewUrl} alt={message.kind === "STICKER" ? "ملصق قيد الإرسال" : "صورة قيد الإرسال"} className="max-h-56 rounded-xl object-contain" /></button> : message.kind === "AUDIO" ? <audio controls src={message.localPreviewUrl} className="mb-2 max-w-full" /> : message.kind === "VIDEO" ? <video controls src={message.localPreviewUrl} className="mb-2 max-h-56 max-w-full rounded-xl" /> : <span className="mb-2 block text-xs">ملف مرفق قيد الإرسال</span> : message.mediaAssetId ? <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} /> : message.kind === "IMAGE" && outgoing && message.mediaUrl ? <button type="button" onClick={() => onOpenImage?.(message.mediaUrl)} className="mb-2 block"><img src={message.mediaUrl} alt="منتج حلواني بندق" className="max-h-56 rounded-xl object-cover" /></button> : <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} />)}
      {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
@@ -1736,10 +1816,13 @@ function ChannelIcon({ channel }: { channel: string }) { const config: Record<st
       {editing ? <div className="my-2 min-w-[230px]"><textarea autoFocus rows={3} maxLength={4000} value={editingText} onChange={(event) => onEditingTextChange?.(event.target.value)} className="w-full resize-y rounded-xl border border-amber-200 bg-white p-2 text-sm leading-6 outline-none focus:border-amber-400" /><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={onCancelEdit} className="rounded-lg bg-stone-100 px-3 py-1.5 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" disabled={savingEdit || !editingText.trim()} onClick={onSaveEdit} className="rounded-lg bg-[#d32f2f] px-3 py-1.5 text-[10px] font-bold text-white disabled:opacity-50">{savingEdit ? "جارٍ الحفظ..." : "حفظ التعديل"}</button></div></div> : message.kind === "POLL" ? <div className="min-w-[220px] rounded-xl border border-sky-100 bg-sky-50/60 p-3"><div className="mb-1 text-[9px] font-extrabold uppercase tracking-wide text-sky-700">استطلاع</div><p className="whitespace-pre-wrap text-sm font-bold leading-6">{message.text}</p><div className="mt-2 space-y-1.5">{(Array.isArray(metadata.pollOptions) ? metadata.pollOptions : []).map((option: string, index: number) => <div key={`${option}-${index}`} className="rounded-lg border border-sky-100 bg-white px-2.5 py-1.5 text-xs">{option}</div>)}</div><p className="mt-2 text-[9px] text-stone-400">التصويت والنتائج متاحان على المنصة الأصلية.</p></div> : message.kind === "LOCATION" ? <a className="flex items-center gap-2 text-sm text-blue-700 underline" href={`https://maps.google.com/?q=${message.latitude},${message.longitude}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} /> فتح موقع العميل</a> : message.text && <p className="message-body whitespace-pre-wrap text-sm leading-7">{splitMessageTextLinks(message.text).map((part, index) => part.href ? <a key={index} href={part.href} target="_blank" rel="noopener noreferrer" dir="ltr" className="text-blue-700 underline decoration-blue-300 underline-offset-2">{part.text}</a> : <span key={index}>{part.text}</span>)}</p>}
      <div className="agent-message-time mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{metadata.forwardedFrom && <span>محوّلة · </span>}{outgoing && `${deliveryLabel} · `}{formatCairoTime(message.createdAt)}{metadata.editedAt && <span className="text-stone-400"> · معدلة</span>}{outgoing && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) && (message.deliveryStatus === "SENT" ? <Check size={11} className="text-stone-400" /> : <CheckCheck size={11} className={message.deliveryStatus === "READ" ? "text-sky-600" : "text-stone-400"} />)}</div>
        {!!message.reactions?.length && <div className="mt-2 flex flex-wrap gap-1">{message.reactions.map((reaction: AnyRecord) => readOnly ? <span key={reaction.id} title={reaction.user?.name || "تفاعل"} className="rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[10px]">{reaction.emoji}</span> : <button key={reaction.id} type="button" title={reaction.user?.name || "تفاعل"} onClick={() => onReact?.(reaction.emoji)} className="rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[10px]">{reaction.emoji}</button>)}</div>}
-       {!readOnly && <>
+        {!readOnly && !selectionMode && <>
           <div className="mt-2 flex items-center justify-end gap-1 border-t border-stone-100/70 pt-1.5">{onEdit && <button type="button" onClick={onEdit} title="تعديل الرسالة" aria-label="تعديل الرسالة" className="grid h-7 w-7 place-items-center rounded-lg text-stone-400 hover:bg-white hover:text-stone-700"><Pencil size={13} /></button>}{onDelete && <button type="button" disabled={deleting} onClick={onDelete} title="حذف الرسالة" aria-label="حذف الرسالة" className="grid h-7 w-7 place-items-center rounded-lg text-stone-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"><Trash2 size={13} /></button>}{onForward && message.kind !== "SYSTEM" && <button type="button" onClick={onForward} title="تحويل الرسالة إلى محادثة أخرى" aria-label="تحويل الرسالة إلى محادثة أخرى" className="grid h-7 w-7 place-items-center rounded-lg text-stone-400 hover:bg-white hover:text-stone-700"><Forward size={13} /></button>}{["👍", "❤️", "😂"].map((emoji) => <button type="button" key={emoji} onClick={() => onReact?.(emoji)} title={`تفاعل ${emoji}`} className="grid h-7 min-w-7 place-items-center rounded-lg text-sm hover:bg-white">{emoji}</button>)}</div>
        </>}
-   </div>{!readOnly && onQuote && <button type="button" onClick={onQuote} aria-label="الرد على هذه الرسالة" title="الرد على هذه الرسالة" className={`message-quote-button absolute top-1/2 z-10 flex h-9 -translate-y-1/2 items-center gap-1 rounded-full border border-stone-200 bg-white px-2 text-[10px] font-bold text-stone-600 shadow-lg ${outgoing ? "-left-10" : "-right-10"}`}><ReplyIcon size={14} /><span>رد</span></button>}</div></div>;
+    </div>{!readOnly && !selectionMode && onQuote && <button type="button" onClick={onQuote} aria-label="الرد على هذه الرسالة" title="الرد على هذه الرسالة" className={`message-quote-button absolute top-1/2 z-10 flex h-9 -translate-y-1/2 items-center gap-1 rounded-full border border-stone-200 bg-white px-2 text-[10px] font-bold text-stone-600 shadow-lg ${outgoing ? "-left-10" : "-right-10"}`}><ReplyIcon size={14} /><span>رد</span></button>}</div>{selectionMode && !outgoing && <MessageSelectionControl selected={selected} onToggle={onToggleSelection} />}</div>;
+}
+function MessageSelectionControl({ selected, onToggle }: { selected: boolean; onToggle?: () => void }) {
+  return <button type="button" aria-label={selected ? "إلغاء تحديد الرسالة" : "تحديد الرسالة"} aria-pressed={selected} onClick={onToggle} className={`grid h-7 w-7 shrink-0 place-items-center rounded-full border transition ${selected ? "border-emerald-700 bg-emerald-700 text-white" : "border-stone-300 bg-white text-stone-400 hover:border-emerald-500 hover:text-emerald-700"}`}>{selected ? <Check size={15} /> : <Circle size={16} />}</button>;
 }
 function department(value?: string) { return ({ CAKES: "مبيعات التورتات", DELIVERY: "طلبات التوصيل", CUSTOMER_CARE: "خدمة العملاء", QUALITY: "قسم الجودة", HEADQUARTERS: "المقر الرئيسي · HQ", WORK_FROM_HOME: "العمل من المنزل · WFH", BRANCH: "خدمة العملاء", ADMINISTRATION: "الإدارة" } as Record<string, string>)[value || ""] || "فريق بندق"; }
 function channelName(value: string) { return ({ WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" } as Record<string, string>)[value] || value; }
