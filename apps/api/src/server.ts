@@ -30,6 +30,7 @@ import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
 import { canReplyChannel, canViewChannel, channelAssignmentWhere, channelDepartmentPolicies, channelViewerWhere, effectiveChannelAccess, effectiveMessengerAccess, messengerDepartmentPolicies, messengerDepartments } from "./messengerAccess";
 import { formatAgentHandoffGreeting } from "./autoReplies";
 import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
+import { accessibleConversationSearchScope, messageContentSearchWhere, normalizeSearchDigits } from "./search";
 
 const app = express();
 const server = http.createServer(app);
@@ -555,6 +556,98 @@ app.get("/api/conversations/pins", agentGuard, async (req: AuthedRequest, res: e
     orderBy: { createdAt: "desc" }, take: 100
   });
   res.json(pins.map((pin) => pin.conversation));
+});
+
+app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const actor = req.user!;
+  if (actor.role === Role.BRANCH_USER && !actor.branchId) return res.status(403).json({ error: "يجب ربط الحساب بفرع قبل البحث في المحادثات" });
+  const query = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
+  const digits = normalizeSearchDigits(query);
+  if (query.length < 2 && digits.length < 3) return res.status(400).json({ error: "اكتب حرفين على الأقل أو ثلاثة أرقام للبحث" });
+  const offsetValue = typeof req.query.offset === "string" ? Number(req.query.offset) : 0;
+  if (!Number.isSafeInteger(offsetValue) || offsetValue < 0 || offsetValue > 10_000) return res.status(400).json({ error: "صفحة البحث غير صالحة" });
+
+  const canSeeAll = actor.role === Role.ADMIN || actor.role === Role.SUPERVISOR && hasPermission(actor, "canViewAllConversations");
+  const teamView = req.query.team === "1" && canReadTeamConversations(actor);
+  const historyOnly = req.query.history === "1" && !canSeeAll && !teamView;
+  const deniedChannels = inaccessibleChannels(actor);
+  const viewOnlyChannels = readOnlyChannels(actor);
+  const scope: Prisma.ConversationWhereInput[] = canSeeAll ? [] : teamView
+    ? actor.role === Role.BRANCH_USER ? [{ branchId: actor.branchId! }] : []
+    : historyOnly ? [
+      ...(actor.role === Role.BRANCH_USER ? [{ branchId: actor.branchId! }] : []),
+      { OR: [{ assignedAgentId: null }, { assignedAgentId: { not: actor.id } }] },
+      { OR: [
+        { assignmentHistory: { some: { agentId: actor.id } } },
+        { messages: { some: { authorId: actor.id } } },
+        { internalNotes: { some: { authorId: actor.id } } },
+        { whatsappCallSessions: { some: { agentId: actor.id } } }
+      ] }
+    ] : actor.role === Role.AGENT || actor.role === Role.BRANCH_USER
+      ? [accessibleConversationSearchScope(actor.id, actor.role === Role.BRANCH_USER ? actor.branchId : undefined, viewOnlyChannels)]
+      : [{ assignedAgentId: actor.id }];
+
+  const conversationId = typeof req.query.conversationId === "string" ? req.query.conversationId : "";
+  const messageMatch = messageContentSearchWhere(query);
+  if (conversationId) {
+    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
+    if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+    if (deniedChannels.includes(conversation.channel)) return res.status(403).json({ error: "لا تملك صلاحية البحث في قناة هذه المحادثة" });
+    if (!await canReadConversationOrHistory(actor, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+    const where = { conversationId, ...messageMatch };
+    const [items, total] = await Promise.all([
+      prisma.message.findMany({ where, select: { id: true, text: true, transcription: true, kind: true, direction: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: offsetValue, take: 50 }),
+      prisma.message.count({ where })
+    ]);
+    return res.json({ items, total, hasMore: offsetValue + items.length < total, nextOffset: offsetValue + items.length });
+  }
+
+  let matchingCustomerIds: string[] = [];
+  if (digits.length >= 3) {
+    const matchingCustomers = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT "id" FROM "Customer"
+      WHERE regexp_replace(translate(COALESCE("phone", ''), '٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'), '[^0-9]', '', 'g') LIKE ${`%${digits}%`}
+      LIMIT 1000
+    `);
+    matchingCustomerIds = matchingCustomers.map((customer) => customer.id);
+  }
+  const customerMatches: Prisma.CustomerWhereInput[] = [
+    { displayName: { contains: query, mode: "insensitive" } },
+    { name: { contains: query, mode: "insensitive" } },
+    ...(matchingCustomerIds.length ? [{ id: { in: matchingCustomerIds } }] : [])
+  ];
+  const channel = typeof req.query.channel === "string" && Object.values(Channel).includes(req.query.channel as Channel) ? req.query.channel as Channel : undefined;
+  const status = typeof req.query.status === "string" ? req.query.status : "";
+  const statusFilter: Prisma.ConversationWhereInput = status === "ACTIVE" ? { status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] } }
+    : status === "WAITING" ? { status: { in: [ConversationStatus.PENDING, ConversationStatus.QUEUED] } }
+      : status === "DONE" ? { status: { in: [ConversationStatus.RESOLVED, ConversationStatus.CLOSED] } }
+        : Object.values(ConversationStatus).includes(status as ConversationStatus) ? { status: status as ConversationStatus } : {};
+  const where: Prisma.ConversationWhereInput = {
+    AND: [
+      ...scope,
+      ...(deniedChannels.length ? [{ NOT: { channel: { in: deniedChannels } } }] : []),
+      statusFilter,
+      ...(channel ? [{ channel }] : []),
+      ...(req.query.favorite === "1" ? [{ favorites: { some: { userId: actor.id } } }] : []),
+      ...(req.query.pinned === "1" ? [{ pins: { some: { userId: actor.id } } }] : []),
+      { OR: [
+        { customer: { is: { OR: customerMatches } } },
+        { messages: { some: messageMatch } }
+      ] }
+    ]
+  };
+  const rows = await prisma.conversation.findMany({
+    where,
+    include: {
+      customer: { select: { id: true, name: true, displayName: true, phone: true, avatarUrl: true, isBlocked: true } },
+      assignedAgent: { select: { id: true, name: true } },
+      messages: { where: messageMatch, select: { id: true, text: true, transcription: true, kind: true, direction: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 3 }
+    },
+    orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }], skip: offsetValue, take: 51
+  });
+  const hasMore = rows.length > 50;
+  const items = rows.slice(0, 50).map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation), matchType: conversation.messages.length ? "MESSAGE" : "CUSTOMER" }));
+  res.json({ items, hasMore, nextOffset: offsetValue + items.length });
 });
 
 app.put("/api/conversations/:id/favorite", agentGuard, async (req: AuthedRequest, res: express.Response) => {
