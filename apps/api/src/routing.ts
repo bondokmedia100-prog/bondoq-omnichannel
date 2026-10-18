@@ -1,9 +1,10 @@
 import { Channel, ConversationStatus, Department, MessageDirection, Presence, Role } from "@prisma/client";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
-import { canViewChannel, loadSessionUser } from "./auth";
+import { loadSessionUser } from "./auth";
 import { config } from "./config";
 import { prisma } from "./prisma";
+import { canViewChannel } from "./messengerAccess";
 import { emitConversationEvent, io } from "./realtime";
 import { chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
 import { channelAssignmentWhere } from "./messengerAccess";
