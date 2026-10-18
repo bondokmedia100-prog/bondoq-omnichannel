@@ -34,6 +34,7 @@ export default function AgentWorkspace() {
   const [canned, setCanned] = useState<AnyRecord[]>([]);
   const [agentQuickReplies, setAgentQuickReplies] = useState<AnyRecord[]>([]);
   const [showQuickReplyManager, setShowQuickReplyManager] = useState(false);
+  const [pendingQuickReply, setPendingQuickReply] = useState<AnyRecord | null>(null);
   const [products, setProducts] = useState<AnyRecord[]>([]);
   const [showProducts, setShowProducts] = useState(false);
   const [showPollComposer, setShowPollComposer] = useState(false);
@@ -1211,7 +1212,7 @@ export default function AgentWorkspace() {
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث الحالة"); }
   }
-  async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; previewUrl?: string; latitude?: number; longitude?: number; quotedMessageId?: string; draftRevision?: number }, conversationId = activeId, alreadyLocked = false, pendingId?: string): Promise<boolean> {
+  async function deliverReply(payload: { text?: string; kind?: string; mediaAssetId?: string; applyTagIds?: string[]; previewUrl?: string; latitude?: number; longitude?: number; quotedMessageId?: string; draftRevision?: number }, conversationId = activeId, alreadyLocked = false, pendingId?: string): Promise<boolean> {
     const removePending = () => {
       if (pendingId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: (old.messages || []).filter((item: AnyRecord) => item.id !== pendingId) } : old);
     };
@@ -1231,7 +1232,7 @@ export default function AgentWorkspace() {
     if (payload.text !== undefined && payload.draftRevision === replyDraftRevisionRef.current) setTextState("");
     setShowCanned(false); setNotice("");
     try {
-      const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId, clientMessageId: localId }) });
+      const message = await api(`/api/conversations/${conversationId}/reply`, { method: "POST", body: JSON.stringify({ text: payload.text, kind: payload.kind || "TEXT", mediaAssetId: payload.mediaAssetId, applyTagIds: payload.applyTagIds, latitude: payload.latitude, longitude: payload.longitude, quotedMessageId: payload.quotedMessageId, clientMessageId: localId }) });
       const correlatedMessageId = pendingServerMessageIdsRef.current.get(localId);
       pendingServerMessageIdsRef.current.delete(localId);
       activeOutgoingClientIdsRef.current.delete(localId);
@@ -1245,6 +1246,7 @@ export default function AgentWorkspace() {
       });
       if (payload.quotedMessageId) setReplyingTo((old) => old?.id === payload.quotedMessageId ? null : old);
       if (message.deliveryStatus === "FAILED") { setNotice("تعذر إضافة الرسالة إلى قائمة الإرسال. تحقق من اتصال WhatsApp."); restoreDraft(); }
+      else if (message.quickReplyTagsApplied === false) setNotice("تم إرسال الرد، لكن تعذرت إضافة القوائم للعميل.");
       void loadChats();
       return message.deliveryStatus !== "FAILED";
     } catch (error) {
@@ -1262,8 +1264,12 @@ export default function AgentWorkspace() {
   }
   async function submitReply() {
     const message = text.trim();
-    if (!message) return;
-    await deliverReply({ text: message, quotedMessageId: replyingTo?.id, draftRevision: replyDraftRevisionRef.current });
+    const quickReply = pendingQuickReply;
+    if (!message && !quickReply?.mediaAssetId) return;
+    const contentType = String(quickReply?.mediaAsset?.contentType || "");
+    const kind = !quickReply?.mediaAssetId ? "TEXT" : contentType === "image/webp" ? "STICKER" : contentType.startsWith("image/") ? "IMAGE" : contentType.startsWith("audio/") ? "AUDIO" : contentType.startsWith("video/") ? "VIDEO" : "FILE";
+    const sent = await deliverReply({ text: message || undefined, kind, mediaAssetId: quickReply?.mediaAssetId, applyTagIds: quickReply?.tagIds, quotedMessageId: replyingTo?.id, draftRevision: replyDraftRevisionRef.current });
+    if (sent) setPendingQuickReply(null);
   }
   function recallLastSentMessage() {
     const message = latestOutgoingTextMessage(detail?.messages || [], user?.id);
@@ -1580,6 +1586,7 @@ export default function AgentWorkspace() {
 
   function chooseCannedReply(reply: AnyRecord) {
     setText(reply.content);
+    setPendingQuickReply({ shortcut: reply.shortcut, mediaAsset: reply.mediaAsset || null, mediaAssetId: reply.mediaAsset?.id || null, tagIds: (reply.tags || []).map((item: AnyRecord) => item.tagId || item.tag?.id).filter(Boolean) });
     setShowCanned(false);
     requestAnimationFrame(() => replyInputRef.current?.focus());
   }
@@ -1784,6 +1791,7 @@ export default function AgentWorkspace() {
                </div>
              </div>}
               {showCanned && <div role="listbox" aria-label="الردود الجاهزة" className="soft-scroll absolute bottom-[calc(4rem+16px)] right-3 z-10 max-h-60 w-[min(340px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply, index) => <button key={reply.id} type="button" role="option" aria-selected={index === cannedReplyIndex} onMouseEnter={() => setCannedReplyIndex(index)} onClick={() => chooseCannedReply(reply)} className={`flex w-full flex-col rounded-xl px-3 py-2 text-right ${index === cannedReplyIndex ? "bg-[#fff8e9]" : "hover:bg-[#fff8e9]"}`}><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
+               {pendingQuickReply && !privateNoteMode && <div className="mb-2 flex min-w-0 items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] text-emerald-900"><span className="min-w-0 flex-1 truncate">رد سريع {pendingQuickReply.shortcut}{pendingQuickReply.mediaAsset?.fileName ? ` · ${pendingQuickReply.mediaAsset.fileName}` : ""}{pendingQuickReply.tagIds?.length ? ` · ستُضاف ${pendingQuickReply.tagIds.length} قائمة` : ""}</span><button type="button" aria-label="إلغاء الرد السريع" onClick={() => setPendingQuickReply(null)} className="grid h-7 w-7 shrink-0 place-items-center rounded-lg hover:bg-white"><X size={14} /></button></div>}
                 <form onSubmit={(event) => { if (privateNoteMode) void sendSecretNote(event); else sendReply(event); }}>
                   <div className={`overflow-hidden rounded-xl border bg-white focus-within:shadow-[0_0_0_3px_rgba(211,47,47,.05)] ${privateNoteMode ? "border-violet-200 focus-within:border-violet-300" : "border-stone-200 focus-within:border-[#e4b8a8]"}`}>
                     {privateNoteMode && <div className="flex min-h-10 items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-3">
@@ -1802,7 +1810,7 @@ export default function AgentWorkspace() {
                         <button type="button" disabled={privateNoteMode || !metaWindowOpen || sending || requestingRecording} title={privateNoteMode ? "التسجيل الصوتي متاح لردود العميل فقط" : recording ? "إيقاف التسجيل وإرساله" : requestingRecording ? "جارٍ طلب إذن الميكروفون" : "تسجيل رسالة صوتية"} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-500 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button>
                         <button ref={plusButtonRef} type="button" aria-label="إضافة مرفق أو إجراء" aria-haspopup="menu" aria-expanded={showPlusMenu} disabled={privateNoteMode || !messagingEnabled || sending} onClick={() => { setShowCanned(false); setShowPlusMenu((shown) => !shown); }} className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-40"><Plus size={17} /></button>
                       </div>
-                      <button type="submit" disabled={privateNoteMode ? (!secretNote.trim() || !privateNoteRecipientId || !privateNoteRecipients.some((recipient) => recipient.id === privateNoteRecipientId) || sendingSecretNote) : (!text.trim() || !messagingEnabled || sending)} className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-[11px] font-bold text-white shadow-sm transition disabled:cursor-not-allowed disabled:opacity-40 ${privateNoteMode ? "bg-violet-700 hover:bg-violet-800" : "bg-[#d32f2f] shadow-red-200 hover:bg-[#b71c1c]"}`}><span>{privateNoteMode ? sendingSecretNote ? "جارٍ الإرسال..." : "إرسال سري" : sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={14} /></button>
+                      <button type="submit" disabled={privateNoteMode ? (!secretNote.trim() || !privateNoteRecipientId || !privateNoteRecipients.some((recipient) => recipient.id === privateNoteRecipientId) || sendingSecretNote) : ((!text.trim() && !pendingQuickReply?.mediaAssetId) || !messagingEnabled || sending)} className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-[11px] font-bold text-white shadow-sm transition disabled:cursor-not-allowed disabled:opacity-40 ${privateNoteMode ? "bg-violet-700 hover:bg-violet-800" : "bg-[#d32f2f] shadow-red-200 hover:bg-[#b71c1c]"}`}><span>{privateNoteMode ? sendingSecretNote ? "جارٍ الإرسال..." : "إرسال سري" : sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={14} /></button>
                     </div>
                   </div>
                 </form><p className="mt-1 text-center text-[9px] text-stone-400">Enter للإرسال · Shift + Enter لسطر جديد · رسائل العملاء تمر عبر القناة الأصلية</p>
