@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
 import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
@@ -19,6 +19,10 @@ import { hasMessageTextLinks, isNotificationSoundEnabled, latestOutgoingTextMess
 
 type AnyRecord = Record<string, any>;
 const channels = [{ id: "ALL", label: "الكل" }, { id: "WHATSAPP", label: "واتساب" }, { id: "MESSENGER", label: "ماسنجر" }, { id: "TELEGRAM", label: "تليجرام" }];
+const CONVERSATION_SIDEBAR_WIDTH_KEY = "bondoq-conversation-sidebar-width";
+const MIN_CONVERSATION_SIDEBAR_WIDTH = 220;
+const MAX_CONVERSATION_SIDEBAR_WIDTH = 480;
+const clampConversationSidebarWidth = (width: number) => Math.min(MAX_CONVERSATION_SIDEBAR_WIDTH, Math.max(MIN_CONVERSATION_SIDEBAR_WIDTH, Math.round(width)));
 const productCategoryLabel: Record<string, string> = { EASTERN: "حلويات شرقية", WESTERN: "حلويات غربية", CAKES: "تورتات", BAKERY: "مخبوزات", KAHK: "كحك وبسكويت", CHOCOLATE: "شوكولاتة", MOULID: "حلاوة المولد", OCCASIONS: "مناسبات", MIX_BONDOQ: "ميكس بندق" };
 const customerDisplayName = (customer?: AnyRecord | null) => customer?.displayName?.trim() || customer?.name || "عميل جديد";
 export default function AgentWorkspace() {
@@ -38,6 +42,12 @@ export default function AgentWorkspace() {
   const [sendingPoll, setSendingPoll] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
   const [showConversationSidebar, setShowConversationSidebar] = useState(true);
+  const [conversationSidebarWidth, setConversationSidebarWidth] = useState(285);
+  const [conversationSidebarWidthLoaded, setConversationSidebarWidthLoaded] = useState(false);
+  const [resizingConversationSidebar, setResizingConversationSidebar] = useState(false);
+  const workspaceGridRef = useRef<HTMLElement | null>(null);
+  const sidebarResizeStartRef = useRef<{ x: number; width: number } | null>(null);
+  const sidebarWidthDraftRef = useRef(285);
   const [showCustomerSidebar, setShowCustomerSidebar] = useState(false);
   const [showEventComposer, setShowEventComposer] = useState(false);
   const [eventTitle, setEventTitle] = useState("");
@@ -312,15 +322,7 @@ export default function AgentWorkspace() {
     } finally { if (request === phoneSearchRequestRef.current) setSearchingPhone(false); }
   }
   function buildGlobalSearchParams(query: string, offset = 0) {
-    const params = new URLSearchParams({ q: query, offset: String(offset) });
-    if (statusFilter === "TEAM") params.set("team", "1");
-    else if (statusFilter === "HISTORY") params.set("history", "1");
-    else if (statusFilter === "FAVORITES") params.set("favorite", "1");
-    else if (statusFilter === "PINNED") params.set("pinned", "1");
-    else if (statusFilter === "ACTIVE") params.set("status", "ACTIVE");
-    else if (["OPEN", "PENDING", "QUEUED", "RESOLVED", "CLOSED"].includes(statusFilter)) params.set("status", statusFilter);
-    if (filter !== "ALL") params.set("channel", filter);
-    return params;
+    return new URLSearchParams({ q: query, offset: String(offset) });
   }
   async function loadMoreGlobalSearch() {
     const query = search.trim();
@@ -987,7 +989,7 @@ export default function AgentWorkspace() {
       }).finally(() => { if (request === globalSearchRequestRef.current) setGlobalSearchLoading(false); });
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [search, statusFilter, filter]);
+  }, [search]);
 
   useEffect(() => {
     const conversationId = detail?.id;
@@ -1528,7 +1530,44 @@ export default function AgentWorkspace() {
     : channels.filter((item) => item.id === "ALL");
   const filteredCanned = [...agentQuickReplies, ...canned].filter((item) => !text.startsWith("/") || item.shortcut.toLowerCase().includes(text.toLowerCase()) || item.title.includes(text.slice(1)));
   const visibleProducts = products.filter((product) => (productFilter === "ALL" || product.category === productFilter) && `${product.name || ""} ${product.sku || ""}`.toLocaleLowerCase().includes(productSearch.trim().toLocaleLowerCase()));
-  const workspaceColumns = `${showConversationSidebar ? "285px " : ""}minmax(0,1fr)${showCustomerSidebar ? " 300px" : ""}`;
+  const workspaceColumns = `${showConversationSidebar ? "var(--conversation-sidebar-width) 8px " : ""}minmax(0,1fr)${showCustomerSidebar ? " 300px" : ""}`;
+
+  useEffect(() => {
+    try {
+      const savedWidth = Number(window.localStorage.getItem(CONVERSATION_SIDEBAR_WIDTH_KEY));
+      if (Number.isFinite(savedWidth) && savedWidth > 0) setConversationSidebarWidth(clampConversationSidebarWidth(savedWidth));
+    } catch {}
+    setConversationSidebarWidthLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!conversationSidebarWidthLoaded) return;
+    try { window.localStorage.setItem(CONVERSATION_SIDEBAR_WIDTH_KEY, String(conversationSidebarWidth)); } catch {}
+  }, [conversationSidebarWidth, conversationSidebarWidthLoaded]);
+
+  function startConversationSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    sidebarResizeStartRef.current = { x: event.clientX, width: conversationSidebarWidth };
+    sidebarWidthDraftRef.current = conversationSidebarWidth;
+    setResizingConversationSidebar(true);
+  }
+
+  function moveConversationSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = sidebarResizeStartRef.current;
+    if (!start) return;
+    const width = clampConversationSidebarWidth(start.width + event.clientX - start.x);
+    sidebarWidthDraftRef.current = width;
+    workspaceGridRef.current?.style.setProperty("--conversation-sidebar-width", `${width}px`);
+  }
+
+  function endConversationSidebarResize() {
+    if (!sidebarResizeStartRef.current) return;
+    sidebarResizeStartRef.current = null;
+    setResizingConversationSidebar(false);
+    setConversationSidebarWidth(sidebarWidthDraftRef.current);
+  }
 
   useEffect(() => { setCannedReplyIndex(0); }, [showCanned, text, agentQuickReplies, canned]);
 
@@ -1562,7 +1601,7 @@ export default function AgentWorkspace() {
     return () => document.removeEventListener("keydown", handleQuickReplyKeys, true);
   }, [showCanned, cannedReplyIndex, filteredCanned]);
 
-  return <main style={{ "--chat-font-size": `${chatFontSize}px` } as CSSProperties} className="agent-app h-screen min-h-[700px] overflow-hidden bg-[#f0f2f5] text-stone-800">
+  return <main style={{ "--chat-font-size": `${chatFontSize}px` } as CSSProperties} className={`agent-app h-screen min-h-[700px] overflow-hidden bg-[#f0f2f5] text-stone-800 ${resizingConversationSidebar ? "is-resizing-sidebar" : ""}`}>
     <header className="flex h-[68px] items-center justify-between border-b border-stone-200 bg-white px-4 sm:px-6">
       <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-[#d32f2f] text-lg font-black text-[#ffc107]">ب</div><div><b className="text-sm">حلواني بندق</b><p className="text-[10px] text-stone-400">مساحة العمل · محادثاتك المخصصة</p></div></div>
       <div className="flex items-center gap-1 sm:gap-2"><span className="hidden text-xs font-bold text-stone-600 sm:inline">حالتك</span><div className="relative"><select value={presence} onChange={(e) => changePresence(e.target.value)} className={`h-9 appearance-none rounded-full pl-8 pr-3 text-xs font-bold outline-none ${presence === "ONLINE" ? "bg-emerald-50 text-emerald-700" : presence === "OFFLINE" ? "bg-stone-100 text-stone-500" : "bg-amber-50 text-amber-800"}`}><option value="ONLINE">متاح</option><option value="BUSY">مشغول</option><option value="BREAK">استراحة</option><option value="OFFLINE">غير متصل</option></select><span className={`absolute left-2.5 top-3 h-2 w-2 rounded-full ${presence === "ONLINE" ? "bg-emerald-500" : presence === "OFFLINE" ? "bg-stone-400" : "bg-amber-500"}`} /></div><PushNotificationsButton /><InstallAppButton /><button type="button" onClick={() => router.push("/contacts")} title="جهات الاتصال ودليل الشركة" aria-label="جهات الاتصال ودليل الشركة" className="grid h-9 w-9 place-items-center rounded-lg text-stone-500 hover:bg-amber-50 hover:text-amber-700"><BookUser size={17} /></button><button type="button" aria-label={soundEnabled ? "إيقاف صوت الرسائل" : "تشغيل صوت الرسائل"} title={soundEnabled ? "إيقاف صوت الرسائل الجديدة" : "تشغيل صوت الرسائل الجديدة"} onClick={() => { const next = !soundEnabled; setSoundEnabled(next); setNotificationSoundEnabled(next); }} className={`grid h-9 w-9 place-items-center rounded-lg ${soundEnabled ? "text-emerald-700 hover:bg-emerald-50" : "text-stone-400 hover:bg-stone-100"}`}>{soundEnabled ? <Bell size={17} /> : <BellOff size={17} />}</button><div className="mr-2 hidden h-8 w-px bg-stone-200 sm:block" /><div className="hidden text-left sm:block"><b className="block text-xs">{user?.name || "الموظف"}</b><span className="text-[10px] text-stone-400">{department(user?.department)}</span></div><Avatar name={user?.name || "م"} /><button onClick={() => setShowAccount(true)} className="rounded-lg p-2 text-stone-400 hover:bg-amber-50 hover:text-amber-700" title="إعدادات الحساب"><UserRound size={17} /></button><button onClick={logout} className="mr-1 rounded-lg px-2 py-2 text-xs text-stone-400 hover:bg-stone-100" title="تسجيل الخروج"><ArrowLeft size={17} /></button></div>
@@ -1571,10 +1610,10 @@ export default function AgentWorkspace() {
       {incomingHandoffs.length > 0 && <div className="fixed left-3 right-3 top-[76px] z-[60] ml-auto max-h-[60vh] max-w-sm space-y-2 overflow-y-auto sm:left-auto sm:right-6">{incomingHandoffs.slice(0, 4).map((request) => <article key={request.conversationId} role="status" className="rounded-2xl border border-amber-200 bg-white p-4 shadow-xl"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-xs font-extrabold text-amber-900">طلب استلام محادثة</p><p className="mt-1 truncate text-xs font-bold text-stone-700">{request.conversation?.customer?.displayName || request.conversation?.customer?.name || "عميل"}</p><p className="mt-1 text-[10px] text-stone-500">حوّلها إليك {request.fromAgent?.name || "زميل"}. اقبل لتصبح مسؤولًا عنها أو ارفض لتبقى لدى زميلك.</p></div><button type="button" onClick={() => setIncomingHandoffs((current) => current.filter((item) => item.conversationId !== request.conversationId))} aria-label="إخفاء طلب التحويل" className="rounded-md p-1 text-stone-400 hover:bg-stone-100">×</button></div>{handoffError && handoffError.conversationId === request.conversationId && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-[11px] leading-5 text-red-700">{handoffError.message}</p>}<div className="mt-3 flex gap-2"><button type="button" disabled={Boolean(handoffResponseBusyId)} onClick={() => void respondToHandoff(request, "DECLINE")} className="min-h-10 flex-1 rounded-lg border border-stone-200 px-3 text-xs font-bold text-stone-600 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50">{handoffResponseBusyId === request.conversationId && handoffResponseDecision === "DECLINE" ? "جارٍ الرفض..." : "رفض"}</button><button type="button" disabled={Boolean(handoffResponseBusyId)} onClick={() => void respondToHandoff(request, "ACCEPT")} className="min-h-10 flex-1 rounded-lg bg-emerald-700 px-3 text-xs font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50">{handoffResponseBusyId === request.conversationId && handoffResponseDecision === "ACCEPT" ? "جارٍ القبول..." : "قبول واستلام"}</button></div></article>)}</div>}
        {incomingNotice && <div role="status" aria-live="polite" className="fixed left-3 right-3 top-[76px] z-50 ml-auto flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-200 bg-white p-4 shadow-xl sm:left-auto sm:right-6"><div className="min-w-0 flex-1"><p className="text-xs font-extrabold text-emerald-900">{incomingNotice.isAutoReassignment ? "محادثة أُعيد إسنادها إليك" : incomingNotice.isAdminReassignment ? "تم سحب المحادثة بواسطة الإدارة" : incomingNotice.isHandoffSent ? "تم تحويل المحادثة" : incomingNotice.isHandoff ? "محادثة محولة إليك" : `رسالة جديدة من ${incomingNotice.customerName}`}</p><p className="mt-1 text-[10px] text-stone-400">{incomingNotice.channel ? channelName(incomingNotice.channel) : "إشعار من المدير"}</p><p className="mt-1 line-clamp-2 text-xs text-stone-600">{incomingNotice.preview}</p></div>{!incomingNotice.isHandoffSent && <button type="button" onClick={() => { const id = incomingNotice.conversationId; setIncomingNotice(null); void openChat(id); }} className="shrink-0 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white">عرض المحادثة</button>}<button type="button" onClick={() => setIncomingNotice(null)} aria-label="إغلاق التنبيه" className="shrink-0 rounded-lg p-1 text-stone-400 hover:bg-stone-100">×</button></div>}
 
-     <section data-chat-open={Boolean(activeId)} style={{ gridTemplateColumns: workspaceColumns }} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
+      <section ref={workspaceGridRef} data-chat-open={Boolean(activeId)} style={{ gridTemplateColumns: workspaceColumns, "--conversation-sidebar-width": `${conversationSidebarWidth}px` } as CSSProperties} className="workspace-grid grid h-[calc(100vh-68px)] min-h-[632px] grid-cols-[285px_minmax(0,1fr)_300px] gap-3 p-3 sm:gap-4 sm:p-4">
        <input ref={photoInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
        <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
-       <aside className={`workspace-list panel flex min-h-0 flex-col overflow-hidden ${showConversationSidebar ? "" : "workspace-list-collapsed"}`}>
+        <aside id="conversation-list" className={`workspace-list panel flex min-h-0 flex-col overflow-hidden ${showConversationSidebar ? "" : "workspace-list-collapsed"}`}>
              <div className="px-4 pt-4"><div className="mb-3 flex items-center justify-between gap-2"><div><h1 className="font-extrabold">المحادثات</h1><p className="text-[10px] text-stone-400">{statusFilter === "TEAM" ? `${conversations.length} محادثة لدى الفريق` : statusFilter === "HISTORY" ? `${conversations.length} محادثة في سجلك` : `${conversations.length} محادثة مسندة إليك`}</p></div><button type="button" onClick={() => { setContactQuery(""); setShowContacts(true); }} title="بدء محادثة جديدة من جهات الاتصال" aria-label="جهات الاتصال وبدء محادثة جديدة" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#e7f5ed] px-2 text-[10px] font-bold text-[#187a4a] hover:bg-[#d6eddf]"><Users size={14} /> جهات الاتصال</button><span className="grid h-8 min-w-8 place-items-center rounded-full bg-red-50 px-2 text-xs font-bold text-[#d32f2f]">{conversations.filter((c) => c.unreadCount).length}</span></div><label className="flex h-10 items-center gap-2 rounded-xl bg-[#f7f5f1] px-3"><Search size={15} className="text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ابحث بالاسم أو الهاتف أو نص الرسالة" className="w-full bg-transparent text-xs outline-none" /></label>
               {search.replace(/[^\d٠-٩۰-۹]/g, "").length >= 7 && <button type="button" onClick={() => void searchPhoneHistory()} disabled={searchingPhone} className="mt-2 w-full rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-bold text-emerald-800 disabled:opacity-50">{searchingPhone ? "جارٍ البحث في سجل WhatsApp..." : "بحث شامل برقم الهاتف"}</button>}
               {phoneSearchError && <p role="alert" className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-[10px] leading-5 text-red-700">{phoneSearchError}</p>}
@@ -1605,9 +1644,34 @@ export default function AgentWorkspace() {
             </div>
         {hasMoreChats && <button type="button" onClick={() => void loadMoreChats()} disabled={loadingMoreChats} className="m-3 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">{loadingMoreChats ? "جارٍ تحميل المزيد..." : "تحميل المزيد من المحادثات"}</button>}
         <div className="space-y-2 border-t border-stone-100 px-4 py-3 text-[10px] text-stone-400"><div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متصل بالنظام</span><span className="truncate">{user?.email}</span></div><div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-2"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">واتساب</a></div></div>
-      </aside>
+       </aside>
 
-      <section className="workspace-chat panel relative flex min-h-0 flex-col overflow-hidden bg-[#fffdf7]" onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) setIsDraggingFile(true); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); setIsDraggingFile(false); const files = Array.from(event.dataTransfer.files || []); if (files.length) void uploadSelectedFiles(files); }}>
+       {showConversationSidebar && <div
+         role="separator"
+         aria-orientation="vertical"
+         aria-label="تغيير عرض قائمة المحادثات"
+         aria-controls="conversation-list"
+         aria-valuemin={MIN_CONVERSATION_SIDEBAR_WIDTH}
+         aria-valuemax={MAX_CONVERSATION_SIDEBAR_WIDTH}
+         aria-valuenow={conversationSidebarWidth}
+         aria-valuetext={`${conversationSidebarWidth} بكسل`}
+         tabIndex={0}
+         className="workspace-splitter"
+         onPointerDown={startConversationSidebarResize}
+         onPointerMove={moveConversationSidebarResize}
+         onPointerUp={endConversationSidebarResize}
+         onPointerCancel={endConversationSidebarResize}
+         onDoubleClick={() => setConversationSidebarWidth(285)}
+         onKeyDown={(event) => {
+           const step = event.shiftKey ? 32 : 16;
+           if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+             event.preventDefault();
+             setConversationSidebarWidth((width) => clampConversationSidebarWidth(width + (event.key === "ArrowRight" ? step : -step)));
+           }
+         }}
+       />}
+
+       <section className="workspace-chat panel relative flex min-h-0 flex-col overflow-hidden bg-[#fffdf7]" onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) setIsDraggingFile(true); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); setIsDraggingFile(false); const files = Array.from(event.dataTransfer.files || []); if (files.length) void uploadSelectedFiles(files); }}>
         <input ref={uploadInputRef} type="file" multiple className="hidden" accept="image/jpeg,image/png,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,audio/webm,audio/aac,video/mp4,video/3gpp,video/quicktime,application/pdf,text/plain,.doc,.docx,.xls,.xlsx" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
         {isDraggingFile && detail && <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-emerald-500 bg-emerald-50/90 text-lg font-extrabold text-emerald-800">أفلت الصورة أو ملصق WebP أو الصوت أو الفيديو أو الملف لإرساله</div>}
         {detail ? <>
