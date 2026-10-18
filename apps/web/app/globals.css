@@ -99,8 +99,9 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
   .workspace-grid { grid-template-columns: minmax(0,1fr) !important; height: calc(100dvh - 60px) !important; min-height: 0 !important; overflow: hidden !important; gap: 8px !important; padding: 8px !important; }
   .workspace-list { min-height: 0; max-height: none; }
    .workspace-chat { display: none !important; height: 100%; min-height: 0; }
-   .workspace-profile { display: none; }
+  .workspace-profile { display: none; }
   .workspace-profile-open { position: fixed; inset: 68px 8px 8px; z-index: 45; display: flex !important; max-height: calc(100dvh - 76px); }
+  .workspace-chat fieldset:disabled ~ div .mobile-profile-toggle { display: flex !important; }
   .workspace-grid[data-chat-open="true"] .workspace-list { display: none; }
    .workspace-grid[data-chat-open="true"] .workspace-chat { display: flex !important; }
    .conversation-view-back { display: flex; }
@@ -152,9 +153,13 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
   .agent-message-row:hover .message-quote-button,
   .agent-message-row:focus-within .message-quote-button { opacity: 1; pointer-events: auto; }
 }
+.desktop-profile-toggle,
+.mobile-profile-toggle { display: none !important; }
 @media (min-width: 851px) {
-  .workspace-list-collapsed,
-  .workspace-profile-collapsed { display: none !important; }
+  .workspace-grid[data-profile-collapsed="true"] { grid-template-columns: 260px minmax(0, 1fr) !important; }
+  .workspace-grid[data-profile-collapsed="true"] > .workspace-profile { display: none !important; }
+  .workspace-chat fieldset:disabled ~ div .desktop-profile-toggle { display: flex !important; }
+  .workspace-list-collapsed { display: none !important; }
 }
 @media (max-width: 850px) {
   .desktop-sidebar-controls { display: none !important; }
