@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import jwt from "jsonwebtoken";
-import { Department, Role } from "@prisma/client";
+import { Channel, Department, MessengerAccessMode, Role } from "@prisma/client";
 import { canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, signToken, type SessionUser } from "./auth";
 
 function user(overrides: Partial<SessionUser> = {}): SessionUser {
   return {
     id: "user-1", role: Role.AGENT, name: "Test", authVersion: 0, department: Department.HEADQUARTERS, branchId: null,
     canViewAllConversations: null, canTransferConversations: null, canManageCatalog: null, canViewReports: null, canManageTeam: null,
+    messengerAccess: null, canReceiveMessenger: true, departmentMessengerAccess: MessengerAccessMode.DISABLED,
     ...overrides
   };
 }
@@ -48,6 +49,39 @@ test("team conversation browsing is enabled for frontline staff only", () => {
   assert.equal(canReadTeamConversations(user({ role: Role.BRANCH_USER }), { branchId: "branch-a" }), false);
   assert.equal(canReadTeamConversations(user({ role: Role.SUPERVISOR })), false);
   assert.equal(canReadTeamConversations(user({ role: Role.ADMIN })), false);
+});
+
+test("Messenger department permissions separate reply, view-only, and excluded access", () => {
+  const messenger = { assignedAgentId: "wfh", channel: Channel.MESSENGER };
+  const workFromHome = user({ id: "wfh", department: Department.WORK_FROM_HOME, departmentMessengerAccess: MessengerAccessMode.FULL });
+  const customerCare = user({ id: "care", department: Department.CUSTOMER_CARE, departmentMessengerAccess: MessengerAccessMode.READ_ONLY });
+  const excluded = user({ id: "excluded", department: Department.DELIVERY, departmentMessengerAccess: MessengerAccessMode.DISABLED });
+
+  assert.equal(canReadTeamConversations(workFromHome, messenger), true);
+  assert.equal(canWorkOnConversation(workFromHome, messenger), true);
+  assert.equal(canReadTeamConversations(customerCare, messenger), true);
+  assert.equal(canReadConversation(customerCare, messenger), false);
+  assert.equal(canWorkOnConversation(customerCare, messenger), false);
+  assert.equal(canReadTeamConversations(excluded, messenger), false);
+  assert.equal(canReadConversation(excluded, messenger), false);
+});
+
+test("an individual Messenger override takes precedence over department policy", () => {
+  const messenger = { assignedAgentId: "staff", channel: Channel.MESSENGER };
+  const personallyEnabled = user({ id: "staff", department: Department.CUSTOMER_CARE, departmentMessengerAccess: MessengerAccessMode.READ_ONLY, messengerAccess: MessengerAccessMode.FULL });
+  const personallyExcluded = user({ id: "staff", department: Department.WORK_FROM_HOME, departmentMessengerAccess: MessengerAccessMode.FULL, messengerAccess: MessengerAccessMode.DISABLED });
+  assert.equal(canWorkOnConversation(personallyEnabled, messenger), true);
+  assert.equal(canReadConversation(personallyExcluded, messenger), false);
+});
+
+test("legacy Messenger routing opt-out makes inherited full access read-only", () => {
+  const messenger = { assignedAgentId: "staff", channel: Channel.MESSENGER };
+  const legacyOptOut = user({ id: "staff", department: Department.WORK_FROM_HOME, departmentMessengerAccess: MessengerAccessMode.FULL, canReceiveMessenger: false });
+  const explicitOverride = user({ ...legacyOptOut, messengerAccess: MessengerAccessMode.FULL });
+
+  assert.equal(canReadConversation(legacyOptOut, messenger), true);
+  assert.equal(canWorkOnConversation(legacyOptOut, messenger), false);
+  assert.equal(canWorkOnConversation(explicitOverride, messenger), true);
 });
 
 test("private conversation notes are visible only to participants and managers with access", () => {

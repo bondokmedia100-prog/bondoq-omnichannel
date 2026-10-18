@@ -2,7 +2,7 @@ import { MessageKind } from "@prisma/client";
 import { config } from "./config";
 import { fetchInboundMedia } from "./providers";
 import { prisma } from "./prisma";
-import { io } from "./realtime";
+import { emitConversationEvent } from "./realtime";
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
@@ -29,6 +29,7 @@ export async function transcribeAudioMessage(messageId: string) {
   const transcript = result.text?.trim();
   if (!transcript) return;
   const updated = await prisma.message.update({ where: { id: message.id }, data: { transcription: transcript } });
-  io.to(`conversation:${message.conversationId}`).to("admins").emit("message:transcribed", { conversationId: message.conversationId, message: updated });
-  if (message.conversation.assignedAgentId) io.to(`agent:${message.conversation.assignedAgentId}`).emit("message:transcribed", { conversationId: message.conversationId, message: updated });
+  await emitConversationEvent(message.conversationId, message.conversation.channel, "message:transcribed", { conversationId: message.conversationId, message: updated }, {
+    extraRooms: message.conversation.assignedAgentId ? [`agent:${message.conversation.assignedAgentId}`] : []
+  });
 }

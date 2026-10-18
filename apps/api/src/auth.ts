@@ -1,8 +1,9 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 import jwt from "jsonwebtoken";
-import { Department, Role } from "@prisma/client";
+import { Channel, Department, MessengerAccessMode, Role } from "@prisma/client";
 import { config } from "./config";
 import { prisma } from "./prisma";
+import { canReplyMessenger, canViewMessenger, getDepartmentMessengerMode } from "./messengerAccess";
 
 export type PermissionName = "canViewAllConversations" | "canTransferConversations" | "canManageCatalog" | "canViewReports" | "canManageTeam";
 export type SessionUser = {
@@ -17,11 +18,23 @@ export type SessionUser = {
   canManageCatalog: boolean | null;
   canViewReports: boolean | null;
   canManageTeam: boolean | null;
+  messengerAccess: MessengerAccessMode | null;
+  canReceiveMessenger: boolean;
+  departmentMessengerAccess: MessengerAccessMode;
 };
 export type AuthedRequest = Request & { user?: SessionUser };
 
 export function signToken(user: Pick<SessionUser, "id" | "role" | "name" | "authVersion">) {
   return jwt.sign(user, config.jwtSecret, { issuer: "bondoq-support" });
+}
+
+export async function loadSessionUser(id: string) {
+  const user = await prisma.user.findFirst({ where: { id, isActive: true }, select: {
+    id: true, role: true, name: true, authVersion: true, department: true, branchId: true,
+     canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true,
+     messengerAccess: true, canReceiveMessenger: true
+  } });
+  return user ? { ...user, departmentMessengerAccess: await getDepartmentMessengerMode(user.department) } : null;
 }
 
 export async function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
@@ -33,10 +46,7 @@ export async function authenticate(req: AuthedRequest, res: Response, next: Next
   } catch {
     return res.status(401).json({ error: "جلسة الدخول غير صالحة أو انتهت" });
   }
-  const user = await prisma.user.findFirst({ where: { id: claims.id, isActive: true }, select: {
-    id: true, role: true, name: true, authVersion: true, department: true, branchId: true,
-    canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true
-  } });
+  const user = await loadSessionUser(claims.id);
   if (!user || user.authVersion !== claims.authVersion) return res.status(401).json({ error: "الجلسة منتهية أو تم إبطالها" });
   req.user = user;
   next();
@@ -64,20 +74,23 @@ export function permissionGuard(permission: PermissionName): RequestHandler[] {
   }) as RequestHandler];
 }
 
-export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
+  if (conversation.channel === Channel.MESSENGER && !canViewMessenger(user)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
   return conversation.assignedAgentId === user.id;
 }
 
-export function canReadTeamConversations(user: SessionUser, conversation?: { branchId?: string | null }) {
+export function canReadTeamConversations(user: SessionUser, conversation?: { branchId?: string | null; channel?: Channel }) {
+  if (conversation?.channel === Channel.MESSENGER && !canViewMessenger(user)) return false;
   if (user.role === Role.AGENT) return true;
   return user.role === Role.BRANCH_USER && Boolean(user.branchId)
     && (!conversation || conversation.branchId === user.branchId);
 }
 
-export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null }) {
+export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
+  if (conversation.channel === Channel.MESSENGER && !canReplyMessenger(user)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;

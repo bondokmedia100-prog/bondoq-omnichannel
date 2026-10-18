@@ -45,6 +45,12 @@ enum Channel {
   TELEGRAM
 }
 
+enum MessengerAccessMode {
+  FULL
+  READ_ONLY
+  DISABLED
+}
+
 enum ConversationStatus {
   OPEN
   PENDING
@@ -123,6 +129,7 @@ model User {
   canReceiveWhatsApp       Boolean                @default(true)
   canReceiveMessenger       Boolean                @default(true)
   canReceiveTelegram        Boolean                @default(true)
+  messengerAccess          MessengerAccessMode?
   presence                 Presence               @default(OFFLINE)
   isActive                 Boolean                @default(true)
   lastSeenAt               DateTime?
@@ -409,6 +416,12 @@ model IntegrationSetting {
   whatsappPhoneNumber      String?
   whatsappCallReplyText    String?  @db.Text
   updatedAt                DateTime @updatedAt
+}
+
+model DepartmentMessengerPermission {
+  department Department           @id
+  mode       MessengerAccessMode
+  updatedAt  DateTime             @updatedAt
 }
 
 model WhatsAppCallSession {

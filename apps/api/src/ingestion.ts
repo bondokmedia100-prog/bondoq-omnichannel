@@ -2,7 +2,7 @@ import { ConversationBotState, ConversationStatus, Department, MessageDirection,
 import type { NormalizedInbound } from "./providers";
 import { prisma } from "./prisma";
 import { assignConversation, scheduleSla, scheduleUnansweredReassignment, withInboundConversationLock } from "./routing";
-import { io } from "./realtime";
+import { emitConversationEvent, io } from "./realtime";
 import { channelRecipient, fetchInboundMedia, sendRoutingMenu, sendToChannel } from "./providers";
 import { kalemlyExternalMessageId } from "./KalemlyWaService";
 import { transcribeAudioMessage } from "./transcription";
@@ -13,6 +13,7 @@ import { detectImageContentType, safeFileName } from "./mediaStorage";
 import { isWithinBusinessHours } from "./businessHours";
 import { startOfCairoDay } from "./cairoTime";
 import { normalizePhoneNumber, phoneNumbersMatch } from "./egyptianPhoneFormatter";
+import { messengerViewerWhere } from "./messengerAccess";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
   let lockKey = inbound.externalConversationId;
@@ -168,8 +169,8 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     } });
     await prisma.auditLog.create({ data: { action: "BLOCKED_CUSTOMER_MESSAGE_IGNORED", conversationId: conversation.id, details: { customerId: customer.id, messageId: message.id } } });
     if (previousAssignedAgentId) io?.to(`agent:${previousAssignedAgentId}`).emit("conversation:unassigned", conversation);
-    io?.to("admins").emit("conversation:updated", conversation);
-    io?.to("admins").emit("message:new", { conversation, message, customer });
+    await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", conversation);
+    await emitConversationEvent(conversation.id, conversation.channel, "message:new", { conversation, message, customer });
     return { conversationId: conversation.id, messageId: message.id, blocked: true };
   }
   const pendingSurvey = isWhatsAppGroup ? null : await prisma.csatSurvey.findUnique({ where: { conversationId: conversation.id } });
@@ -237,18 +238,16 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     const survey = await prisma.csatSurvey.update({ where: { id: pendingSurvey.id }, data: { rating: customerRating, ratedAt: message.createdAt } });
     await prisma.auditLog.create({ data: { conversationId: conversation.id, action: "CSAT_RECEIVED", details: { rating: customerRating, agentId: survey.agentId } } });
     if (io) {
-      io.to("admins").emit(customerRating < 3 ? "csat:low" : "csat:received", { conversationId: conversation.id, rating: customerRating, customer, agentId: survey.agentId });
-      io.to(`conversation:${conversation.id}`).emit("message:new", { conversationId: conversation.id, message, customer });
+      await emitConversationEvent(conversation.id, conversation.channel, customerRating < 3 ? "csat:low" : "csat:received", { conversationId: conversation.id, rating: customerRating, customer, agentId: survey.agentId }, { audience: "managers" });
+      await emitConversationEvent(conversation.id, conversation.channel, "message:new", { conversationId: conversation.id, message, customer });
     }
     return { conversationId: conversation.id, messageId: message.id, csatRating: customerRating };
   }
 
   const payload = { conversation, message, customer };
-  if (io) {
-    const targets = io.to("admins").to(`conversation:${conversation.id}`);
-    if (conversation.assignedAgentId) targets.to(`agent:${conversation.assignedAgentId}`).emit("message:new", payload);
-    else targets.emit("message:new", payload);
-  }
+  await emitConversationEvent(conversation.id, conversation.channel, "message:new", payload, {
+    extraRooms: conversation.assignedAgentId ? [`agent:${conversation.assignedAgentId}`] : []
+  });
 
   async function sendBotReply(text: string, automation: string, details: Record<string, unknown> = {}) {
     const result: any = await sendToChannel({ channel: inbound.channel, recipient: channelRecipient(inbound.channel, inbound.externalConversationId, inbound.externalCustomerId), text });
@@ -259,8 +258,9 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       metadata: { automation, ...details } as Prisma.InputJsonValue
     } });
     conversation = await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: reply.createdAt } });
-    io?.to(`conversation:${conversationId}`).to("admins").emit("message:new", { conversationId, message: reply });
-    if (conversation.assignedAgentId) io?.to(`agent:${conversation.assignedAgentId}`).emit("message:new", { conversationId: conversation.id, message: reply });
+    await emitConversationEvent(conversationId, conversation.channel, "message:new", { conversationId, message: reply }, {
+      extraRooms: conversation.assignedAgentId ? [`agent:${conversation.assignedAgentId}`] : []
+    });
   }
 
   if (outsideBusinessHours) {
@@ -285,7 +285,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
         metadata: { automation: "service-menu" }
       } });
       conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: menuMessage.createdAt } });
-      io?.to(`conversation:${conversation.id}`).to("admins").emit("message:new", { conversationId: conversation.id, message: menuMessage });
+      await emitConversationEvent(conversation.id, conversation.channel, "message:new", { conversationId: conversation.id, message: menuMessage });
     } catch (error) {
       console.error("Service menu delivery failed; assigning conversation to the default queue", error);
       conversation = await prisma.conversation.update({ where: { id: conversation.id }, data: { awaitingRouting: false, botState: ConversationBotState.ASSIGNED_TO_AGENT, serviceTag: "تواصل مباشر" } });
@@ -330,13 +330,14 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   if (io && conversation.assignedAgentId && conversation.assignedAgentId !== previousAssignedAgentId) {
     io.to(`agent:${conversation.assignedAgentId}`).emit("message:new", payload);
   }
+  const adminScope = { OR: [
+    { role: Role.ADMIN },
+    { role: Role.SUPERVISOR, canViewAllConversations: true },
+    { role: Role.SUPERVISOR, canViewAllConversations: null }
+  ] };
   const admins = await prisma.user.findMany({ where: {
     isActive: true,
-    OR: [
-      { role: Role.ADMIN },
-      { role: Role.SUPERVISOR, canViewAllConversations: true },
-      { role: Role.SUPERVISOR, canViewAllConversations: null }
-    ]
+    ...(conversation.channel === "MESSENGER" ? { AND: [adminScope, { OR: [{ role: Role.ADMIN }, await messengerViewerWhere()] }] } : adminScope)
   }, select: { id: true } });
   const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.STICKER ? "ملصق" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
   const tag = `inbound-${conversation.id}`;
@@ -361,6 +362,6 @@ export async function updateEditedInboundMessage(inbound: NormalizedInbound) {
     text: inbound.text || null,
     metadata: { ...previous, editedAt: new Date().toISOString() } as Prisma.InputJsonValue
   }, include: { author: { select: { id: true, name: true } }, reactions: { include: { user: { select: { id: true, name: true } } } } } });
-  io.to(`conversation:${existing.conversationId}`).to("admins").emit("message:updated", { conversationId: existing.conversationId, message });
+  await emitConversationEvent(existing.conversationId, inbound.channel, "message:updated", { conversationId: existing.conversationId, message });
   return true;
 }

@@ -1,10 +1,11 @@
-import { ConversationStatus, Department, MessageDirection, Presence, Role } from "@prisma/client";
+import { Channel, ConversationStatus, Department, MessageDirection, Presence, Role } from "@prisma/client";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 import { config } from "./config";
 import { prisma } from "./prisma";
-import { io } from "./realtime";
+import { emitConversationEvent, io } from "./realtime";
 import { channelEligibilityWhere, chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
+import { messengerAssignmentWhere } from "./messengerAccess";
 import { withRedisLock } from "./redisLock";
 
 const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -54,15 +55,17 @@ export async function assignConversation(conversationId: string, department?: De
 
     const targetDepartment = department ?? currentConversation.routingDepartment;
     const previousAgentId = currentConversation.assignedAgentId;
-    const hqAndRemote = targetDepartment === Department.HEADQUARTERS || targetDepartment === Department.WORK_FROM_HOME;
-    const isBranchQueue = targetDepartment === Department.BRANCH || (!targetDepartment && Boolean(currentConversation.branchId));
+    const isMessenger = currentConversation.channel === Channel.MESSENGER;
+    const hqAndRemote = !isMessenger && (targetDepartment === Department.HEADQUARTERS || targetDepartment === Department.WORK_FROM_HOME);
+    const isBranchQueue = !isMessenger && (targetDepartment === Department.BRANCH || (!targetDepartment && Boolean(currentConversation.branchId)));
     const agents = await prisma.user.findMany({
       where: {
-        role: isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
+        role: isMessenger ? Role.AGENT : isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
         isActive: true,
         presence: Presence.ONLINE,
-        ...channelEligibilityWhere(currentConversation.channel),
-        ...(isBranchQueue
+        ...(isMessenger ? await messengerAssignmentWhere() : {
+          ...channelEligibilityWhere(currentConversation.channel),
+          ...(isBranchQueue
           ? { branchId: currentConversation.branchId || "__unassigned_branch__" }
           : targetDepartment === Department.CUSTOMER_CARE
             ? { department: Department.CUSTOMER_CARE }
@@ -71,6 +74,7 @@ export async function assignConversation(conversationId: string, department?: De
             : targetDepartment
               ? { department: { in: [targetDepartment, Department.HEADQUARTERS, Department.WORK_FROM_HOME] } }
               : { department: { not: Department.ADMINISTRATION } })
+        })
       },
       select: { id: true },
       orderBy: { id: "asc" }
@@ -89,11 +93,11 @@ export async function assignConversation(conversationId: string, department?: De
         await recordConversationAssignment(conversationId, previousAgentId);
         io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", waiting);
       }
-      if (waiting.status === ConversationStatus.QUEUED && !waiting.assignedAgentId) io?.to("admins").emit("conversation:queued", waiting);
+      if (waiting.status === ConversationStatus.QUEUED && !waiting.assignedAgentId) await emitConversationEvent(waiting.id, waiting.channel, "conversation:queued", waiting);
       return waiting;
     }
 
-    const turnKey = isBranchQueue ? `branch:${currentConversation.branchId || "unassigned"}` : hqAndRemote ? "hq-wfh" : targetDepartment || "all";
+    const turnKey = isMessenger ? "messenger" : isBranchQueue ? `branch:${currentConversation.branchId || "unassigned"}` : hqAndRemote ? "hq-wfh" : targetDepartment || "all";
     const turn = await connection.incr(`assignment:round-robin:${turnKey}`) - 1;
     const agent = chooseRoundRobinAgent(assignableAgents, turn);
     if (!agent) return currentConversation;
@@ -123,7 +127,7 @@ export async function assignConversation(conversationId: string, department?: De
     await prisma.auditLog.create({ data: { conversationId, action: previousAgentId ? "CONVERSATION_AUTO_REASSIGNED" : "CONVERSATION_AUTO_ASSIGNED", details: { from: previousAgentId, agentId: agent.id } } });
     if (previousAgentId && previousAgentId !== agent.id) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", conversation);
     io?.to(`agent:${agent.id}`).emit("conversation:assigned", { ...conversation, isAutoReassignment: Boolean(options.expectedUnanswered) });
-    io?.to("admins").emit("conversation:updated", conversation);
+    await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", conversation);
     return conversation;
   });
 }
@@ -152,7 +156,7 @@ export async function releaseAgentConversations(agentId: string) {
   const assigned = await prisma.$transaction(async (tx) => {
     const current = await tx.conversation.findMany({
       where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
-      select: { id: true }
+      select: { id: true, channel: true }
     });
     if (!current.length) return current;
     await tx.conversationAssignment.createMany({
@@ -166,7 +170,7 @@ export async function releaseAgentConversations(agentId: string) {
     return current;
   });
   if (!assigned.length) return 0;
-  for (const { id } of assigned) io?.to("admins").emit("conversation:updated", { id, assignedAgentId: null, status: ConversationStatus.QUEUED });
+  for (const conversation of assigned) await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
   await dispatchQueued();
   return assigned.length;
 }
