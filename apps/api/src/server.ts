@@ -209,11 +209,12 @@ async function startWhatsAppConversation(actor: NonNullable<AuthedRequest["user"
 function messengerWindowOpen(channel: Channel, inboundAt: Date | null) {
   return !isMessenger(channel) || Boolean(inboundAt && Date.now() - inboundAt.getTime() < MESSENGER_WINDOW_MS);
 }
-async function queueWhatsAppMessage(messageId: string, conversationId: string, authorId: string | null, input: Parameters<typeof sendToChannel>[0]) {
+async function queueWhatsAppMessage(messageId: string, conversationId: string, authorId: string | null, input: Parameters<typeof sendToChannel>[0], options: { clientMessageId?: string } = {}) {
   const emitMessage = (message: unknown) => {
     const targets = io.to(`conversation:${conversationId}`).to("admins");
-    if (authorId) targets.to(`agent:${authorId}`).emit("message:new", { conversationId, message });
-    else targets.emit("message:new", { conversationId, message });
+    const payload = { conversationId, message, ...(options.clientMessageId ? { clientMessageId: options.clientMessageId } : {}) };
+    if (authorId) targets.to(`agent:${authorId}`).emit("message:new", payload);
+    else targets.emit("message:new", payload);
   };
   const queued = await prisma.message.findUnique({ where: { id: messageId }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
   if (queued) emitMessage(queued);
@@ -773,7 +774,7 @@ app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest
   await prisma.$transaction(async (tx) => {
     await tx.auditLog.create({ data: { actorId: req.user!.id, conversationId: conversation.id, action: "CONVERSATION_PERMANENTLY_DELETED", details: { deletedConversationId: conversation.id, customerId: conversation.customerId, channel: conversation.channel } } });
     await tx.conversation.delete({ where: { id: conversation.id } });
-    for (const assetId of assetIds) await tx.mediaAsset.deleteMany({ where: { id: assetId, messages: { none: {} }, products: { none: {} } } });
+    for (const assetId of assetIds) await tx.mediaAsset.deleteMany({ where: { id: assetId, messages: { none: {} }, products: { none: {} }, quickReplies: { none: {} } } });
   });
   const event = { conversationId: conversation.id, customerId: conversation.customerId };
   await emitConversationEvent(conversation.id, conversation.channel, "conversation:deleted", event, {
@@ -956,7 +957,7 @@ app.delete("/api/customers/:id", systemAdminGuard, async (req: AuthedRequest, re
   await prisma.$transaction(async (tx) => {
     await tx.auditLog.create({ data: { actorId: req.user!.id, action: "CUSTOMER_PERMANENTLY_DELETED", details: { customerId: customer.id, conversationCount: customer.conversations.length } } });
     await tx.customer.delete({ where: { id: customer.id } });
-    for (const assetId of assetIds) await tx.mediaAsset.deleteMany({ where: { id: assetId, messages: { none: {} }, products: { none: {} } } });
+    for (const assetId of assetIds) await tx.mediaAsset.deleteMany({ where: { id: assetId, messages: { none: {} }, products: { none: {} }, quickReplies: { none: {} } } });
   });
   for (const conversation of customer.conversations) {
     const event = { conversationId: conversation.id, customerId: customer.id };
@@ -1150,9 +1151,21 @@ app.patch("/api/admin/directory/entries/:id", permissionGuard("canManageCatalog"
   res.json(entry);
 });
 
+async function applyCustomerTagsFromQuickReply(customerId: string, actorId: string, tagIds: string[]) {
+  await prisma.customerTagAssignment.createMany({ data: tagIds.map((tagId) => ({ customerId, tagId })), skipDuplicates: true });
+  const tags = await prisma.customerTagAssignment.findMany({ where: { customerId }, include: { tag: true } });
+  await audit(actorId, "CUSTOMER_TAGS_UPDATED", undefined, { customerId, tagIds, source: "quick_reply" });
+  const conversations = await prisma.conversation.findMany({ where: { customerId }, select: { id: true, channel: true } });
+  const payload = { customerId, tags };
+  for (const conversation of conversations) await emitConversationEvent(conversation.id, conversation.channel, "customer:tags-updated", payload);
+}
+
 app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: httpsUrl.optional(), mediaAssetId: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional(), quotedMessageId: z.string().min(1).optional() }).strict().safeParse(req.body);
+  const parsed = z.object({ text: z.string().optional(), kind: z.nativeEnum(MessageKind).default(MessageKind.TEXT), mediaUrl: httpsUrl.optional(), mediaAssetId: z.string().optional(), applyTagIds: z.array(z.string().min(1)).max(30).optional(), latitude: z.number().optional(), longitude: z.number().optional(), quotedMessageId: z.string().min(1).optional(), clientMessageId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/).optional() }).strict().safeParse(req.body);
   if (!parsed.success || (!parsed.data.text && parsed.data.kind === MessageKind.TEXT)) return res.status(400).json({ error: "الرسالة غير صالحة" });
+  const applyTagIds = parsed.data.applyTagIds || [];
+  if (new Set(applyTagIds).size !== applyTagIds.length) return res.status(400).json({ error: "قائمة الوسوم غير صالحة" });
+  if (applyTagIds.length && await prisma.customerTag.count({ where: { id: { in: applyTagIds } } }) !== applyTagIds.length) return res.status(400).json({ error: "أحد الوسوم المحددة غير موجود" });
   if (parsed.data.kind === MessageKind.POLL) return res.status(400).json({ error: "استخدم نموذج الاستطلاع لإرسال السؤال وخياراته" });
    const mediaKind = parsed.data.kind === MessageKind.IMAGE || parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.VIDEO || parsed.data.kind === MessageKind.FILE || parsed.data.kind === MessageKind.STICKER;
   if (mediaKind && !parsed.data.mediaUrl && !parsed.data.mediaAssetId || parsed.data.kind === MessageKind.LOCATION && (parsed.data.latitude === undefined || parsed.data.longitude === undefined)) return res.status(400).json({ error: "يلزم إرفاق ملف أو رابط وسيط أو إحداثيات الموقع" });
@@ -1164,7 +1177,7 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
    if (conversation.customer.isBlocked) return res.status(409).json({ error: "هذا العميل محظور داخل النظام؛ ألغِ الحظر قبل إرسال رسالة" });
   if (parsed.data.kind === MessageKind.STICKER && (conversation.channel === Channel.MESSENGER || conversation.channel === Channel.WHATSAPP && await getWhatsAppMode() !== "BAILEYS")) return res.status(409).json({ error: "إرسال الملصقات غير مدعوم في وضع القناة الحالي" });
   if (parsed.data.quotedMessageId && !await prisma.message.findFirst({ where: { id: parsed.data.quotedMessageId, conversationId: conversation.id }, select: { id: true } })) return res.status(400).json({ error: "الرسالة المقتبسة لا تنتمي إلى هذه المحادثة" });
-  const { quotedMessageId, ...replyInput } = parsed.data;
+   const { quotedMessageId, clientMessageId, ...replyInput } = parsed.data;
   const receivedAt = await lastInboundAt(conversation.id, conversation.lastInboundAt);
   if (!messengerWindowOpen(conversation.channel, receivedAt)) return res.status(409).json({ code: "META_WINDOW_EXPIRED", error: "انتهت نافذة الرد في Messenger. انتظر رسالة جديدة من العميل." });
   try {
@@ -1181,8 +1194,13 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
       }, include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true } } } });
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: message.createdAt, status: ConversationStatus.OPEN } });
       await audit(req.user!.id, "MESSAGE_QUEUED", conversation.id, { kind: parsed.data.kind });
-       const queuedMessage = await queueWhatsAppMessage(message.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, ...replyInput, mediaUrl, mediaAssetId: asset?.id, mediaContentType: asset?.contentType });
-      return res.status(202).json(queuedMessage || message);
+      const queuedMessage = await queueWhatsAppMessage(message.id, conversation.id, req.user!.id, { channel: conversation.channel, recipient: conversation.externalCustomerId, ...replyInput, mediaUrl, mediaAssetId: asset?.id, mediaContentType: asset?.contentType }, { clientMessageId });
+        let quickReplyTagsApplied = true;
+        if (applyTagIds.length && queuedMessage?.deliveryStatus !== "FAILED") {
+          try { await applyCustomerTagsFromQuickReply(conversation.customerId, req.user!.id, applyTagIds); }
+          catch (error) { quickReplyTagsApplied = false; console.error("Could not apply quick-reply customer lists", error); }
+        }
+        return res.status(202).json({ ...(queuedMessage || message), ...(applyTagIds.length ? { quickReplyTagsApplied } : {}) });
     }
       const result: any = await sendToChannel({ channel: conversation.channel, recipient: channelRecipient(conversation.channel, conversation.externalConversationId, conversation.externalCustomerId), ...replyInput, mediaUrl, mediaContentType: asset?.contentType, mediaBuffer: conversation.channel === Channel.TELEGRAM && parsed.data.kind === MessageKind.AUDIO && asset ? asset.data : undefined });
     const providerId = kalemlyExternalMessageId(result);
@@ -1195,8 +1213,13 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
       lastMessageAt: message.createdAt, lastAgentResponseAt: message.createdAt, firstResponseAt: conversation.firstResponseAt || message.createdAt, slaBreachedAt: null, status: ConversationStatus.OPEN
     } });
     await audit(req.user!.id, "MESSAGE_SENT", conversation.id, { kind: parsed.data.kind });
-    await emitConversationEvent(conversation.id, conversation.channel, "message:new", { conversationId: conversation.id, message }, { extraRooms: [`agent:${req.user!.id}`] });
-    res.status(201).json(message);
+    await emitConversationEvent(conversation.id, conversation.channel, "message:new", { conversationId: conversation.id, message, ...(clientMessageId ? { clientMessageId } : {}) }, { extraRooms: [`agent:${req.user!.id}`] });
+    let quickReplyTagsApplied = true;
+    if (applyTagIds.length) {
+      try { await applyCustomerTagsFromQuickReply(conversation.customerId, req.user!.id, applyTagIds); }
+      catch (error) { quickReplyTagsApplied = false; console.error("Could not apply quick-reply customer lists", error); }
+    }
+    res.status(201).json({ ...message, ...(applyTagIds.length ? { quickReplyTagsApplied } : {}) });
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "تعذر إرسال الرسالة للقناة" });
   }
@@ -1294,7 +1317,7 @@ app.delete("/api/conversations/:id/messages/:messageId", agentGuard, async (req:
     await prisma.$transaction(async (tx) => {
       await tx.auditLog.create({ data: { actorId: req.user!.id, conversationId: message.conversationId, action: "MESSAGE_DELETED", details: { messageId: message.id, providerDeleted: true } } });
       await tx.message.delete({ where: { id: message.id } });
-      if (message.mediaAssetId) await tx.mediaAsset.deleteMany({ where: { id: message.mediaAssetId, messages: { none: {} }, products: { none: {} } } });
+      if (message.mediaAssetId) await tx.mediaAsset.deleteMany({ where: { id: message.mediaAssetId, messages: { none: {} }, products: { none: {} }, quickReplies: { none: {} } } });
     });
      await emitConversationEvent(message.conversationId, message.conversation.channel, "message:deleted", { conversationId: message.conversationId, messageId: message.id });
     res.json({ messageId: message.id, deleted: true, providerDeleted: true });
@@ -1907,14 +1930,44 @@ app.delete("/api/admin/canned-responses/:id", permissionGuard("canManageCatalog"
   res.sendStatus(204);
 });
 
+app.post("/api/agent/quick-replies/media", agentGuard, express.raw({ type: () => true, limit: uploadLimitBytes }), async (req: AuthedRequest, res: express.Response) => {
+  try { publicMediaUrl("configuration-check", 3600); }
+  catch { return res.status(503).json({ error: "لم يتم إعداد رابط آمن لاستقبال الوسائط" }); }
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "اختر ملفًا صالحًا" });
+  const contentType = String(req.header("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (!allowedMediaTypes.has(contentType)) return res.status(415).json({ error: "نوع الملف غير مدعوم" });
+  if (!imageSignatureMatches(contentType, req.body)) return res.status(415).json({ error: "محتوى الصورة لا يطابق نوع الملف" });
+  let fileName: string;
+  try { fileName = safeFileName(decodeURIComponent(req.header("x-file-name") || "quick-reply-attachment")); }
+  catch { return res.status(400).json({ error: "اسم الملف غير صالح" }); }
+  const asset = await prisma.mediaAsset.create({ data: { fileName, contentType, size: req.body.length, data: Uint8Array.from(req.body), createdById: req.user!.id }, select: { id: true, fileName: true, contentType: true, size: true } });
+  res.status(201).json(asset);
+});
+
+async function deleteUnusedQuickReplyMedia(mediaAssetId: string, userId: string) {
+  await prisma.mediaAsset.deleteMany({ where: { id: mediaAssetId, createdById: userId, messages: { none: {} }, products: { none: {} }, quickReplies: { none: {} } } });
+}
+
+app.delete("/api/agent/quick-replies/media/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const removed = await prisma.mediaAsset.deleteMany({ where: { id: req.params.id, createdById: req.user!.id, messages: { none: {} }, products: { none: {} }, quickReplies: { none: {} } } });
+  if (!removed.count) return res.status(404).json({ error: "الملف غير موجود أو مستخدم بالفعل" });
+  res.sendStatus(204);
+});
+
+const quickReplyInclude = { mediaAsset: { select: { id: true, fileName: true, contentType: true, size: true } }, tags: { include: { tag: true } } } satisfies Prisma.AgentQuickReplyInclude;
+
 app.get("/api/agent/quick-replies", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  res.json(await prisma.agentQuickReply.findMany({ where: { userId: req.user!.id }, orderBy: { title: "asc" } }));
+  res.json(await prisma.agentQuickReply.findMany({ where: { userId: req.user!.id }, include: quickReplyInclude, orderBy: { title: "asc" } }));
 });
 app.post("/api/agent/quick-replies", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ shortcut: z.string().trim().min(2).max(40).regex(/^\/[\p{L}\p{N}_-]+$/u), title: z.string().trim().min(2).max(80), content: z.string().trim().min(1).max(2000) }).strict().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "راجع الاختصار والعنوان ونص الرد السريع" });
+  const parsed = z.object({ shortcut: z.string().trim().min(2).max(40).regex(/^\/[\p{L}\p{N}_-]+$/u), title: z.string().trim().min(2).max(80).optional(), content: z.string().trim().max(2000).default(""), mediaAssetId: z.string().min(1).nullable().optional(), tagIds: z.array(z.string().min(1)).max(30).default([]) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "راجع الاختصار ونص الرد السريع" });
+  const { tagIds, mediaAssetId, ...replyData } = parsed.data;
+  if (!replyData.content && !mediaAssetId) return res.status(400).json({ error: "اكتب نص الرسالة أو أرفق ملفًا" });
+  if (new Set(tagIds).size !== tagIds.length || tagIds.length && await prisma.customerTag.count({ where: { id: { in: tagIds } } }) !== tagIds.length) return res.status(400).json({ error: "قوائم العميل المحددة غير صالحة" });
+  if (mediaAssetId && !await prisma.mediaAsset.findFirst({ where: { id: mediaAssetId, createdById: req.user!.id }, select: { id: true } })) return res.status(400).json({ error: "المرفق غير صالح" });
   try {
-    const reply = await prisma.agentQuickReply.create({ data: { ...parsed.data, userId: req.user!.id } });
+    const reply = await prisma.agentQuickReply.create({ data: { ...replyData, title: replyData.title || parsed.data.shortcut.slice(1) || parsed.data.content.slice(0, 80), mediaAssetId: mediaAssetId || null, userId: req.user!.id, tags: { create: tagIds.map((tagId) => ({ tagId })) } }, include: quickReplyInclude });
     await audit(req.user!.id, "AGENT_QUICK_REPLY_CREATED", undefined, { replyId: reply.id });
     io.to(`user:${req.user!.id}`).emit("agent:quick-replies-updated");
     res.status(201).json(reply);
@@ -1924,22 +1977,37 @@ app.post("/api/agent/quick-replies", agentGuard, async (req: AuthedRequest, res:
   }
 });
 app.patch("/api/agent/quick-replies/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const parsed = z.object({ shortcut: z.string().trim().min(2).max(40).regex(/^\/[\p{L}\p{N}_-]+$/u).optional(), title: z.string().trim().min(2).max(80).optional(), content: z.string().trim().min(1).max(2000).optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
+  const parsed = z.object({ shortcut: z.string().trim().min(2).max(40).regex(/^\/[\p{L}\p{N}_-]+$/u).optional(), title: z.string().trim().min(2).max(80).optional(), content: z.string().trim().max(2000).optional(), mediaAssetId: z.string().min(1).nullable().optional(), tagIds: z.array(z.string().min(1)).max(30).optional() }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات الرد السريع غير صالحة" });
+  const { tagIds, mediaAssetId, ...replyData } = parsed.data;
+  if (tagIds && (new Set(tagIds).size !== tagIds.length || await prisma.customerTag.count({ where: { id: { in: tagIds } } }) !== tagIds.length)) return res.status(400).json({ error: "قوائم العميل المحددة غير صالحة" });
+  if (mediaAssetId && !await prisma.mediaAsset.findFirst({ where: { id: mediaAssetId, createdById: req.user!.id }, select: { id: true } })) return res.status(400).json({ error: "المرفق غير صالح" });
+  const previous = await prisma.agentQuickReply.findFirst({ where: { id: req.params.id, userId: req.user!.id }, select: { id: true, mediaAssetId: true } });
+  if (!previous) return res.status(404).json({ error: "الرد الشخصي غير موجود" });
+  const effectiveMediaAssetId = mediaAssetId !== undefined ? mediaAssetId : previous.mediaAssetId;
+  if (parsed.data.content !== undefined && !parsed.data.content && !effectiveMediaAssetId) return res.status(400).json({ error: "اكتب نص الرسالة أو أرفق ملفًا" });
   try {
-    const reply = await prisma.agentQuickReply.update({ where: { id: req.params.id, userId: req.user!.id }, data: parsed.data });
+    const reply = await prisma.$transaction(async (tx) => {
+      if (tagIds) {
+        await tx.agentQuickReplyTag.deleteMany({ where: { quickReplyId: previous.id } });
+        if (tagIds.length) await tx.agentQuickReplyTag.createMany({ data: tagIds.map((tagId) => ({ quickReplyId: previous.id, tagId })) });
+      }
+      return tx.agentQuickReply.update({ where: { id: previous.id, userId: req.user!.id }, data: { ...replyData, ...(mediaAssetId !== undefined ? { mediaAssetId } : {}) }, include: quickReplyInclude });
+    });
+    if (previous.mediaAssetId && mediaAssetId !== undefined && previous.mediaAssetId !== mediaAssetId) await deleteUnusedQuickReplyMedia(previous.mediaAssetId, req.user!.id);
     await audit(req.user!.id, "AGENT_QUICK_REPLY_UPDATED", undefined, { replyId: reply.id });
     io.to(`user:${req.user!.id}`).emit("agent:quick-replies-updated");
     res.json(reply);
   } catch (error) {
     if (isUniqueConstraintError(error)) return res.status(409).json({ error: "الاختصار مستخدم في ردودك الشخصية بالفعل" });
-    if ((error as { code?: string }).code === "P2025") return res.status(404).json({ error: "الرد الشخصي غير موجود" });
     throw error;
   }
 });
 app.delete("/api/agent/quick-replies/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const result = await prisma.agentQuickReply.deleteMany({ where: { id: req.params.id, userId: req.user!.id } });
-  if (!result.count) return res.status(404).json({ error: "الرد الشخصي غير موجود" });
+  const reply = await prisma.agentQuickReply.findFirst({ where: { id: req.params.id, userId: req.user!.id }, select: { id: true, mediaAssetId: true } });
+  if (!reply) return res.status(404).json({ error: "الرد الشخصي غير موجود" });
+  await prisma.agentQuickReply.delete({ where: { id: reply.id } });
+  if (reply.mediaAssetId) await deleteUnusedQuickReplyMedia(reply.mediaAssetId, req.user!.id);
   await audit(req.user!.id, "AGENT_QUICK_REPLY_DELETED", undefined, { replyId: req.params.id });
   io.to(`user:${req.user!.id}`).emit("agent:quick-replies-updated");
   res.sendStatus(204);
