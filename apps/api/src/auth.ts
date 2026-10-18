@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import { Channel, Department, MessengerAccessMode, Role } from "@prisma/client";
 import { config } from "./config";
 import { prisma } from "./prisma";
-import { canReplyMessenger, canViewMessenger, getDepartmentMessengerMode } from "./messengerAccess";
+import { canReplyChannel, canViewChannel, getDepartmentChannelModes, getDepartmentMessengerMode } from "./messengerAccess";
 
 export type PermissionName = "canViewAllConversations" | "canTransferConversations" | "canManageCatalog" | "canViewReports" | "canManageTeam";
 export type SessionUser = {
@@ -18,9 +18,15 @@ export type SessionUser = {
   canManageCatalog: boolean | null;
   canViewReports: boolean | null;
   canManageTeam: boolean | null;
+  whatsappAccess: MessengerAccessMode | null;
   messengerAccess: MessengerAccessMode | null;
+  telegramAccess: MessengerAccessMode | null;
+  canReceiveWhatsApp: boolean;
   canReceiveMessenger: boolean;
+  canReceiveTelegram: boolean;
+  departmentWhatsAppAccess: MessengerAccessMode;
   departmentMessengerAccess: MessengerAccessMode;
+  departmentTelegramAccess: MessengerAccessMode;
 };
 export type AuthedRequest = Request & { user?: SessionUser };
 
@@ -32,9 +38,20 @@ export async function loadSessionUser(id: string) {
   const user = await prisma.user.findFirst({ where: { id, isActive: true }, select: {
     id: true, role: true, name: true, authVersion: true, department: true, branchId: true,
      canViewAllConversations: true, canTransferConversations: true, canManageCatalog: true, canViewReports: true, canManageTeam: true,
-     messengerAccess: true, canReceiveMessenger: true
-  } });
-  return user ? { ...user, departmentMessengerAccess: await getDepartmentMessengerMode(user.department) } : null;
+      whatsappAccess: true, messengerAccess: true, telegramAccess: true,
+      canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true
+   } });
+  if (!user) return null;
+  const [departmentMessengerAccess, channelModes] = await Promise.all([
+    getDepartmentMessengerMode(user.department),
+    Promise.all([getDepartmentChannelModes(Channel.WHATSAPP), getDepartmentChannelModes(Channel.TELEGRAM)])
+  ]);
+  return {
+    ...user,
+    departmentWhatsAppAccess: user.department ? channelModes[0][user.department] : MessengerAccessMode.DISABLED,
+    departmentMessengerAccess,
+    departmentTelegramAccess: user.department ? channelModes[1][user.department] : MessengerAccessMode.DISABLED
+  };
 }
 
 export async function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
@@ -75,7 +92,7 @@ export function permissionGuard(permission: PermissionName): RequestHandler[] {
 }
 
 export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
-  if (conversation.channel === Channel.MESSENGER && !canViewMessenger(user)) return false;
+  if (conversation.channel && !canViewChannel(user, conversation.channel)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;
@@ -83,14 +100,14 @@ export function canReadConversation(user: SessionUser, conversation: { assignedA
 }
 
 export function canReadTeamConversations(user: SessionUser, conversation?: { branchId?: string | null; channel?: Channel }) {
-  if (conversation?.channel === Channel.MESSENGER && !canViewMessenger(user)) return false;
+  if (conversation?.channel && !canViewChannel(user, conversation.channel)) return false;
   if (user.role === Role.AGENT) return true;
   return user.role === Role.BRANCH_USER && Boolean(user.branchId)
     && (!conversation || conversation.branchId === user.branchId);
 }
 
 export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
-  if (conversation.channel === Channel.MESSENGER && !canReplyMessenger(user)) return false;
+  if (conversation.channel && !canReplyChannel(user, conversation.channel)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
   if (user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations")) return true;

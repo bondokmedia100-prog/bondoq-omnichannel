@@ -4,8 +4,8 @@ import IORedis from "ioredis";
 import { config } from "./config";
 import { prisma } from "./prisma";
 import { emitConversationEvent, io } from "./realtime";
-import { channelEligibilityWhere, chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
-import { messengerAssignmentWhere } from "./messengerAccess";
+import { chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
+import { channelAssignmentWhere } from "./messengerAccess";
 import { withRedisLock } from "./redisLock";
 
 const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -63,8 +63,8 @@ export async function assignConversation(conversationId: string, department?: De
         role: isMessenger ? Role.AGENT : isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
         isActive: true,
         presence: Presence.ONLINE,
-        ...(isMessenger ? await messengerAssignmentWhere() : {
-          ...channelEligibilityWhere(currentConversation.channel),
+        ...await channelAssignmentWhere(currentConversation.channel),
+        ...(!isMessenger ? {
           ...(isBranchQueue
           ? { branchId: currentConversation.branchId || "__unassigned_branch__" }
           : targetDepartment === Department.CUSTOMER_CARE
@@ -74,7 +74,7 @@ export async function assignConversation(conversationId: string, department?: De
             : targetDepartment
               ? { department: { in: [targetDepartment, Department.HEADQUARTERS, Department.WORK_FROM_HOME] } }
               : { department: { not: Department.ADMINISTRATION } })
-        })
+        } : {})
       },
       select: { id: true },
       orderBy: { id: "asc" }

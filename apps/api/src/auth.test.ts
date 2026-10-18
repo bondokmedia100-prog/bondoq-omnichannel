@@ -8,7 +8,9 @@ function user(overrides: Partial<SessionUser> = {}): SessionUser {
   return {
     id: "user-1", role: Role.AGENT, name: "Test", authVersion: 0, department: Department.HEADQUARTERS, branchId: null,
     canViewAllConversations: null, canTransferConversations: null, canManageCatalog: null, canViewReports: null, canManageTeam: null,
-    messengerAccess: null, canReceiveMessenger: true, departmentMessengerAccess: MessengerAccessMode.DISABLED,
+     whatsappAccess: null, messengerAccess: null, telegramAccess: null,
+     canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true,
+     departmentWhatsAppAccess: MessengerAccessMode.DISABLED, departmentMessengerAccess: MessengerAccessMode.DISABLED, departmentTelegramAccess: MessengerAccessMode.DISABLED,
     ...overrides
   };
 }
@@ -82,6 +84,33 @@ test("legacy Messenger routing opt-out makes inherited full access read-only", (
   assert.equal(canReadConversation(legacyOptOut, messenger), true);
   assert.equal(canWorkOnConversation(legacyOptOut, messenger), false);
   assert.equal(canWorkOnConversation(explicitOverride, messenger), true);
+});
+
+test("WhatsApp and Telegram department modes enforce view-only and disabled access", () => {
+  const whatsapp = { assignedAgentId: "care", channel: Channel.WHATSAPP };
+  const telegram = { assignedAgentId: "staff", channel: Channel.TELEGRAM };
+  const customerCare = user({ id: "care", departmentWhatsAppAccess: MessengerAccessMode.READ_ONLY });
+  const disabled = user({ id: "staff", departmentTelegramAccess: MessengerAccessMode.DISABLED });
+
+  assert.equal(canReadConversation(customerCare, whatsapp), true);
+  assert.equal(canWorkOnConversation(customerCare, whatsapp), false);
+  assert.equal(canReadTeamConversations(customerCare, whatsapp), true);
+  assert.equal(canReadConversation(disabled, telegram), false);
+  assert.equal(canReadTeamConversations(disabled, telegram), false);
+  assert.equal(canWorkOnConversation(disabled, telegram), false);
+});
+
+test("WhatsApp and Telegram employee overrides take precedence over departments and legacy receive flags", () => {
+  const whatsapp = { assignedAgentId: "staff", channel: Channel.WHATSAPP };
+  const telegram = { assignedAgentId: "staff", channel: Channel.TELEGRAM };
+  const legacyOptOut = user({ id: "staff", canReceiveWhatsApp: false, departmentWhatsAppAccess: MessengerAccessMode.FULL });
+  const explicitFull = user({ ...legacyOptOut, whatsappAccess: MessengerAccessMode.FULL });
+  const explicitDisabled = user({ id: "staff", departmentTelegramAccess: MessengerAccessMode.FULL, telegramAccess: MessengerAccessMode.DISABLED });
+
+  assert.equal(canReadConversation(legacyOptOut, whatsapp), true);
+  assert.equal(canWorkOnConversation(legacyOptOut, whatsapp), false);
+  assert.equal(canWorkOnConversation(explicitFull, whatsapp), true);
+  assert.equal(canReadConversation(explicitDisabled, telegram), false);
 });
 
 test("private conversation notes are visible only to participants and managers with access", () => {

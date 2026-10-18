@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Department, MessengerAccessMode, Role } from "@prisma/client";
-import { canReplyMessenger, canViewMessenger, effectiveMessengerAccess } from "./messengerAccess";
+import { Channel, Department, MessengerAccessMode, Role } from "@prisma/client";
+import { canReplyMessenger, canViewMessenger, effectiveChannelAccess, effectiveMessengerAccess } from "./messengerAccess";
 
 const principal = (overrides: Partial<Parameters<typeof effectiveMessengerAccess>[0]> = {}) => ({
   role: Role.AGENT,
@@ -38,4 +38,27 @@ test("a legacy routing opt-out prevents replies without overriding an explicit a
   assert.equal(effectiveMessengerAccess(inherited), MessengerAccessMode.READ_ONLY);
   assert.equal(canReplyMessenger(inherited), false);
   assert.equal(canReplyMessenger(explicit), true);
+});
+
+test("WhatsApp and Telegram inherit the same department access modes as Messenger", () => {
+  for (const channel of [Channel.WHATSAPP, Channel.TELEGRAM]) {
+    assert.equal(effectiveChannelAccess(principal({ department: Department.WORK_FROM_HOME }), channel), MessengerAccessMode.FULL);
+    assert.equal(effectiveChannelAccess(principal({ department: Department.CUSTOMER_CARE }), channel), MessengerAccessMode.READ_ONLY);
+    assert.equal(effectiveChannelAccess(principal({ department: Department.DELIVERY }), channel), MessengerAccessMode.DISABLED);
+  }
+});
+
+test("WhatsApp and Telegram overrides take precedence over inherited access", () => {
+  const principalWithModes = (overrides: Partial<Parameters<typeof effectiveChannelAccess>[0]>) => ({
+    ...principal({ department: Department.WORK_FROM_HOME }),
+    canReceiveWhatsApp: false,
+    canReceiveTelegram: false,
+    departmentWhatsAppAccess: MessengerAccessMode.FULL,
+    departmentTelegramAccess: MessengerAccessMode.FULL,
+    ...overrides
+  });
+
+  assert.equal(effectiveChannelAccess(principalWithModes({}), Channel.WHATSAPP), MessengerAccessMode.READ_ONLY);
+  assert.equal(effectiveChannelAccess(principalWithModes({ whatsappAccess: MessengerAccessMode.FULL }), Channel.WHATSAPP), MessengerAccessMode.FULL);
+  assert.equal(effectiveChannelAccess(principalWithModes({ telegramAccess: MessengerAccessMode.DISABLED }), Channel.TELEGRAM), MessengerAccessMode.DISABLED);
 });

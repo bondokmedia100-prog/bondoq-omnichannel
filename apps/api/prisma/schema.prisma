@@ -129,7 +129,9 @@ model User {
   canReceiveWhatsApp       Boolean                @default(true)
   canReceiveMessenger       Boolean                @default(true)
   canReceiveTelegram        Boolean                @default(true)
+  whatsappAccess            MessengerAccessMode?
   messengerAccess          MessengerAccessMode?
+  telegramAccess            MessengerAccessMode?
   presence                 Presence               @default(OFFLINE)
   isActive                 Boolean                @default(true)
   lastSeenAt               DateTime?
@@ -422,6 +424,15 @@ model DepartmentMessengerPermission {
   department Department           @id
   mode       MessengerAccessMode
   updatedAt  DateTime             @updatedAt
+}
+
+model DepartmentChannelPermission {
+  department Department
+  channel    Channel
+  mode       MessengerAccessMode
+  updatedAt  DateTime             @updatedAt
+
+  @@id([department, channel])
 }
 
 model WhatsAppCallSession {

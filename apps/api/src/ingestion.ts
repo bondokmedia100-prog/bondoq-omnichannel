@@ -13,7 +13,7 @@ import { detectImageContentType, safeFileName } from "./mediaStorage";
 import { isWithinBusinessHours } from "./businessHours";
 import { startOfCairoDay } from "./cairoTime";
 import { normalizePhoneNumber, phoneNumbersMatch } from "./egyptianPhoneFormatter";
-import { messengerViewerWhere } from "./messengerAccess";
+import { channelViewerWhere } from "./messengerAccess";
 
 export async function ingestMessage(inbound: NormalizedInbound) {
   let lockKey = inbound.externalConversationId;
@@ -337,7 +337,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   ] };
   const admins = await prisma.user.findMany({ where: {
     isActive: true,
-    ...(conversation.channel === "MESSENGER" ? { AND: [adminScope, { OR: [{ role: Role.ADMIN }, await messengerViewerWhere()] }] } : adminScope)
+    AND: [adminScope, { OR: [{ role: Role.ADMIN }, await channelViewerWhere(conversation.channel)] }]
   }, select: { id: true } });
   const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.STICKER ? "ملصق" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
   const tag = `inbound-${conversation.id}`;

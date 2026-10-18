@@ -249,7 +249,7 @@ export default function AgentWorkspace() {
     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
   async function startChatFromContact(contact: AnyRecord) {
-    if (user?.canReceiveWhatsApp === false) { setNotice("حسابك غير مخصص لاستقبال محادثات WhatsApp."); return; }
+    if (user?.whatsappAccess !== "FULL") { setNotice("صلاحية حسابك لا تسمح ببدء محادثات WhatsApp."); return; }
     try {
       const result = await api<{ conversationId: string }>(`/api/contacts/${contact.id}/whatsapp-conversation`, { method: "POST", body: JSON.stringify({}) });
       setShowContacts(false);
@@ -280,7 +280,7 @@ export default function AgentWorkspace() {
     } finally { if (request === phoneSearchRequestRef.current) setSearchingPhone(false); }
   }
   async function startChatFromPhone() {
-    if (!phoneSearchResult?.phone || startingPhoneChat || user?.canReceiveWhatsApp === false) return;
+    if (!phoneSearchResult?.phone || startingPhoneChat || user?.whatsappAccess !== "FULL") return;
     setStartingPhoneChat(true);
     try {
       const result = await api<{ conversationId: string; created: boolean; readOnly?: boolean }>("/api/contacts/whatsapp-conversation", {
@@ -651,7 +651,7 @@ export default function AgentWorkspace() {
           setIncomingNotice({ isHandoffSent: true, conversationId: event.id, customerName: customerDisplayName(event.customer), channel: event.channel, preview: event.assignedAgent?.name ? `يتابع ${event.assignedAgent.name} هذه المحادثة الآن.` : "أُعيدت المحادثة إلى الطابور." });
         }
       });
-      connection.on("messenger:permissions-updated", async () => {
+      connection.on("channel:permissions-updated", async () => {
         const conversationId = activeIdRef.current;
         try { setUser(await api("/api/auth/me")); } catch {}
         await loadChats();
@@ -1268,9 +1268,9 @@ export default function AgentWorkspace() {
   const availableChannels = user
     ? channels.filter((item) => {
       if (item.id === "ALL") return true;
-      if (item.id === "WHATSAPP") return user.canReceiveWhatsApp !== false;
+       if (item.id === "WHATSAPP") return user.whatsappAccess !== "DISABLED";
        if (item.id === "MESSENGER") return user.messengerAccess !== "DISABLED";
-      if (item.id === "TELEGRAM") return user.canReceiveTelegram !== false;
+       if (item.id === "TELEGRAM") return user.telegramAccess !== "DISABLED";
       return false;
     })
     : channels.filter((item) => item.id === "ALL");
@@ -1293,7 +1293,7 @@ export default function AgentWorkspace() {
               {phoneSearchResult && <div className="mt-2 rounded-xl border border-emerald-100 bg-white p-2.5">
                 <div className="mb-2 flex items-center justify-between gap-2"><span className="truncate text-[10px] font-extrabold">{phoneSearchResult.customer ? customerDisplayName(phoneSearchResult.customer) : `+${phoneSearchResult.phone}`}</span><span className="shrink-0 text-[9px] text-stone-400">{phoneSearchResult.conversations.length ? `${phoneSearchResult.conversations.length} محادثة` : "لا يوجد سجل سابق"}</span></div>
                 <div className="soft-scroll max-h-32 space-y-1 overflow-y-auto">{phoneSearchResult.conversations.map((conversation: AnyRecord) => <button key={conversation.id} type="button" onClick={() => { setPhoneSearchResult(null); void openChat(conversation.id); }} className="flex w-full items-center justify-between gap-2 rounded-lg bg-stone-50 px-2.5 py-2 text-right hover:bg-emerald-50"><span className="min-w-0"><span className="block truncate text-[10px] font-bold">{customerDisplayName(conversation.customer)}</span><span className="mt-0.5 block truncate text-[9px] text-stone-400">{conversation.messages?.[0]?.text || "مرفق أو رسالة"}{conversation.readOnly ? " · قراءة فقط" : ""}</span></span><span className="shrink-0 text-[9px] text-stone-400">{ago(conversation.lastMessageAt)}</span></button>)}</div>
-                <button type="button" onClick={() => void startChatFromPhone()} disabled={startingPhoneChat || user?.canReceiveWhatsApp === false || Boolean(phoneSearchResult.customer?.isBlocked)} className="mt-2 w-full rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-300">{startingPhoneChat ? "جارٍ فتح WhatsApp..." : phoneSearchResult.customer?.isBlocked ? "العميل محظور" : "فتح أو بدء محادثة WhatsApp"}</button>
+                 <button type="button" onClick={() => void startChatFromPhone()} disabled={startingPhoneChat || user?.whatsappAccess !== "FULL" || Boolean(phoneSearchResult.customer?.isBlocked)} className="mt-2 w-full rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-300">{startingPhoneChat ? "جارٍ فتح WhatsApp..." : phoneSearchResult.customer?.isBlocked ? "العميل محظور" : user?.whatsappAccess !== "FULL" ? "صلاحية بدء محادثة غير متاحة" : "فتح أو بدء محادثة WhatsApp"}</button>
               </div>}
               <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
               <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
