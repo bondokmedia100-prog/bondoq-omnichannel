@@ -28,7 +28,7 @@ import { cloudCallWebhookSecret, cloudCallWebhookVerifyToken, getCloudCallPermis
 import { createIceServers, createWebCallToken, hashWebCallToken, isWebCallToken } from "./webCallSecurity";
 import { weeklyAgentPerformance } from "./weeklyAgentPerformance";
 import { channelEligibilityWhere } from "./routingSelection";
-import { canReplyMessenger, canViewMessenger, effectiveMessengerAccess, messengerAssignmentWhere, messengerDepartmentPolicies, messengerDepartments } from "./messengerAccess";
+import { canReplyMessenger, canViewMessenger, effectiveMessengerAccess, messengerAssignmentWhere, messengerDepartmentPolicies, messengerDepartments, messengerViewerWhere } from "./messengerAccess";
 import { formatAgentHandoffGreeting } from "./autoReplies";
 import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
 
