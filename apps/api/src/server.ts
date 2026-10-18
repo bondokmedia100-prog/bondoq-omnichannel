@@ -65,7 +65,7 @@ function effectiveEmployeeChannelAccess(employee: Parameters<typeof effectiveCha
   return Object.fromEntries(receivingChannels.map((channel) => [channel, effectiveChannelAccess(employee, channel, policies.get(channel))])) as Record<ReceivingChannel, ChannelAccessLevel>;
 }
 async function channelAccessForEmployee(employee: Parameters<typeof effectiveChannelAccess>[0]) {
-  const policies = employee.department ? await prisma.departmentChannelAccess.findMany({ where: { department: employee.department } }) : [];
+  const policies = employee.department ? await prisma.departmentChannelAccess.findMany({ where: { department: employee.department as Department } }) : [];
   return effectiveEmployeeChannelAccess(employee, new Map(policies.map((policy) => [policy.channel, policy.access])));
 }
 function canSeeAllCustomerData(user: NonNullable<AuthedRequest["user"]>) {
@@ -687,7 +687,7 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
     { transcription: { contains: query, mode: "insensitive" } }
   ] };
   if (conversationId) {
-    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true } });
+    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
     if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
     if (!await canReadConversationOrHistory(actor, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
     const where = { conversationId, ...messageMatch };
@@ -850,7 +850,7 @@ app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest
 });
 
 app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   const limit = pageLimit(req.query.limit);
@@ -2886,7 +2886,8 @@ app.patch("/api/admin/agents/:id", permissionGuard("canManageTeam"), async (req:
       const defaultValue = previous.role === Role.ADMIN || previous.role === Role.SUPERVISOR;
       return (previous[key] ?? defaultValue) !== requested;
     });
-  const channelPolicyChanged = ([...Object.keys(channelPermissionFields), ...Object.keys(legacyChannelPermissionFields)] as Array<keyof typeof parsed.data>).some((key) => {
+  const channelPolicyKeys = ["whatsappAccess", "messengerAccess", "telegramAccess", "canReceiveWhatsApp", "canReceiveMessenger", "canReceiveTelegram"] as const;
+  const channelPolicyChanged = channelPolicyKeys.some((key) => {
     const requested = parsed.data[key];
     return requested !== undefined && previous[key] !== requested;
   });
