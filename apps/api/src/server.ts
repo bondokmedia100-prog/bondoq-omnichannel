@@ -8,7 +8,7 @@ import IORedis from "ioredis";
 import { z } from "zod";
 import { Channel, ConversationHandoffStatus, ConversationStatus, Department, MessageDirection, MessageKind, MessengerAccessMode, OrderStatus, PasswordResetStatus, Presence, Prisma, ProductCategory, Role } from "@prisma/client";
 import { config } from "./config";
-import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, loadSessionUser, permissionGuard, signToken } from "./auth";
+import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canRespondToHandoff, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, loadSessionUser, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
 import { broadcastPresence, emitConversationEvent, initRealtime, io, refreshChannelAccessForDepartments, revokeConversationRoomAccess } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations, scheduleUnansweredReassignment, withConversationAssignmentLock, withInboundConversationLock } from "./routing";
@@ -1563,13 +1563,11 @@ app.post("/api/conversations/:id/handoff", agentGuard, async (req: AuthedRequest
 });
 
 app.post("/api/conversations/:id/handoff-response", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  if (req.user!.role !== Role.AGENT || req.user!.department !== Department.CUSTOMER_CARE) return res.status(403).json({ error: "الرد على طلبات التحويل متاح لموظفي خدمة العملاء فقط" });
   const parsed = z.object({ decision: z.enum(["ACCEPT", "DECLINE"]) }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اختر قبول الطلب أو رفضه" });
   const request = await prisma.conversationHandoffRequest.findUnique({ where: { conversationId: req.params.id }, include: { fromAgent: { select: { id: true, name: true } }, conversation: { include: { customer: true } } } });
   if (!request || request.status !== ConversationHandoffStatus.PENDING) return res.status(409).json({ error: "طلب التحويل لم يعد متاحًا" });
-  if (request.toAgentId !== req.user!.id) return res.status(403).json({ error: "هذا الطلب موجّه إلى موظف آخر" });
-  if (!canWorkOnConversation(req.user!, request.conversation)) return res.status(403).json({ error: "لا تملك صلاحية استقبال هذه المحادثة" });
+  if (!canRespondToHandoff(req.user!, request)) return res.status(403).json({ error: "طلب التحويل متاح لموظف خدمة العملاء المحدد فقط" });
 
   if (parsed.data.decision === "DECLINE") {
     const declined = await prisma.conversationHandoffRequest.updateMany({ where: { id: request.id, toAgentId: req.user!.id, status: ConversationHandoffStatus.PENDING }, data: { status: ConversationHandoffStatus.DECLINED, resolvedAt: new Date() } });

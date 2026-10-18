@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import jwt from "jsonwebtoken";
 import { Channel, Department, MessengerAccessMode, Role } from "@prisma/client";
-import { canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, signToken, type SessionUser } from "./auth";
+import { canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canRespondToHandoff, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, signToken, type SessionUser } from "./auth";
 
 function user(overrides: Partial<SessionUser> = {}): SessionUser {
   return {
@@ -37,6 +37,18 @@ test("agents can read and work only assigned conversations even with the view-al
   assert.equal(canWorkOnConversation(user({ role: Role.SUPERVISOR }), conversation), true);
   assert.equal(canReadConversation(user({ id: "assigned-agent" }), { assignedAgentId: "assigned-agent" }), true);
   assert.equal(canWorkOnConversation(user({ id: "assigned-agent" }), { assignedAgentId: "assigned-agent" }), true);
+});
+
+test("handoff recipient can respond before the conversation is assigned to them", () => {
+  const sender = user({ id: "sender", department: Department.CUSTOMER_CARE });
+  const recipient = user({ id: "recipient", department: Department.CUSTOMER_CARE });
+  const conversation = { assignedAgentId: sender.id };
+  const handoff = { toAgentId: recipient.id };
+
+  assert.equal(canWorkOnConversation(recipient, conversation), false);
+  assert.equal(canRespondToHandoff(recipient, handoff), true);
+  assert.equal(canRespondToHandoff(user({ id: "other", department: Department.CUSTOMER_CARE }), handoff), false);
+  assert.equal(canRespondToHandoff(user({ ...recipient, role: Role.BRANCH_USER }), handoff), false);
 });
 
 test("team conversation browsing is enabled for frontline staff only", () => {

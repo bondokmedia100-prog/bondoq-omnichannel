@@ -114,6 +114,10 @@ export function canWorkOnConversation(user: SessionUser, conversation: { assigne
   return conversation.assignedAgentId === user.id;
 }
 
+export function canRespondToHandoff(user: SessionUser, handoff: { toAgentId: string }) {
+  return user.role === Role.AGENT && user.department === Department.CUSTOMER_CARE && handoff.toAgentId === user.id;
+}
+
 export function canViewAllPrivateConversationNotes(user: SessionUser) {
   return user.role === Role.ADMIN || user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations");
 }
