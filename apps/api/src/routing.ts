@@ -4,8 +4,8 @@ import IORedis from "ioredis";
 import { loadSessionUser } from "./auth";
 import { config } from "./config";
 import { prisma } from "./prisma";
-import { connectedUserIds, io, setAgentDisconnectHandler } from "./realtime";
-import { canViewChannel, channelAssignmentWhere, effectiveChannelAccess, emitConversationEvent, getDepartmentChannelModes } from "./messengerAccess";
+import { connectedUserIds, emitConversationEvent, io, setAgentDisconnectHandler } from "./realtime";
+import { canViewChannel, channelAssignmentWhere, effectiveChannelAccess, getDepartmentChannelModes } from "./messengerAccess";
 import { chooseRoundRobinAgent, isEligibleForAutomaticAssignment, shouldReassignUnansweredConversation } from "./routingSelection";
 import { withRedisLock } from "./redisLock";
 
