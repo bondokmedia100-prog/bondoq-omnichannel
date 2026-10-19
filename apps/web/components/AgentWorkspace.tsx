@@ -593,8 +593,9 @@ export default function AgentWorkspace() {
     try {
       let list = conversationLists.find((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
       if (!list) {
-        list = await api("/api/conversation-lists", { method: "POST", body: JSON.stringify({ name }) });
-        setConversationLists((current) => [...current, list]);
+        const createdList = await api<AnyRecord>("/api/conversation-lists", { method: "POST", body: JSON.stringify({ name }) });
+        list = createdList;
+        setConversationLists((current) => [...current, createdList]);
       }
       await addConversationToList(conversationId, list);
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إنشاء القائمة الشخصية"); }
