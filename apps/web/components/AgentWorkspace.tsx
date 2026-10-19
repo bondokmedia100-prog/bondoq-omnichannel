@@ -299,13 +299,16 @@ export default function AgentWorkspace() {
     void loadChats();
   }
   function selectWhatsAppConversationKind(next: "ALL" | "DIRECT" | "GROUPS") {
+    const team = next === "GROUPS";
     conversationChannelFilterRef.current = "WHATSAPP";
     whatsappGroupFilterRef.current = next;
+    historyModeRef.current = false;
+    teamModeRef.current = team;
     setFilter("WHATSAPP");
     setWhatsappGroupFilter(next);
-    setStatusFilter("ALL");
+    setStatusFilter(team ? "TEAM" : "ALL");
     resetChatList();
-    void loadChats();
+    void loadChats(false, team);
   }
   async function openChat(id: string, targetMessageId?: string) {
     pendingMessageJumpRef.current = null;
