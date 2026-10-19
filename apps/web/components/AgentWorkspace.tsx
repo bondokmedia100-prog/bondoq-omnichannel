@@ -304,6 +304,7 @@ export default function AgentWorkspace() {
     whatsappGroupFilterRef.current = next;
     historyModeRef.current = false;
     teamModeRef.current = team;
+    chatScopeRef.current = team ? "TEAM" : "OWN";
     setFilter("WHATSAPP");
     setWhatsappGroupFilter(next);
     setStatusFilter(team ? "TEAM" : "ALL");
