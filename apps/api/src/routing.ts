@@ -1,13 +1,12 @@
-import { Channel, ConversationStatus, Department, MessageDirection, Presence, Role } from "@prisma/client";
+import { Channel, ConversationStatus, Department, MessageDirection, MessengerAccessMode, Presence, Role } from "@prisma/client";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 import { loadSessionUser } from "./auth";
 import { config } from "./config";
 import { prisma } from "./prisma";
-import { canViewChannel } from "./messengerAccess";
-import { emitConversationEvent, io } from "./realtime";
-import { chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
-import { channelAssignmentWhere } from "./messengerAccess";
+import { connectedUserIds, io, setAgentDisconnectHandler } from "./realtime";
+import { canViewChannel, channelAssignmentWhere, effectiveChannelAccess, emitConversationEvent, getDepartmentChannelModes } from "./messengerAccess";
+import { chooseRoundRobinAgent, isEligibleForAutomaticAssignment, shouldReassignUnansweredConversation } from "./routingSelection";
 import { withRedisLock } from "./redisLock";
 
 const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -65,7 +64,7 @@ export async function assignConversation(conversationId: string, department?: De
     const isMessenger = currentConversation.channel === Channel.MESSENGER;
     const hqAndRemote = !isMessenger && (targetDepartment === Department.HEADQUARTERS || targetDepartment === Department.WORK_FROM_HOME);
     const isBranchQueue = !isMessenger && (targetDepartment === Department.BRANCH || (!targetDepartment && Boolean(currentConversation.branchId)));
-    const agents = await prisma.user.findMany({
+    const candidates = await prisma.user.findMany({
       where: {
         role: isMessenger ? Role.AGENT : isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
         isActive: true,
@@ -83,8 +82,25 @@ export async function assignConversation(conversationId: string, department?: De
               : { department: { not: Department.ADMINISTRATION } })
         } : {})
       },
-      select: { id: true },
+      select: { id: true, role: true, isActive: true, presence: true, department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true },
       orderBy: { id: "asc" }
+    });
+    const connected = await connectedUserIds(candidates.map((agent) => agent.id));
+    const departmentModes = await getDepartmentChannelModes(currentConversation.channel);
+    const agents = candidates.filter((agent) => {
+      const departmentAccess = agent.department ? departmentModes[agent.department] : MessengerAccessMode.DISABLED;
+      const principal = {
+        ...agent,
+        departmentWhatsAppAccess: currentConversation.channel === Channel.WHATSAPP ? departmentAccess : undefined,
+        departmentMessengerAccess: currentConversation.channel === Channel.MESSENGER ? departmentAccess : undefined,
+        departmentTelegramAccess: currentConversation.channel === Channel.TELEGRAM ? departmentAccess : undefined
+      };
+      return isEligibleForAutomaticAssignment({
+        isActive: agent.isActive,
+        presence: agent.presence,
+        connected: connected.has(agent.id),
+        fullAccess: effectiveChannelAccess(principal, currentConversation.channel) === MessengerAccessMode.FULL
+      });
     });
     if (previousAgentId && agents.some((agent) => agent.id === previousAgentId) && !options.forceReassign) return currentConversation;
     const assignableAgents = options.forceReassign && previousAgentId ? agents.filter((agent) => agent.id !== previousAgentId) : agents;
@@ -184,6 +200,10 @@ export async function releaseAgentConversations(agentId: string) {
   await dispatchQueued();
   return assigned.length;
 }
+
+setAgentDisconnectHandler(async (agentId) => {
+  await releaseAgentConversations(agentId);
+});
 
 export async function scheduleSla(conversationId: string, messageId: string) {
   await slaQueue.add("check-first-response", { conversationId, messageId }, { delay: config.slaResponseMinutes * 60_000, removeOnComplete: true, removeOnFail: 100 });

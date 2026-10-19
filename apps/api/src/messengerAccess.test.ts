@@ -45,6 +45,17 @@ test("WhatsApp and Telegram inherit the same department access modes as Messenge
     assert.equal(effectiveChannelAccess(principal({ department: Department.WORK_FROM_HOME }), channel), MessengerAccessMode.FULL);
     assert.equal(effectiveChannelAccess(principal({ department: Department.CUSTOMER_CARE }), channel), MessengerAccessMode.READ_ONLY);
     assert.equal(effectiveChannelAccess(principal({ department: Department.DELIVERY }), channel), MessengerAccessMode.DISABLED);
+    for (const department of [Department.HEADQUARTERS, Department.BRANCH, Department.ADMINISTRATION, Department.CAKES, Department.QUALITY]) {
+      assert.equal(effectiveChannelAccess(principal({ department }), channel), MessengerAccessMode.DISABLED);
+    }
+  }
+});
+
+test("Messenger keeps the deployed department default matrix", () => {
+  assert.equal(effectiveMessengerAccess(principal({ department: Department.WORK_FROM_HOME })), MessengerAccessMode.FULL);
+  assert.equal(effectiveMessengerAccess(principal({ department: Department.CUSTOMER_CARE })), MessengerAccessMode.READ_ONLY);
+  for (const department of [Department.HEADQUARTERS, Department.BRANCH, Department.ADMINISTRATION, Department.CAKES, Department.DELIVERY, Department.QUALITY]) {
+    assert.equal(effectiveMessengerAccess(principal({ department })), MessengerAccessMode.DISABLED);
   }
 });
 

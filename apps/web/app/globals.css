@@ -30,6 +30,12 @@ button { cursor: pointer; }
 .workspace-grid > .workspace-list,
 .workspace-grid > .workspace-chat,
 .workspace-grid > .workspace-profile { direction: rtl; }
+.workspace-splitter { position: relative; z-index: 2; align-self: stretch; width: 8px; min-width: 8px; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
+.workspace-splitter::after { position: absolute; top: 8px; bottom: 8px; left: 3px; width: 2px; border-radius: 999px; background: #ded8cf; content: ""; transition: background-color .15s ease, width .15s ease, left .15s ease; }
+.workspace-splitter:hover::after,
+.workspace-splitter:focus-visible::after { left: 2px; width: 4px; background: #d32f2f; }
+.agent-app.is-resizing-sidebar,
+.agent-app.is-resizing-sidebar * { cursor: col-resize !important; user-select: none !important; }
 .workspace-chat { background-color: #efeae2 !important; }
 .workspace-chat > .flex-1 { background-color: #efeae2; }
 .agent-app .message-body { font-size: var(--chat-font-size, 15px); font-weight: 400; line-height: 1.55; }
@@ -88,6 +94,7 @@ html[data-crm-theme="dark"] .soft-scroll { scrollbar-color: #535950 transparent;
 html[data-crm-theme="dark"] .soft-scroll::-webkit-scrollbar-thumb { background: #535950; }
 html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !important; }
 @media (max-width: 850px) {
+  .workspace-splitter { display: none !important; }
   .agent-app { height: 100dvh !important; min-height: 0 !important; overflow: hidden !important; }
   .agent-app > header { height: 60px !important; padding-left: max(8px, env(safe-area-inset-left)) !important; padding-right: max(8px, env(safe-area-inset-right)) !important; }
   .agent-app > header > div:first-child { min-width: 0; gap: 8px; }

@@ -502,6 +502,7 @@ model MediaAsset {
   createdBy   User?     @relation("MediaUploader", fields: [createdById], references: [id], onDelete: SetNull)
   messages    Message[]
   products    Product[] @relation("ProductImage")
+  quickReplies AgentQuickReply[]
   callRecording CallRecording?
 
   @@index([createdAt])
@@ -514,6 +515,7 @@ model CustomerTag {
   createdAt DateTime                @default(now())
   updatedAt DateTime                @updatedAt
   customers CustomerTagAssignment[]
+  quickReplies AgentQuickReplyTag[]
 }
 
 model CustomerTagAssignment {
@@ -635,12 +637,26 @@ model AgentQuickReply {
   shortcut  String
   title     String
   content   String   @db.Text
+  mediaAssetId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaAsset MediaAsset? @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
+  tags      AgentQuickReplyTag[]
 
   @@unique([userId, shortcut])
   @@index([userId, title])
+  @@index([mediaAssetId])
+}
+
+model AgentQuickReplyTag {
+  quickReplyId String
+  tagId        String
+  quickReply   AgentQuickReply @relation(fields: [quickReplyId], references: [id], onDelete: Cascade)
+  tag          CustomerTag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([quickReplyId, tagId])
+  @@index([tagId])
 }
 
 model CallRecording {

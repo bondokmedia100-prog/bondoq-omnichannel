@@ -8,6 +8,11 @@ import { channelViewerWhere } from "./messengerAccess";
 import { prisma } from "./prisma";
 
 export let io: Server;
+let onAgentDisconnected: ((userId: string) => Promise<void>) | undefined;
+
+export function setAgentDisconnectHandler(handler: (userId: string) => Promise<void>) {
+  onAgentDisconnected = handler;
+}
 
 export async function emitConversationEvent(
   conversationId: string,
@@ -47,7 +52,20 @@ export function broadcastPresence(userId: string, presence: Presence, department
   recipients.emit("presence:updated", { userId, presence });
 }
 
-export async function revokeConversationRoomAccess(conversationId: string, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: import("@prisma/client").Channel }) {
+export async function connectedUserIds(userIds: string[]) {
+  if (!io || !userIds.length) return new Set<string>();
+  const sockets = await io.in(userIds.map((userId) => `user:${userId}`)).fetchSockets();
+  return new Set(sockets.flatMap((socket) => {
+    const user = socket.data.user as SessionUser | undefined;
+    return user?.id ? [user.id] : [];
+  }));
+}
+
+export async function isUserConnected(userId: string) {
+  return (await connectedUserIds([userId])).has(userId);
+}
+
+export async function revokeConversationRoomAccess(conversationId: string, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
   if (!io) return;
   const room = `conversation:${conversationId}`;
   const sockets = await io.in(room).fetchSockets();
@@ -125,6 +143,30 @@ export function initRealtime(server: HttpServer) {
     socket.on("conversation:leave", (conversationId: string) => {
       socket.leave(`conversation:${conversationId}`);
       if (canObserveAllConversations) io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: false, userId: user.id });
+    });
+    socket.on("disconnect", () => {
+      if (user.role !== Role.AGENT && user.role !== Role.BRANCH_USER) return;
+      setTimeout(async () => {
+        try {
+          if (await isUserConnected(user.id)) return;
+          const now = new Date();
+          const changed = await prisma.user.updateMany({
+            where: { id: user.id, isActive: true, presence: Presence.ONLINE },
+            data: { presence: Presence.OFFLINE, lastSeenAt: now }
+          });
+          if (!changed.count) return;
+          if (await isUserConnected(user.id)) {
+            const restored = await prisma.user.updateMany({ where: { id: user.id, isActive: true, presence: Presence.OFFLINE }, data: { presence: Presence.ONLINE, lastSeenAt: new Date() } });
+            if (restored.count) {
+              broadcastPresence(user.id, Presence.ONLINE, user.department);
+            }
+            return;
+          }
+          await prisma.agentSession.updateMany({ where: { userId: user.id, endedAt: null }, data: { endedAt: now, endState: Presence.OFFLINE } });
+          broadcastPresence(user.id, Presence.OFFLINE, user.department);
+          await onAgentDisconnected?.(user.id);
+        } catch (error) { console.warn("Agent disconnect cleanup failed", error); }
+      }, 1000);
     });
   });
   return io;

@@ -41,14 +41,55 @@ test("agents can read and work only assigned conversations even with the view-al
 
 test("handoff recipient can respond before the conversation is assigned to them", () => {
   const sender = user({ id: "sender", department: Department.CUSTOMER_CARE });
-  const recipient = user({ id: "recipient", department: Department.CUSTOMER_CARE });
+  const recipient = user({ id: "recipient", department: Department.CUSTOMER_CARE, departmentWhatsAppAccess: MessengerAccessMode.FULL });
   const conversation = { assignedAgentId: sender.id };
   const handoff = { toAgentId: recipient.id };
 
   assert.equal(canWorkOnConversation(recipient, conversation), false);
-  assert.equal(canRespondToHandoff(recipient, handoff), true);
-  assert.equal(canRespondToHandoff(user({ id: "other", department: Department.CUSTOMER_CARE }), handoff), false);
-  assert.equal(canRespondToHandoff(user({ ...recipient, role: Role.BRANCH_USER }), handoff), false);
+  assert.equal(canRespondToHandoff(recipient, handoff, Channel.WHATSAPP), true);
+  assert.equal(canRespondToHandoff(user({ id: "other", department: Department.CUSTOMER_CARE }), handoff, Channel.WHATSAPP), false);
+  assert.equal(canRespondToHandoff(user({ ...recipient, role: Role.BRANCH_USER }), handoff, Channel.WHATSAPP), false);
+});
+
+test("read-only agents can view assigned conversations without working them", () => {
+  const customerCare = user({
+    department: Department.CUSTOMER_CARE,
+    departmentWhatsAppAccess: MessengerAccessMode.READ_ONLY,
+    departmentMessengerAccess: MessengerAccessMode.READ_ONLY,
+    departmentTelegramAccess: MessengerAccessMode.READ_ONLY
+  });
+  for (const channel of ["WHATSAPP", "MESSENGER", "TELEGRAM"] as const) {
+    const conversation = { assignedAgentId: customerCare.id, branchId: null, channel };
+    assert.equal(canReadConversation(customerCare, conversation), true);
+    assert.equal(canWorkOnConversation(customerCare, conversation), false);
+  }
+});
+
+test("Messenger work access follows the configured department mode, not the department name", () => {
+  const messenger = { assignedAgentId: "user-1", branchId: null, channel: "MESSENGER" as const };
+  const headquartersFull = user({ department: Department.HEADQUARTERS, departmentMessengerAccess: MessengerAccessMode.FULL });
+  const customerCareReadOnly = user({ department: Department.CUSTOMER_CARE, departmentMessengerAccess: MessengerAccessMode.READ_ONLY });
+  const excluded = user({ department: Department.DELIVERY, departmentMessengerAccess: MessengerAccessMode.DISABLED });
+  assert.equal(canReadConversation(headquartersFull, messenger), true);
+  assert.equal(canWorkOnConversation(headquartersFull, messenger), true);
+  assert.equal(canReadConversation(customerCareReadOnly, messenger), true);
+  assert.equal(canWorkOnConversation(customerCareReadOnly, messenger), false);
+  assert.equal(canReadConversation(excluded, messenger), false);
+  assert.equal(canWorkOnConversation(excluded, messenger), false);
+  assert.equal(canWorkOnConversation(user({ ...excluded, messengerAccess: MessengerAccessMode.FULL }), messenger), true);
+});
+
+test("Messenger handoff identity checks accept other departments while other channels stay customer-care scoped", () => {
+  const handoff = { toAgentId: "user-1" };
+  const fullHeadquartersAgent = user({ department: Department.HEADQUARTERS, departmentMessengerAccess: MessengerAccessMode.FULL });
+  const readOnlyHeadquartersAgent = user({ department: Department.HEADQUARTERS, departmentMessengerAccess: MessengerAccessMode.READ_ONLY });
+  const excludedHeadquartersAgent = user({ department: Department.HEADQUARTERS, departmentMessengerAccess: MessengerAccessMode.DISABLED });
+  assert.equal(canRespondToHandoff(fullHeadquartersAgent, handoff, Channel.MESSENGER), true);
+  assert.equal(canRespondToHandoff(readOnlyHeadquartersAgent, handoff, Channel.MESSENGER), false);
+  assert.equal(canRespondToHandoff(excludedHeadquartersAgent, handoff, Channel.MESSENGER), false);
+  assert.equal(canWorkOnConversation(readOnlyHeadquartersAgent, { assignedAgentId: readOnlyHeadquartersAgent.id, channel: Channel.MESSENGER }), false);
+  assert.equal(canRespondToHandoff(fullHeadquartersAgent, handoff, Channel.WHATSAPP), false);
+  assert.equal(canRespondToHandoff(user({ department: Department.CUSTOMER_CARE, departmentWhatsAppAccess: MessengerAccessMode.FULL }), handoff, Channel.WHATSAPP), true);
 });
 
 test("team conversation browsing is enabled for frontline staff only", () => {

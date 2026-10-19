@@ -20,6 +20,15 @@ export function canReceiveChannel(agent: ChannelEligibility, channel: ReceivingC
   return agent[channelPermission[channel]] === true;
 }
 
+export function isEligibleForAutomaticAssignment(agent: {
+  isActive: boolean;
+  presence: string;
+  connected: boolean;
+  fullAccess: boolean;
+}) {
+  return agent.isActive && agent.presence === "ONLINE" && agent.connected && agent.fullAccess;
+}
+
 export function chooseRoundRobinAgent<T extends { id: string }>(agents: T[], roundRobinTurn: number): T | undefined {
   if (!agents.length) return undefined;
   const index = ((roundRobinTurn % agents.length) + agents.length) % agents.length;

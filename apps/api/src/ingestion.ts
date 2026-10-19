@@ -323,8 +323,8 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     catch (error) { console.error("Automatic reply delivery failed", error); }
   }
 
-  if (decision.action === "NONE" && !autoReply && !conversation.awaitingRouting && !conversation.assignedAgentId) {
-    conversation = await assignConversation(conversation.id, routeDepartment);
+  if (decision.action === "NONE" && !autoReply && !conversation.awaitingRouting) {
+    conversation = await assignConversation(conversation.id, routeDepartment, { reassignIfIneligible: true });
   }
 
   const viewerWhere = await channelViewerWhere(conversation.channel);

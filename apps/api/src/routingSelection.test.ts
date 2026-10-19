@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canReceiveChannel, channelEligibilityWhere, chooseRoundRobinAgent, shouldReassignUnansweredConversation } from "./routingSelection";
+import { canReceiveChannel, channelEligibilityWhere, chooseRoundRobinAgent, isEligibleForAutomaticAssignment, shouldReassignUnansweredConversation } from "./routingSelection";
 
 test("round-robins across every online agent in order", () => {
   const agents = [{ id: "a" }, { id: "b" }, { id: "c" }];
@@ -22,6 +22,16 @@ test("maps supported channels to the matching agent eligibility field", () => {
   assert.equal(canReceiveChannel(agent, "MESSENGER"), false);
   assert.equal(canReceiveChannel(agent, "TELEGRAM"), true);
   assert.equal(canReceiveChannel({}, "WHATSAPP"), false);
+});
+
+test("automatic assignment requires active, online, connected agents with full access", () => {
+  const base = { isActive: true, presence: "ONLINE", connected: true, fullAccess: true };
+  assert.equal(isEligibleForAutomaticAssignment(base), true);
+  assert.equal(isEligibleForAutomaticAssignment({ ...base, presence: "BREAK" }), false);
+  assert.equal(isEligibleForAutomaticAssignment({ ...base, presence: "OFFLINE" }), false);
+  assert.equal(isEligibleForAutomaticAssignment({ ...base, connected: false }), false);
+  assert.equal(isEligibleForAutomaticAssignment({ ...base, isActive: false }), false);
+  assert.equal(isEligibleForAutomaticAssignment({ ...base, fullAccess: false }), false);
 });
 
 test("reassigns only the same active conversation when its latest inbound is unanswered", () => {
