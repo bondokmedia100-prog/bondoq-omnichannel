@@ -31,6 +31,7 @@ import { canReplyChannel, canViewChannel, channelAssignmentWhere, channelDepartm
 import { formatAgentHandoffGreeting } from "./autoReplies";
 import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
 import { accessibleConversationSearchScope, messageContentSearchWhere, normalizeSearchDigits } from "./search";
+import { WHATSAPP_GROUP_JID_SUFFIX } from "./whatsappGroup";
 
 const app = express();
 const server = http.createServer(app);
@@ -515,7 +516,15 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
       { whatsappCallSessions: { some: { agentId: actor.id } } }
     ] }
    ] : viewOnlyChannels.length ? [{ OR: [{ assignedAgentId: actor.id }, { channel: { in: viewOnlyChannels } }] }] : [{ assignedAgentId: actor.id }];
-  const channel = typeof req.query.channel === "string" ? req.query.channel : undefined;
+  const requestedChannel = typeof req.query.channel === "string" ? req.query.channel : undefined;
+  const groupFilter = typeof req.query.whatsappGroups === "string" ? req.query.whatsappGroups : undefined;
+  if (requestedChannel && requestedChannel !== "ALL" && !Object.values(Channel).includes(requestedChannel as Channel)) return res.status(400).json({ error: "قناة المحادثة غير صالحة" });
+  if (groupFilter && !["0", "1"].includes(groupFilter)) return res.status(400).json({ error: "مرشح مجموعات WhatsApp غير صالح" });
+  if (groupFilter && requestedChannel && !["ALL", Channel.WHATSAPP].includes(requestedChannel as any)) return res.status(400).json({ error: "مرشح المجموعات متاح لقناة WhatsApp فقط" });
+  const channel = groupFilter ? Channel.WHATSAPP : requestedChannel;
+  const groupFilterWhere: Prisma.ConversationWhereInput | undefined = groupFilter === "1"
+    ? { externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } }
+    : groupFilter === "0" ? { NOT: { externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } } } : undefined;
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const paginated = req.query.limit !== undefined || req.query.cursor !== undefined;
   const cursor = req.query.cursor === undefined ? null : decodePageCursor(req.query.cursor);
@@ -523,7 +532,7 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
   const limit = pageLimit(req.query.limit);
   const conversations = await prisma.conversation.findMany({
     where: {
-      ...(scope.length ? { AND: [...scope, ...(cursor ? [{ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] }] : [])] } : {}),
+      ...(scope.length || groupFilterWhere ? { AND: [...scope, ...(groupFilterWhere ? [groupFilterWhere] : []), ...(cursor ? [{ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] }] : [])] } : {}),
       ...(deniedChannels.length ? { NOT: deniedChannels.map((deniedChannel) => ({ channel: deniedChannel })) } : {}),
       ...(channel && channel !== "ALL" ? { channel: channel as Channel } : {}),
       ...(status && status !== "ALL" ? { status: status as ConversationStatus } : {}),
@@ -624,7 +633,15 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
     { name: { contains: query, mode: "insensitive" } },
     ...(matchingCustomerIds.length ? [{ id: { in: matchingCustomerIds } }] : [])
   ];
-  const channel = typeof req.query.channel === "string" && Object.values(Channel).includes(req.query.channel as Channel) ? req.query.channel as Channel : undefined;
+  const requestedChannel = typeof req.query.channel === "string" ? req.query.channel : undefined;
+  const groupFilter = typeof req.query.whatsappGroups === "string" ? req.query.whatsappGroups : undefined;
+  if (requestedChannel && requestedChannel !== "ALL" && !Object.values(Channel).includes(requestedChannel as Channel)) return res.status(400).json({ error: "قناة المحادثة غير صالحة" });
+  if (groupFilter && !["0", "1"].includes(groupFilter)) return res.status(400).json({ error: "مرشح مجموعات WhatsApp غير صالح" });
+  if (groupFilter && requestedChannel && !["ALL", Channel.WHATSAPP].includes(requestedChannel as any)) return res.status(400).json({ error: "مرشح المجموعات متاح لقناة WhatsApp فقط" });
+  const channel = groupFilter ? Channel.WHATSAPP : requestedChannel as Channel | undefined;
+  const groupFilterWhere: Prisma.ConversationWhereInput | undefined = groupFilter === "1"
+    ? { externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } }
+    : groupFilter === "0" ? { NOT: { externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } } } : undefined;
   const status = typeof req.query.status === "string" ? req.query.status : "";
   const statusFilter: Prisma.ConversationWhereInput = status === "ACTIVE" ? { status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] } }
     : status === "WAITING" ? { status: { in: [ConversationStatus.PENDING, ConversationStatus.QUEUED] } }
@@ -634,6 +651,7 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
     AND: [
       ...scope,
       ...(deniedChannels.length ? [{ NOT: { channel: { in: deniedChannels } } }] : []),
+      ...(groupFilterWhere ? [groupFilterWhere] : []),
       statusFilter,
       ...(channel ? [{ channel }] : []),
       ...(req.query.favorite === "1" ? [{ favorites: { some: { userId: actor.id } } }] : []),

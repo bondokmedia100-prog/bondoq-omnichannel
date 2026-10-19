@@ -25,6 +25,8 @@ const MAX_CONVERSATION_SIDEBAR_WIDTH = 480;
 const clampConversationSidebarWidth = (width: number) => Math.min(MAX_CONVERSATION_SIDEBAR_WIDTH, Math.max(MIN_CONVERSATION_SIDEBAR_WIDTH, Math.round(width)));
 const productCategoryLabel: Record<string, string> = { EASTERN: "حلويات شرقية", WESTERN: "حلويات غربية", CAKES: "تورتات", BAKERY: "مخبوزات", KAHK: "كحك وبسكويت", CHOCOLATE: "شوكولاتة", MOULID: "حلاوة المولد", OCCASIONS: "مناسبات", MIX_BONDOQ: "ميكس بندق" };
 const customerDisplayName = (customer?: AnyRecord | null) => customer?.displayName?.trim() || customer?.name || "عميل جديد";
+const isWhatsAppGroupConversation = (conversation?: AnyRecord | null) => conversation?.channel === "WHATSAPP"
+  && (String(conversation.externalConversationId || "").toLowerCase().endsWith("@g.us") || conversation.customer?.channelIdentifiers?.whatsappGroup === true);
 export default function AgentWorkspace() {
   const router = useRouter();
   const [user, setUser] = useState<AnyRecord | null>(null);
@@ -62,6 +64,7 @@ export default function AgentWorkspace() {
   const [productFilter, setProductFilter] = useState("ALL");
   const [productSearch, setProductSearch] = useState("");
   const [filter, setFilter] = useState("ALL");
+  const [whatsappGroupFilter, setWhatsappGroupFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ACTIVE");
   const [messageFilter, setMessageFilter] = useState("ALL");
   const [chatLoadError, setChatLoadError] = useState("");
@@ -181,6 +184,10 @@ export default function AgentWorkspace() {
   const teamModeRef = useRef(false);
   teamModeRef.current = statusFilter === "TEAM";
   const chatScopeRef = useRef("OWN");
+  const conversationChannelFilterRef = useRef(filter);
+  conversationChannelFilterRef.current = filter;
+  const whatsappGroupFilterRef = useRef(whatsappGroupFilter);
+  whatsappGroupFilterRef.current = whatsappGroupFilter;
   const loadedExtraChatsRef = useRef(false);
   const socketRef = useRef<Socket | null>(null);
   const activeIdRef = useRef("");
@@ -202,13 +209,29 @@ export default function AgentWorkspace() {
   const recordingStartedAtRef = useRef(0);
   const [order, setOrder] = useState({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" });
 
+  function buildConversationListParams(limit: number, cursor?: string, history = historyModeRef.current, team = teamModeRef.current) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    if (team) params.set("team", "1");
+    else if (history) params.set("history", "1");
+    const channel = conversationChannelFilterRef.current;
+    if (channel !== "ALL") params.set("channel", channel);
+    const groups = whatsappGroupFilterRef.current;
+    if (groups !== "ALL") params.set("whatsappGroups", groups === "GROUPS" ? "1" : "0");
+    return params;
+  }
+  function resetChatList() {
+    loadedExtraChatsRef.current = false;
+    conversationsRef.current = [];
+    setConversations([]);
+    setChatCursor(null);
+    setHasMoreChats(false);
+  }
   async function loadChats(history = historyModeRef.current, team = teamModeRef.current) {
     const scope = team ? "TEAM" : history ? "HISTORY" : "OWN";
     const request = ++chatLoadRequest.current;
     try {
-      const params = new URLSearchParams({ limit: "50" });
-      if (team) params.set("team", "1");
-      else if (history) params.set("history", "1");
+      const params = buildConversationListParams(50, undefined, history, team);
       const page = await api(`/api/conversations?${params}`);
       if (request === chatLoadRequest.current && scope === chatScopeRef.current) {
         const fresh = page.items || [];
@@ -236,9 +259,7 @@ export default function AgentWorkspace() {
     const scope = chatScopeRef.current;
     setLoadingMoreChats(true);
     try {
-      const params = new URLSearchParams({ limit: "50", cursor: chatCursor });
-      if (scope === "TEAM") params.set("team", "1");
-      else if (scope === "HISTORY") params.set("history", "1");
+      const params = buildConversationListParams(50, chatCursor, scope === "HISTORY", scope === "TEAM");
       const page = await api(`/api/conversations?${params}`);
       if (request !== chatLoadRequest.current || scope !== chatScopeRef.current) return;
       setConversations((current) => {
@@ -268,6 +289,23 @@ export default function AgentWorkspace() {
       setHasMoreChats(false);
       void loadChats(history, team);
     }
+  }
+  function selectChannelFilter(next: string) {
+    conversationChannelFilterRef.current = next;
+    whatsappGroupFilterRef.current = "ALL";
+    setFilter(next);
+    setWhatsappGroupFilter("ALL");
+    resetChatList();
+    void loadChats();
+  }
+  function selectWhatsAppConversationKind(next: "ALL" | "DIRECT" | "GROUPS") {
+    conversationChannelFilterRef.current = "WHATSAPP";
+    whatsappGroupFilterRef.current = next;
+    setFilter("WHATSAPP");
+    setWhatsappGroupFilter(next);
+    setStatusFilter("ALL");
+    resetChatList();
+    void loadChats();
   }
   async function openChat(id: string, targetMessageId?: string) {
     pendingMessageJumpRef.current = null;
@@ -324,7 +362,12 @@ export default function AgentWorkspace() {
     } finally { if (request === phoneSearchRequestRef.current) setSearchingPhone(false); }
   }
   function buildGlobalSearchParams(query: string, offset = 0) {
-    return new URLSearchParams({ q: query, offset: String(offset) });
+    const params = new URLSearchParams({ q: query, offset: String(offset) });
+    const channel = conversationChannelFilterRef.current;
+    if (channel !== "ALL") params.set("channel", channel);
+    const groups = whatsappGroupFilterRef.current;
+    if (groups !== "ALL") params.set("whatsappGroups", groups === "GROUPS" ? "1" : "0");
+    return params;
   }
   async function loadMoreGlobalSearch() {
     const query = search.trim();
@@ -857,6 +900,7 @@ export default function AgentWorkspace() {
           if (activeIdRef.current === conversationId) setDetail(conversation);
         }).catch(() => {});
       });
+      connection.on("whatsapp:groups-synced", () => { void loadChats(); });
       connection.on("conversation:access-revoked", ({ conversationId }) => {
         if (activeIdRef.current === conversationId) {
           ++detailRequest.current;
@@ -893,7 +937,7 @@ export default function AgentWorkspace() {
       connection.on("sla:breached", () => setNotice("تنبيه: تجاوزت هذه المحادثة مهلة الرد المحددة."));
         const initialChatsRequest = ++chatLoadRequest.current;
         const handoffRequests = profile.role === "AGENT" ? api("/api/agents/handoff-requests") : Promise.resolve([]);
-        const [chatPage, replies, catalog, favorites, customerFavorites, pins, requests] = await Promise.all([api("/api/conversations?limit=50"), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins"), handoffRequests]);
+        const [chatPage, replies, catalog, favorites, customerFavorites, pins, requests] = await Promise.all([api(`/api/conversations?${buildConversationListParams(50, undefined, false, false)}`), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins"), handoffRequests]);
          if (!current) return;
          const chats = initialChatsRequest === chatLoadRequest.current ? chatPage.items || [] : conversationsRef.current;
           if (initialChatsRequest === chatLoadRequest.current && chatScopeRef.current === "OWN") {
@@ -972,7 +1016,7 @@ export default function AgentWorkspace() {
     setSearchingPhone(false);
     setPhoneSearchResult(null);
     setPhoneSearchError("");
-  }, [search]);
+  }, [search, filter, whatsappGroupFilter]);
 
   useEffect(() => {
     const query = search.trim();
@@ -992,7 +1036,7 @@ export default function AgentWorkspace() {
       }).finally(() => { if (request === globalSearchRequestRef.current) setGlobalSearchLoading(false); });
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [search]);
+  }, [search, filter, whatsappGroupFilter]);
 
   useEffect(() => {
     const conversationId = detail?.id;
@@ -1198,7 +1242,7 @@ export default function AgentWorkspace() {
   const forwardableSelectedMessages = selectedMessages.filter((message: AnyRecord) => message.kind !== "SYSTEM" && message.direction !== "INTERNAL" && !String(message.id).startsWith("pending-") && (message.kind !== "LOCATION" || message.latitude != null && message.longitude != null));
   const lastInboundAt = detail?.lastInboundAt || latestInbound?.createdAt;
   const metaChannel = detail?.channel === "MESSENGER";
-  const callTarget = detail?.customer?.phone || detail?.externalCustomerId || "";
+  const callTarget = isWhatsAppGroupConversation(detail) ? "" : detail?.customer?.phone || detail?.externalCustomerId || "";
   const windowRemaining = lastInboundAt ? new Date(lastInboundAt).getTime() + 24 * 60 * 60 * 1000 - now : 0;
   const metaWindowOpen = !metaChannel || windowRemaining > 0;
   const messagingEnabled = metaWindowOpen && !detail?.customer?.isBlocked;
@@ -1526,11 +1570,14 @@ export default function AgentWorkspace() {
   const hasGlobalSearchQuery = search.trim().length >= 2 || search.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit))).replace(/\D/g, "").length >= 3;
   const visible = conversations.filter((chat) => {
     const statusMatches = statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
-    return statusMatches && (filter === "ALL" || chat.channel === filter) && (!search.trim() || hasGlobalSearchQuery || `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
+    const groupMatches = whatsappGroupFilter === "ALL" || (whatsappGroupFilter === "GROUPS" ? isWhatsAppGroupConversation(chat) : !isWhatsAppGroupConversation(chat));
+    return statusMatches && (filter === "ALL" || chat.channel === filter) && groupMatches && (!search.trim() || hasGlobalSearchQuery || `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
   });
   const availableChannels = user
     ? channels.filter((item) => {
       if (item.id === "ALL") return true;
+      const access = item.id === "WHATSAPP" ? user.whatsappAccess : item.id === "MESSENGER" ? user.messengerAccess : user.telegramAccess;
+      if (access) return access !== "DISABLED";
       if (item.id === "WHATSAPP") return user.canReceiveWhatsApp !== false;
       if (item.id === "MESSENGER") return user.canReceiveMessenger !== false;
       if (item.id === "TELEGRAM") return user.canReceiveTelegram !== false;
@@ -1632,7 +1679,8 @@ export default function AgentWorkspace() {
                 <div className="soft-scroll max-h-32 space-y-1 overflow-y-auto">{phoneSearchResult.conversations.map((conversation: AnyRecord) => <button key={conversation.id} type="button" onClick={() => { setPhoneSearchResult(null); void openChat(conversation.id); }} className="flex w-full items-center justify-between gap-2 rounded-lg bg-stone-50 px-2.5 py-2 text-right hover:bg-emerald-50"><span className="min-w-0"><span className="block truncate text-[10px] font-bold">{customerDisplayName(conversation.customer)}</span><span className="mt-0.5 block truncate text-[9px] text-stone-400">{conversation.messages?.[0]?.text || "مرفق أو رسالة"}{conversation.readOnly ? " · قراءة فقط" : ""}</span></span><span className="shrink-0 text-[9px] text-stone-400">{ago(conversation.lastMessageAt)}</span></button>)}</div>
                 <button type="button" onClick={() => void startChatFromPhone()} disabled={startingPhoneChat || (user?.channelAccess ? user.channelAccess.WHATSAPP !== "FULL" : user?.canReceiveWhatsApp === false) || Boolean(phoneSearchResult.customer?.isBlocked)} className="mt-2 w-full rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-300">{startingPhoneChat ? "جارٍ فتح WhatsApp..." : phoneSearchResult.customer?.isBlocked ? "العميل محظور" : "فتح أو بدء محادثة WhatsApp"}</button>
               </div>}
-            <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => setFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
+            <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => selectChannelFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
+            {filter === "WHATSAPP" && <div role="group" aria-label="نوع محادثة WhatsApp" className="soft-scroll -mt-1 mb-2 flex gap-1 overflow-x-auto pb-2">{[{ id: "ALL", label: "الكل" }, { id: "DIRECT", label: "الأفراد" }, { id: "GROUPS", label: "المجموعات" }].map((item) => <button key={item.id} type="button" aria-pressed={whatsappGroupFilter === item.id} onClick={() => selectWhatsAppConversationKind(item.id as "ALL" | "DIRECT" | "GROUPS")} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${whatsappGroupFilter === item.id ? "bg-emerald-700 text-white" : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100"}`}>{item.label}</button>)}</div>}
               <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
           </div>
           {chatLoadError && <div role="alert" className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-[10px] text-red-800"><span>{chatLoadError}</span><button type="button" onClick={() => void loadChats()} className="shrink-0 font-bold underline">إعادة المحاولة</button></div>}
@@ -1643,14 +1691,14 @@ export default function AgentWorkspace() {
                 {globalSearchResults.map((result) => <article key={result.id} className="border-b border-stone-100 bg-white px-3 py-3">
                   <button type="button" onClick={() => void openChat(result.id)} className="flex w-full items-center gap-3 text-right hover:text-emerald-800">
                     <Avatar name={customerDisplayName(result.customer)} src={result.customer?.avatarUrl} />
-                    <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><b className="truncate text-xs"><HighlightedText text={customerDisplayName(result.customer)} query={search.trim()} /></b><ChannelIcon channel={result.channel} /></span><span className="mt-1 block truncate text-[10px] text-stone-400">{result.customer?.phone ? <><HighlightedText text={result.customer.phone} query={search.trim()} /> · </> : null}{result.matchType === "CUSTOMER" ? "مطابقة بيانات العميل" : "مطابقة في الرسائل"} · {conversationStatusLabel(result.status)}</span></span>
+                    <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><b className="truncate text-xs"><HighlightedText text={customerDisplayName(result.customer)} query={search.trim()} /></b>{isWhatsAppGroupConversation(result) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}<ChannelIcon channel={result.channel} /></span><span className="mt-1 block truncate text-[10px] text-stone-400">{isWhatsAppGroupConversation(result) ? "مجموعة WhatsApp · " : result.customer?.phone ? <><HighlightedText text={result.customer.phone} query={search.trim()} /> · </> : null}{result.matchType === "CUSTOMER" ? "مطابقة بيانات العميل" : "مطابقة في الرسائل"} · {conversationStatusLabel(result.status)}</span></span>
                     <span className="shrink-0 text-[9px] text-stone-400">{ago(result.lastMessageAt)}</span>
                   </button>
                   {result.messages?.length ? <div className="mt-2 space-y-1.5 border-r-2 border-emerald-100 pr-2">{result.messages.map((message: AnyRecord) => <button key={message.id} type="button" onClick={() => void openChat(result.id, message.id)} className="block w-full rounded-lg bg-stone-50 px-2.5 py-2 text-right text-[10px] leading-5 text-stone-600 hover:bg-emerald-50"><span className="mb-0.5 block text-[9px] font-bold text-emerald-700">{message.transcription && !message.text ? "تفريغ رسالة صوتية" : "رسالة مطابقة"} · {ago(message.createdAt)}</span><span className="line-clamp-2"><HighlightedText text={message.transcription || message.text || "رسالة مرفقة"} query={search.trim()} /></span></button>)}</div> : <button type="button" onClick={() => void openChat(result.id)} className="mt-2 w-full rounded-lg bg-stone-50 px-2.5 py-2 text-right text-[10px] font-semibold text-stone-500 hover:bg-emerald-50">افتح المحادثة المطابقة</button>}
                 </article>)}
                 {!globalSearchLoading && !globalSearchError && !globalSearchResults.length && <p className="px-4 py-10 text-center text-xs text-stone-400">لا توجد نتائج مطابقة.</p>}
                 {globalSearchHasMore && <button type="button" onClick={() => void loadMoreGlobalSearch()} disabled={globalSearchLoading} className="m-3 w-[calc(100%-1.5rem)] rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 disabled:opacity-50">{globalSearchLoading ? "جارٍ التحميل..." : "عرض نتائج إضافية"}</button>}
-              </> : <>{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</>}
+              </> : <>{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center gap-1.5"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b>{isWhatsAppGroupConversation(chat) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}</span><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</>}
             </div>
         {hasMoreChats && <button type="button" onClick={() => void loadMoreChats()} disabled={loadingMoreChats} className="m-3 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">{loadingMoreChats ? "جارٍ تحميل المزيد..." : "تحميل المزيد من المحادثات"}</button>}
         <div className="space-y-2 border-t border-stone-100 px-4 py-3 text-[10px] text-stone-400"><div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متصل بالنظام</span><span className="truncate">{user?.email}</span></div><div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-2"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">واتساب</a></div></div>
@@ -1689,14 +1737,14 @@ export default function AgentWorkspace() {
               <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-stone-100 bg-white px-2 sm:px-4">
                <button type="button" onClick={openCustomerProfile} title={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} aria-label={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} className="flex min-w-0 items-center gap-2 text-right hover:text-amber-800 sm:gap-3">
                  <Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} />
-                 <span className="min-w-0"><span className="line-clamp-2 break-words text-xs font-extrabold sm:text-sm">{customerDisplayName(detail.customer)} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</span>
-                   <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[9px] text-stone-400 sm:text-[10px]"><ChannelIcon channel={detail.channel} />{detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)}<span className="rounded-full bg-emerald-50 px-1.5 py-0.5 font-bold text-emerald-700">{conversationStatusLabel(detail.status)}</span>{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</span>
+                  <span className="min-w-0"><span className="line-clamp-2 break-words text-xs font-extrabold sm:text-sm">{customerDisplayName(detail.customer)} {isWhatsAppGroupConversation(detail) && <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</span>
+                    <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[9px] text-stone-400 sm:text-[10px]"><ChannelIcon channel={detail.channel} />{isWhatsAppGroupConversation(detail) ? "مجموعة WhatsApp" : detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)}<span className="rounded-full bg-emerald-50 px-1.5 py-0.5 font-bold text-emerald-700">{conversationStatusLabel(detail.status)}</span>{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</span>
                  </span>
                </button>
                 <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
                  <fieldset disabled={Boolean(detail.readOnly)} className="contents">
                    <button type="button" disabled title="مكالمات الفيديو غير متاحة حاليًا؛ النظام يدعم المكالمات الصوتية فقط" aria-label="مكالمة فيديو غير متاحة" className="grid h-8 w-8 place-items-center rounded-lg text-stone-300 disabled:cursor-not-allowed"><Video size={16} /></button>
-                   {detail.channel === "WHATSAPP" && <button type="button" disabled={!callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : "مكالمة صوتية عبر WhatsApp"} aria-label="مكالمة صوتية عبر WhatsApp" onClick={() => setCallConversation(detail)} className="grid h-8 w-8 place-items-center rounded-lg text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} /></button>}
+                    {detail.channel === "WHATSAPP" && !isWhatsAppGroupConversation(detail) && <button type="button" disabled={!callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : "مكالمة صوتية عبر WhatsApp"} aria-label="مكالمة صوتية عبر WhatsApp" onClick={() => setCallConversation(detail)} className="grid h-8 w-8 place-items-center rounded-lg text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} /></button>}
                  </fieldset>
                  <button type="button" onClick={() => { setShowConversationSearch((open) => !open); setConversationSearchQuery(""); setConversationSearchMatches([]); }} title="البحث داخل المحادثة" aria-label="البحث داخل المحادثة" aria-expanded={showConversationSearch} className={`grid h-8 w-8 place-items-center rounded-lg ${showConversationSearch ? "bg-amber-50 text-amber-800" : "text-stone-500 hover:bg-stone-100"}`}><Search size={16} /></button>
                   <div ref={headerOptionsRef} className="relative">
@@ -1704,7 +1752,7 @@ export default function AgentWorkspace() {
                     {showHeaderOptions && <div role="menu" aria-label="إجراءات المحادثة" className="absolute left-0 top-full z-50 mt-2 w-64 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">
                       <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); openCustomerProfile(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><BookUser size={16} className="shrink-0 text-amber-700" /><span className="text-xs font-bold">ملف العميل</span></button>
                       <div className="my-1 border-t border-stone-100" />
-                      {detail.channel === "WHATSAPP" && <button type="button" role="menuitem" disabled={Boolean(detail.readOnly) || !callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={detail.readOnly ? "محادثة للقراءة فقط" : callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : undefined} onClick={() => { setShowHeaderOptions(false); setCallConversation(detail); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><PhoneCall size={16} className="shrink-0" /><span className="text-xs font-extrabold">مكالمة WhatsApp داخل النظام</span></button>}
+                       {detail.channel === "WHATSAPP" && !isWhatsAppGroupConversation(detail) && <button type="button" role="menuitem" disabled={Boolean(detail.readOnly) || !callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={detail.readOnly ? "محادثة للقراءة فقط" : callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : undefined} onClick={() => { setShowHeaderOptions(false); setCallConversation(detail); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><PhoneCall size={16} className="shrink-0" /><span className="text-xs font-extrabold">مكالمة WhatsApp داخل النظام</span></button>}
                       <button type="button" role="menuitem" disabled={Boolean(detail.readOnly)} onClick={() => { setShowHeaderOptions(false); void toggleFavorite(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-40"><Star size={16} className="shrink-0 text-amber-500" fill={favoriteIds.includes(activeId) ? "currentColor" : "none"} /><span className="text-xs font-bold">{favoriteIds.includes(activeId) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"}</span></button>
                       <button type="button" role="menuitem" disabled={Boolean(detail.readOnly)} onClick={() => { setShowHeaderOptions(false); void deferConversation(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-40"><Clock3 size={16} className="shrink-0 text-stone-400" /><span className="text-xs font-bold">تأجيل للمتابعة لاحقًا</span></button>
                        {!detail.readOnly && detail.channel === "MESSENGER" && user?.role === "AGENT" && <button type="button" role="menuitem" onClick={() => { setShowHeaderOptions(false); void openHandoffDialog(); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Users size={16} className="shrink-0 text-amber-700" /><span className="text-xs font-bold">تحويل Messenger لزميل</span></button>}
@@ -1828,7 +1876,7 @@ export default function AgentWorkspace() {
             <div inert={Boolean(detail.readOnly)} className="contents">
            <div className="flex items-center justify-between gap-2"><h2 className="text-sm font-extrabold">ملف العميل</h2><div className="flex items-center gap-1"><button type="button" onClick={() => void togglePin()} className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[10px] font-bold ${pinnedIds.includes(activeId) ? "bg-blue-50 text-blue-700" : "text-stone-400 hover:bg-stone-100"}`} aria-label={pinnedIds.includes(activeId) ? "إلغاء تثبيت المحادثة" : "تثبيت المحادثة"}><Pin size={14} />{pinnedIds.includes(activeId) ? "مثبتة" : "تثبيت"}</button><button type="button" onClick={() => void toggleCustomerFavorite()} disabled={savingCustomerFavorite} className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[10px] font-bold disabled:opacity-50 ${favoriteCustomerIds.includes(detail.customer?.id) ? "bg-amber-50 text-amber-700" : "text-stone-400 hover:bg-stone-100"}`} aria-label={favoriteCustomerIds.includes(detail.customer?.id) ? "إزالة العميل من المفضلة" : "حفظ العميل في المفضلة"}><Star size={14} fill={favoriteCustomerIds.includes(detail.customer?.id) ? "currentColor" : "none"} />{favoriteCustomerIds.includes(detail.customer?.id) ? "مفضل" : "حفظ العميل"}</button></div></div>
            <div className="rounded-2xl bg-[#fff8e9] p-4 text-center"><AvatarLarge name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} /><h3 className="mt-3 font-extrabold">{customerDisplayName(detail.customer)}</h3><p className="mt-1 text-[10px] text-stone-400">عميل منذ {formatCairoDateTime(detail.customer?.createdAt || detail.createdAt, false)}</p><div className="mt-3 flex justify-center gap-2"><a href={detail.customer?.phone ? `tel:${String(detail.customer.phone).replace(/[^0-9+*#;]/g, "")}` : undefined} aria-label="الاتصال بالعميل" title="الاتصال بالعميل" className={`grid h-9 w-9 place-items-center rounded-xl bg-white ${detail.customer?.phone ? "text-stone-500 hover:bg-emerald-50 hover:text-emerald-700" : "pointer-events-none text-stone-300"}`}><Phone size={15} /></a><button type="button" onClick={() => replyInputRef.current?.focus()} aria-label="إرسال رسالة للعميل" title="الانتقال إلى مربع الرد" className="grid h-9 w-9 place-items-center rounded-xl bg-white text-stone-500 hover:bg-amber-50 hover:text-amber-700"><MessageCircle size={15} /></button></div></div>
-            {detail.channel === "WHATSAPP" && <button type="button" disabled={detail.customer?.isBlocked || !callTarget || Boolean(callConversation)} onClick={() => setCallConversation(detail)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3 py-2.5 text-xs font-extrabold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} />{callConversation ? "أنه المكالمة الحالية أولًا" : "مكالمة WhatsApp داخل النظام"}</button>}
+            {detail.channel === "WHATSAPP" && !isWhatsAppGroupConversation(detail) && <button type="button" disabled={detail.customer?.isBlocked || !callTarget || Boolean(callConversation)} onClick={() => setCallConversation(detail)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3 py-2.5 text-xs font-extrabold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} />{callConversation ? "أنه المكالمة الحالية أولًا" : "مكالمة WhatsApp داخل النظام"}</button>}
             <div className="grid grid-cols-2 gap-2"><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isVip")} className={`rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isVip ? "bg-amber-100 text-amber-900" : "bg-stone-100 text-stone-600 hover:bg-amber-50"}`}>{detail.customer?.isVip ? "VIP · إزالة التمييز" : "تمييز العميل VIP"}</button><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isBlocked")} className={`flex items-center justify-center gap-1 rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isBlocked ? "bg-red-100 text-red-800" : "bg-stone-100 text-stone-600 hover:bg-red-50 hover:text-red-700"}`}><Ban size={13} />{detail.customer?.isBlocked ? "إلغاء الحظر" : "حظر داخل النظام"}</button></div>
              <div className="grid grid-cols-2 gap-2"><Info label="الهاتف" value={displayPhoneNumber(detail.customer?.phone)} /><Info label="القناة" value={channelName(detail.channel)} /></div>
             <form onSubmit={saveCustomerProfile} className="space-y-3 rounded-2xl border border-stone-100 bg-white p-3">

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, rm, chmod, readdir } from "node:fs/promises";
 import path from "node:path";
 import makeWASocket, { DisconnectReason, downloadMediaMessage, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
-import { Channel, ConversationBotState, ConversationStatus, Department, MessageKind } from "@prisma/client";
+import { Channel, ConversationBotState, ConversationStatus, Department, MessageKind, Role } from "@prisma/client";
 import QRCode from "qrcode";
 import { prisma } from "./prisma";
 import { config } from "./config";
@@ -12,6 +12,8 @@ import { sendPushNotification } from "./pushNotifications";
 import { repacketizeOggOpusToCode3 } from "./oggOpus";
 import { assignConversation, withInboundConversationLock } from "./routing";
 import { parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
+import { channelViewerWhere } from "./messengerAccess";
+import { isWhatsAppGroupJid } from "./whatsappGroup";
 
 process.umask(0o077);
 
@@ -39,6 +41,7 @@ let callReplyText = defaultCallReply;
 const pendingCalls = new Map<string, { callId: string; callerJid: string; phoneNumber: string; conversationId?: string; assignedAgentId?: string; customerName: string; isVideo: boolean; receivedAt: string }>();
 const profilePictureCache = new Map<string, { url: string | undefined; expiresAt: number }>();
 const profilePictureRequests = new Map<string, Promise<string | undefined>>();
+const groupSubjectCache = new Map<string, string>();
 
 let state: WhatsAppConnectionState = {
   mode: "BAILEYS", status: "DISCONNECTED", qrDataUrl: "", phoneNumber: "", accountName: "", lastError: ""
@@ -265,6 +268,61 @@ async function syncWhatsAppContacts(currentSocket: WASocket, contacts: any[]) {
   if (synced) console.info("WhatsApp contacts synchronized", { received: contacts.length, synced });
 }
 
+async function syncWhatsAppGroups(currentSocket: WASocket, groups: any[] | Record<string, any>) {
+  const records: any[] = Array.isArray(groups) ? groups : Object.values(groups || {});
+  if (!records.length) return;
+  let synced = 0;
+  for (let offset = 0; offset < records.length; offset += 25) {
+    if (socket !== currentSocket) return;
+    const results = await Promise.allSettled(records.slice(offset, offset + 25).map(async (group) => {
+      const jid = String(group?.id || group?.jid || "").trim();
+      if (!isWhatsAppGroupJid(jid)) return false;
+      const title = [group?.subject, group?.name].find((value) => typeof value === "string" && value.trim())?.trim()
+        || groupSubjectCache.get(jid);
+      if (title) groupSubjectCache.set(jid, title);
+      const displayName = title || "مجموعة WhatsApp";
+      const customerId = `external_whatsapp_${jid}`;
+      await prisma.customer.upsert({
+        where: { id: customerId },
+        create: { id: customerId, name: displayName, displayName, channelIdentifiers: { whatsapp: jid, whatsappGroup: true } },
+        update: { ...(title ? { name: title, displayName: title } : {}), channelIdentifiers: { whatsapp: jid, whatsappGroup: true } }
+      });
+      await prisma.conversation.upsert({
+        where: { channel_externalConversationId: { channel: Channel.WHATSAPP, externalConversationId: jid } },
+        create: {
+          customerId, channel: Channel.WHATSAPP, externalConversationId: jid, externalCustomerId: jid,
+          subject: displayName, status: ConversationStatus.QUEUED, awaitingRouting: true,
+          botState: ConversationBotState.ASSIGNED_TO_AGENT
+        },
+        update: { externalCustomerId: jid, ...(title ? { subject: title } : {}) }
+      });
+      return true;
+    }));
+    synced += results.filter((result) => result.status === "fulfilled" && result.value).length;
+    results.filter((result) => result.status === "rejected").forEach((result) => console.warn("WhatsApp group could not be synchronized", result.reason));
+  }
+  if (!synced || socket !== currentSocket) return;
+  const viewers = await prisma.user.findMany({
+    where: { isActive: true, OR: [{ role: Role.ADMIN }, await channelViewerWhere(Channel.WHATSAPP)] },
+    select: { id: true }
+  });
+  for (const viewer of viewers) io?.to(`user:${viewer.id}`).emit("whatsapp:groups-synced", { count: synced });
+  console.info("WhatsApp groups synchronized", { received: records.length, synced });
+}
+
+async function getWhatsAppGroupSubject(currentSocket: WASocket, jid: string) {
+  const cached = groupSubjectCache.get(jid);
+  if (cached) return cached;
+  let subject = "";
+  try {
+    const metadata = await currentSocket.groupMetadata(jid);
+    subject = String(metadata.subject || "").trim();
+  } catch {}
+  const value = subject || "مجموعة WhatsApp";
+  groupSubjectCache.set(jid, value);
+  return value;
+}
+
 function unwrapMessage(message: any) {
   let content = message?.message || {};
   for (let depth = 0; depth < 5; depth++) {
@@ -348,12 +406,14 @@ async function handleIncomingMessage(message: any, historySync = false) {
   if (!message?.message || (!historySync && message.key?.fromMe)) return;
   const content = unwrapMessage(message);
   const remoteJid = String(message.key?.remoteJid || "");
-  if (!remoteJid || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) return;
-  const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
-  const phoneNumber = phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
-  const externalCustomerId = phoneNumber || remoteJid;
+  if (!remoteJid || remoteJid === "status@broadcast") return;
+  const isWhatsAppGroup = isWhatsAppGroupJid(remoteJid);
   const currentSocket = socket;
-  const profilePictureUrl = currentSocket && state.status === "CONNECTED"
+  const groupSubject = isWhatsAppGroup && currentSocket ? await getWhatsAppGroupSubject(currentSocket, remoteJid) : undefined;
+  const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
+  const phoneNumber = isWhatsAppGroup ? "" : phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
+  const externalCustomerId = isWhatsAppGroup ? remoteJid : phoneNumber || remoteJid;
+  const profilePictureUrl = !isWhatsAppGroup && currentSocket && state.status === "CONNECTED"
     ? await customerProfilePicture(currentSocket, remoteJid, phoneNumber)
     : undefined;
   const audio = content.audioMessage;
@@ -402,7 +462,7 @@ async function handleIncomingMessage(message: any, historySync = false) {
     externalConversationId: remoteJid,
     externalCustomerId,
     ...(phoneNumber ? { customerPhone: phoneNumber } : {}),
-    customerName: message.pushName || undefined,
+    customerName: groupSubject || message.pushName || undefined,
     profilePictureUrl,
     text: String(text || ""),
     kind,
@@ -414,6 +474,12 @@ async function handleIncomingMessage(message: any, historySync = false) {
     metadata: {
       provider: "baileys",
       remoteJid,
+      ...(isWhatsAppGroup ? {
+        isWhatsAppGroup: true,
+        groupSubject,
+        participantJid: String(message.key?.participant || message.key?.participantAlt || "") || undefined,
+        participantName: String(message.pushName || "") || undefined
+      } : {}),
       ...(historySync ? { historySync: true } : {}),
       voiceNote: Boolean(audio?.ptt),
       mediaMimeType: mediaContentType,
@@ -557,6 +623,9 @@ async function startSocket() {
         const phoneNumber = phoneFromJid(jid) || jid.split(":")[0].split("@")[0];
         await saveState({ mode: "BAILEYS", status: "CONNECTED", qrDataUrl: "", phoneNumber, accountName: current.user?.name || "WhatsApp", lastError: "" });
         void refreshRecentCustomerProfilePictures(current).catch((error) => console.warn("WhatsApp profile-picture sync failed", error));
+        void current.groupFetchAllParticipating()
+          .then((groups) => syncWhatsAppGroups(current, groups))
+          .catch((error) => console.warn("WhatsApp group sync failed", error));
       }
       if (update.connection === "close") {
         const statusCode = (update.lastDisconnect?.error as any)?.output?.statusCode;
@@ -582,8 +651,11 @@ async function startSocket() {
   });
   current.ev.on("contacts.upsert", (contacts) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("WhatsApp contact sync failed", error)); });
   current.ev.on("contacts.update", (contacts) => { void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("WhatsApp contact update failed", error)); });
-  current.ev.on("messaging-history.set", ({ contacts, messages }) => {
+  current.ev.on("groups.upsert", (groups) => { void syncWhatsAppGroups(current, groups).catch((error) => console.warn("WhatsApp group sync failed", error)); });
+  current.ev.on("groups.update", (groups) => { void syncWhatsAppGroups(current, groups).catch((error) => console.warn("WhatsApp group update failed", error)); });
+  current.ev.on("messaging-history.set", ({ contacts, messages, chats }) => {
     void syncWhatsAppContacts(current, contacts).catch((error) => console.warn("Historical WhatsApp contact sync failed", error));
+    void syncWhatsAppGroups(current, chats || []).catch((error) => console.warn("Historical WhatsApp group sync failed", error));
     void syncWhatsAppHistory(current, messages).catch((error) => console.warn("Historical WhatsApp message sync failed", error));
   });
   current.ev.on("messages.update", (updates) => {
