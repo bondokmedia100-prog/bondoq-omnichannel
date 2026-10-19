@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, Eraser, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
@@ -129,6 +129,11 @@ export default function AgentWorkspace() {
   const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [favoriteCustomerIds, setFavoriteCustomerIds] = useState<string[]>([]);
+  const [mutedConversationIds, setMutedConversationIds] = useState<string[]>([]);
+  const [conversationLists, setConversationLists] = useState<AnyRecord[]>([]);
+  const [openConversationMenuId, setOpenConversationMenuId] = useState("");
+  const [listMenuConversationId, setListMenuConversationId] = useState("");
+  const [swipedConversationId, setSwipedConversationId] = useState("");
   const [savingCustomer, setSavingCustomer] = useState(false);
   const [savingCustomerFavorite, setSavingCustomerFavorite] = useState(false);
   const [savingCustomerFlags, setSavingCustomerFlags] = useState(false);
@@ -168,6 +173,11 @@ export default function AgentWorkspace() {
   const [handoffResponseDecision, setHandoffResponseDecision] = useState<"ACCEPT" | "DECLINE" | "">("");
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [sendingProducts, setSendingProducts] = useState(false);
+  const conversationMenuRef = useRef<HTMLDivElement | null>(null);
+  const conversationGestureRef = useRef<{ id: string; x: number; y: number; pointerType: string } | null>(null);
+  const conversationLongPressTimerRef = useRef<number | null>(null);
+  const suppressConversationClickRef = useRef(false);
+  const mutedConversationIdsRef = useRef(new Set<string>());
   const presenceRef = useRef("ONLINE");
   const sendingRef = useRef(false);
   const detailRequest = useRef(0);
@@ -183,6 +193,9 @@ export default function AgentWorkspace() {
   historyModeRef.current = statusFilter === "HISTORY";
   const teamModeRef = useRef(false);
   teamModeRef.current = statusFilter === "TEAM";
+  const archivedModeRef = useRef(false);
+  archivedModeRef.current = statusFilter === "ARCHIVED";
+  mutedConversationIdsRef.current = new Set(mutedConversationIds);
   const chatScopeRef = useRef("OWN");
   const conversationChannelFilterRef = useRef(filter);
   conversationChannelFilterRef.current = filter;
@@ -218,6 +231,7 @@ export default function AgentWorkspace() {
     if (channel !== "ALL") params.set("channel", channel);
     const groups = whatsappGroupFilterRef.current;
     if (groups !== "ALL") params.set("whatsappGroups", groups === "GROUPS" ? "1" : "0");
+    if (archivedModeRef.current) params.set("archived", "1");
     return params;
   }
   function resetChatList() {
@@ -276,9 +290,12 @@ export default function AgentWorkspace() {
   function selectStatusFilter(next: string) {
     const history = next === "HISTORY";
     const team = next === "TEAM";
+    const wasArchived = statusFilter === "ARCHIVED";
+    const archived = next === "ARCHIVED";
     const scope = team ? "TEAM" : history ? "HISTORY" : "OWN";
+    archivedModeRef.current = archived;
     setStatusFilter(next);
-    if (scope !== chatScopeRef.current || history || team) {
+    if (scope !== chatScopeRef.current || history || team || archived || wasArchived) {
       historyModeRef.current = history;
       teamModeRef.current = team;
       chatScopeRef.current = scope;
@@ -305,6 +322,7 @@ export default function AgentWorkspace() {
     whatsappGroupFilterRef.current = next;
     historyModeRef.current = false;
     teamModeRef.current = team;
+    archivedModeRef.current = false;
     setFilter("WHATSAPP");
     setWhatsappGroupFilter(next);
     setStatusFilter(team ? "TEAM" : "ALL");
@@ -331,6 +349,8 @@ export default function AgentWorkspace() {
         const queuedMessages = loadingMessagesRef.current.get(id) || [];
         loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
         setDetail({ ...conversation, messages: mergeMessages(aroundPage?.messages || conversation.messages || [], queuedMessages), hasMoreMessages: aroundPage?.hasMore ?? conversation.hasMoreMessages, hasMoreAfterMessages: Boolean(aroundPage?.hasMoreAfter), nextAfterMessageId: aroundPage?.nextAfter || null }); setHasMoreNewerMessages(Boolean(aroundPage?.hasMoreAfter)); setSavedOrder(null);
+        conversationsRef.current = conversationsRef.current.map((chat) => chat.id === id ? { ...chat, personalState: conversation.personalState, unreadCount: conversation.unreadCount } : chat);
+        setConversations(conversationsRef.current);
       }
     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
   }
@@ -488,11 +508,138 @@ export default function AgentWorkspace() {
 
   async function toggleFavorite() {
     if (!activeId) return;
-    const favorite = !favoriteIds.includes(activeId);
+    await toggleConversationFavorite(activeId);
+  }
+
+  async function toggleConversationFavorite(conversationId: string) {
+    const favorite = !favoriteIds.includes(conversationId);
     try {
-      await api(`/api/conversations/${activeId}/favorite`, { method: "PUT", body: JSON.stringify({ favorite }) });
-      setFavoriteIds((old) => favorite ? [...old, activeId] : old.filter((id) => id !== activeId));
+      await api(`/api/conversations/${conversationId}/favorite`, { method: "PUT", body: JSON.stringify({ favorite }) });
+      setFavoriteIds((old) => favorite ? [...new Set([...old, conversationId])] : old.filter((id) => id !== conversationId));
+      setOpenConversationMenuId("");
     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث المفضلة"); }
+  }
+
+  async function updatePersonalConversationSettings(conversationId: string, changes: AnyRecord, successMessage: string) {
+    try {
+      const result = await api(`/api/conversations/${conversationId}/personal-settings`, { method: "PATCH", body: JSON.stringify(changes) });
+      const removeFromCurrentView = changes.isDeleted === true || changes.isArchived === true || changes.isArchived === false && statusFilter === "ARCHIVED";
+      if (removeFromCurrentView) {
+        conversationsRef.current = conversationsRef.current.filter((chat) => chat.id !== conversationId);
+        setConversations(conversationsRef.current);
+      } else {
+        setConversations((current) => current.map((chat) => chat.id === conversationId ? { ...chat, personalState: result.personalState, unreadCount: changes.markRead ? 0 : chat.unreadCount } : chat));
+      }
+      setDetail((current: AnyRecord) => current?.id === conversationId ? { ...current, personalState: result.personalState, unreadCount: changes.markRead ? 0 : current.unreadCount } : current);
+      if (changes.isMuted !== undefined) {
+        const nextMutedIds = changes.isMuted ? [...new Set([...mutedConversationIdsRef.current, conversationId])] : [...mutedConversationIdsRef.current].filter((id) => id !== conversationId);
+        mutedConversationIdsRef.current = new Set(nextMutedIds);
+        setMutedConversationIds(nextMutedIds);
+        if (changes.isMuted) setIncomingNotice((current) => current?.conversationId === conversationId ? null : current);
+      }
+      if (changes.isDeleted && activeIdRef.current === conversationId) returnToChatList();
+      if (changes.clear && activeIdRef.current === conversationId) {
+        const refreshed = await api(`/api/conversations/${conversationId}?messageLimit=50`);
+        setDetail((current: AnyRecord) => current?.id === conversationId ? refreshed : current);
+      }
+      setOpenConversationMenuId("");
+      setListMenuConversationId("");
+      setNotice(successMessage);
+      void loadChats();
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "تعذر تحديث إعداد المحادثة");
+      return false;
+    }
+  }
+
+  async function toggleConversationBlock(chat: AnyRecord) {
+    const customerId = chat.customer?.id;
+    if (!customerId || savingCustomerFlags) return;
+    const nextValue = !chat.customer?.isBlocked;
+    if (nextValue && !window.confirm("حظر هذا العميل للجميع؟ سيُمنع إرسال الردود إليه، وستُحفظ رسائله الواردة للمراجعة الإدارية.")) return;
+    setSavingCustomerFlags(true);
+    try {
+      const customer = await api(`/api/customers/${customerId}/flags`, { method: "PATCH", body: JSON.stringify({ isBlocked: nextValue }) });
+      setConversations((current) => current.map((item) => item.customer?.id === customerId ? { ...item, customer: { ...item.customer, ...customer } } : item));
+      setDetail((current: AnyRecord) => current?.customer?.id === customerId ? { ...current, customer: { ...current.customer, ...customer } } : current);
+      setOpenConversationMenuId("");
+      setNotice(nextValue ? "حُظر العميل للجميع." : "أُلغي حظر العميل للجميع.");
+      void loadChats();
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث حالة العميل"); }
+    finally { setSavingCustomerFlags(false); }
+  }
+
+  async function showConversationLists(conversationId: string) {
+    if (listMenuConversationId === conversationId) { setListMenuConversationId(""); return; }
+    try {
+      const lists = await api<AnyRecord[]>("/api/conversation-lists");
+      setConversationLists(lists);
+      setListMenuConversationId(conversationId);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحميل قوائمك الشخصية"); }
+  }
+
+  async function addConversationToList(conversationId: string, list: AnyRecord) {
+    try {
+      await api(`/api/conversation-lists/${list.id}/conversations`, { method: "PUT", body: JSON.stringify({ conversationId }) });
+      setListMenuConversationId(""); setOpenConversationMenuId("");
+      setNotice(`أُضيفت المحادثة إلى قائمة «${list.name}» في حسابك.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذرت إضافة المحادثة إلى القائمة"); }
+  }
+
+  async function createConversationListForChat(conversationId: string) {
+    const name = window.prompt("اكتب اسم القائمة الشخصية:")?.trim();
+    if (!name) return;
+    try {
+      let list = conversationLists.find((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+      if (!list) {
+        list = await api("/api/conversation-lists", { method: "POST", body: JSON.stringify({ name }) });
+        setConversationLists((current) => [...current, list]);
+      }
+      await addConversationToList(conversationId, list);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إنشاء القائمة الشخصية"); }
+  }
+
+  function openConversationMenu(conversationId: string) {
+    setSwipedConversationId("");
+    setListMenuConversationId("");
+    setOpenConversationMenuId((current) => current === conversationId ? "" : conversationId);
+  }
+
+  function startConversationGesture(event: ReactPointerEvent<HTMLElement>, conversationId: string) {
+    if (!event.isPrimary || event.pointerType === "mouse" && event.button !== 0) return;
+    if (conversationLongPressTimerRef.current !== null) window.clearTimeout(conversationLongPressTimerRef.current);
+    const gesture = { id: conversationId, x: event.clientX, y: event.clientY, pointerType: event.pointerType };
+    conversationGestureRef.current = gesture;
+    if (event.pointerType !== "mouse") {
+      conversationLongPressTimerRef.current = window.setTimeout(() => {
+        if (conversationGestureRef.current?.id !== conversationId) return;
+        suppressConversationClickRef.current = true;
+        openConversationMenu(conversationId);
+      }, 550);
+    }
+  }
+
+  function moveConversationGesture(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = conversationGestureRef.current;
+    if (!gesture) return;
+    const dx = event.clientX - gesture.x;
+    const dy = event.clientY - gesture.y;
+    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
+      if (conversationLongPressTimerRef.current !== null) window.clearTimeout(conversationLongPressTimerRef.current);
+      conversationLongPressTimerRef.current = null;
+    }
+    if (gesture.pointerType !== "mouse" && dx < -56 && Math.abs(dx) > Math.abs(dy)) {
+      suppressConversationClickRef.current = true;
+      setSwipedConversationId(gesture.id);
+    }
+  }
+
+  function endConversationGesture() {
+    if (conversationLongPressTimerRef.current !== null) window.clearTimeout(conversationLongPressTimerRef.current);
+    conversationLongPressTimerRef.current = null;
+    conversationGestureRef.current = null;
+    if (suppressConversationClickRef.current) window.setTimeout(() => { suppressConversationClickRef.current = false; }, 350);
   }
 
   async function togglePin() {
@@ -797,9 +944,14 @@ export default function AgentWorkspace() {
     let connection: Socket | undefined;
     let current = true;
     const initialize = async () => {
-      const profile = await api("/api/auth/me");
+      const [profile, muted] = await Promise.all([
+        api("/api/auth/me"),
+        api<{ conversationIds: string[] }>("/api/me/muted-conversations").catch(() => ({ conversationIds: [] }))
+      ]);
       if (!current) return;
       if (profile.role !== "AGENT" && profile.role !== "BRANCH_USER") return router.replace("/admin/dashboard");
+      setMutedConversationIds(muted.conversationIds || []);
+      mutedConversationIdsRef.current = new Set(muted.conversationIds || []);
       setUser(profile); setPresence(profile.presence); presenceRef.current = profile.presence;
       connection = io(API_URL, { auth: { token: getToken() } }); socketRef.current = connection; setSocket(connection);
       connection.on("connect", () => {
@@ -876,7 +1028,7 @@ export default function AgentWorkspace() {
       connection.on("message:new", (event) => {
         const conversationId = event.conversationId || event.conversation?.id;
         if (event.message?.direction !== "OUTBOUND" || event.message.authorId !== user?.id) void loadChats();
-        if (event.message?.direction === "INBOUND" && conversationId) {
+        if (event.message?.direction === "INBOUND" && conversationId && !mutedConversationIdsRef.current.has(conversationId)) {
           const messageId = event.message.id;
           if (!messageId || !notifiedMessagesRef.current.has(messageId)) {
             if (messageId) {
@@ -961,6 +1113,8 @@ export default function AgentWorkspace() {
           const queuedMessages = loadingMessagesRef.current.get(id) || [];
           loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
           setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) });
+          conversationsRef.current = conversationsRef.current.map((chat) => chat.id === id ? { ...chat, personalState: conversation.personalState, unreadCount: conversation.unreadCount } : chat);
+          setConversations(conversationsRef.current);
         }
       }
     };
@@ -1111,7 +1265,11 @@ export default function AgentWorkspace() {
         (callCloseButton || topmostDialog.querySelector<HTMLButtonElement>('button[aria-label^="إغلاق"], button[aria-label^="إلغاء"], button[aria-label^="إخفاء"], button[aria-label="تصغير نافذة المكالمة"]'))?.click();
         return;
       }
-      if (showHeaderOptions) {
+      if (openConversationMenuId) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        setOpenConversationMenuId("");
+        setListMenuConversationId("");
+      } else if (showHeaderOptions) {
         event.preventDefault(); event.stopImmediatePropagation();
         setShowHeaderOptions(false);
         headerOptionsRef.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus();
@@ -1141,7 +1299,23 @@ export default function AgentWorkspace() {
     };
     document.addEventListener("keydown", handleEscape, true);
     return () => document.removeEventListener("keydown", handleEscape, true);
-  }, [showHeaderOptions, showPlusMenu, showCanned, showMobileProfile, showCustomerSidebar, returnToChatList]);
+  }, [openConversationMenuId, showHeaderOptions, showPlusMenu, showCanned, showMobileProfile, showCustomerSidebar, returnToChatList]);
+
+  useEffect(() => {
+    if (!openConversationMenuId) return;
+    const closeIfOutside = (event: Event) => {
+      if (event.target instanceof Node && !conversationMenuRef.current?.contains(event.target)) {
+        setOpenConversationMenuId("");
+        setListMenuConversationId("");
+      }
+    };
+    document.addEventListener("mousedown", closeIfOutside);
+    document.addEventListener("touchstart", closeIfOutside);
+    return () => {
+      document.removeEventListener("mousedown", closeIfOutside);
+      document.removeEventListener("touchstart", closeIfOutside);
+    };
+  }, [openConversationMenuId]);
 
   useEffect(() => {
     if (!showHeaderOptions) return;
@@ -1573,7 +1747,7 @@ export default function AgentWorkspace() {
 
   const hasGlobalSearchQuery = search.trim().length >= 2 || search.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit))).replace(/\D/g, "").length >= 3;
   const visible = conversations.filter((chat) => {
-    const statusMatches = statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
+    const statusMatches = statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ARCHIVED" ? Boolean(chat.personalState?.isArchived) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
     const groupMatches = whatsappGroupFilter === "ALL" || (whatsappGroupFilter === "GROUPS" ? isWhatsAppGroupConversation(chat) : !isWhatsAppGroupConversation(chat));
     return statusMatches && (filter === "ALL" || chat.channel === filter) && groupMatches && (!search.trim() || hasGlobalSearchQuery || `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
   });
@@ -1685,7 +1859,7 @@ export default function AgentWorkspace() {
               </div>}
             <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => selectChannelFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
             {filter === "WHATSAPP" && <div role="group" aria-label="نوع محادثة WhatsApp" className="soft-scroll -mt-1 mb-2 flex gap-1 overflow-x-auto pb-2">{[{ id: "ALL", label: "الكل" }, { id: "DIRECT", label: "الأفراد" }, { id: "GROUPS", label: "المجموعات" }].map((item) => <button key={item.id} type="button" aria-pressed={whatsappGroupFilter === item.id} onClick={() => selectWhatsAppConversationKind(item.id as "ALL" | "DIRECT" | "GROUPS")} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${whatsappGroupFilter === item.id ? "bg-emerald-700 text-white" : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100"}`}>{item.label}</button>)}</div>}
-              <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
+              <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "ARCHIVED", label: "مؤرشفة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مغلقة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
           </div>
           {chatLoadError && <div role="alert" className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-[10px] text-red-800"><span>{chatLoadError}</span><button type="button" onClick={() => void loadChats()} className="shrink-0 font-bold underline">إعادة المحاولة</button></div>}
             <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">
@@ -1702,7 +1876,24 @@ export default function AgentWorkspace() {
                 </article>)}
                 {!globalSearchLoading && !globalSearchError && !globalSearchResults.length && <p className="px-4 py-10 text-center text-xs text-stone-400">لا توجد نتائج مطابقة.</p>}
                 {globalSearchHasMore && <button type="button" onClick={() => void loadMoreGlobalSearch()} disabled={globalSearchLoading} className="m-3 w-[calc(100%-1.5rem)] rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 disabled:opacity-50">{globalSearchLoading ? "جارٍ التحميل..." : "عرض نتائج إضافية"}</button>}
-              </> : <>{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center gap-1.5"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b>{isWhatsAppGroupConversation(chat) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}</span><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</>}
+              </> : <>{visible.map((chat) => <article key={chat.id} className={`group relative border-b border-stone-100 ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`} style={{ touchAction: "pan-y" }} onPointerDown={(event) => startConversationGesture(event, chat.id)} onPointerMove={moveConversationGesture} onPointerUp={endConversationGesture} onPointerCancel={endConversationGesture} onContextMenu={(event) => { event.preventDefault(); setSwipedConversationId(""); setListMenuConversationId(""); setOpenConversationMenuId(chat.id); }}>
+                <button type="button" onClick={() => { if (suppressConversationClickRef.current) { suppressConversationClickRef.current = false; return; } setSwipedConversationId(""); void openChat(chat.id); }} className="flex w-full gap-3 px-4 py-3 text-right transition hover:bg-[#fffaf2]">
+                  <div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}{chat.personalState?.isMuted && <BellOff size={12} className="absolute -bottom-1 -right-1 rounded-full bg-white text-stone-500" />}</div>
+                  <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center gap-1.5"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b>{isWhatsAppGroupConversation(chat) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}</span><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || (chat.personalState?.clearedAt ? "محادثة ممسوحة من حسابك" : "مرفق أو رسالة")}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div>
+                </button>
+                <button type="button" aria-label={`المزيد من الخيارات لمحادثة ${customerDisplayName(chat.customer)}`} aria-haspopup="menu" aria-expanded={openConversationMenuId === chat.id} onClick={() => openConversationMenu(chat.id)} className={`absolute left-2 top-2 grid h-8 w-8 place-items-center rounded-lg bg-white/95 text-stone-500 shadow-sm ring-1 ring-stone-200 hover:bg-amber-50 hover:text-amber-800 focus-visible:opacity-100 ${swipedConversationId === chat.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}><MoreHorizontal size={17} /></button>
+                {openConversationMenuId === chat.id && <div ref={conversationMenuRef} role="menu" aria-label={`إجراءات ${customerDisplayName(chat.customer)}`} className="absolute left-2 top-2 z-30 max-h-[70vh] w-60 max-w-[calc(100%-1rem)] overflow-y-auto rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+                  <button type="button" role="menuitem" onClick={() => void updatePersonalConversationSettings(chat.id, { markRead: true }, "تم تمييز المحادثة كمقروءة في حسابك فقط.")} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-emerald-50"><CheckCheck size={16} className="shrink-0 text-emerald-700" /><span className="text-xs font-bold">تمييز كمقروءة</span></button>
+                  <button type="button" role="menuitem" onClick={() => void updatePersonalConversationSettings(chat.id, { isArchived: !chat.personalState?.isArchived }, chat.personalState?.isArchived ? "أُعيدت المحادثة إلى قائمتك النشطة." : "أُرشفت المحادثة في حسابك فقط.")} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Archive size={16} className="shrink-0 text-amber-700" /><span className="text-xs font-bold">{chat.personalState?.isArchived ? "إلغاء الأرشفة" : "أرشفة"}</span></button>
+                  <button type="button" role="menuitem" onClick={() => void updatePersonalConversationSettings(chat.id, { isMuted: !chat.personalState?.isMuted }, chat.personalState?.isMuted ? "أُلغي كتم التنبيهات في حسابك." : "كُتمت تنبيهات هذه المحادثة في حسابك.")} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><BellOff size={16} className="shrink-0 text-stone-500" /><span className="text-xs font-bold">{chat.personalState?.isMuted ? "إلغاء كتم التنبيهات" : "كتم التنبيهات"}</span></button>
+                  <button type="button" role="menuitem" onClick={() => void toggleConversationFavorite(chat.id)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Star size={16} className="shrink-0 text-amber-500" fill={favoriteIds.includes(chat.id) ? "currentColor" : "none"} /><span className="text-xs font-bold">{favoriteIds.includes(chat.id) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"}</span></button>
+                  <button type="button" role="menuitem" aria-expanded={listMenuConversationId === chat.id} onClick={() => void showConversationLists(chat.id)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-blue-50"><ListChecks size={16} className="shrink-0 text-blue-700" /><span className="text-xs font-bold">إضافة إلى قائمة</span></button>
+                  {listMenuConversationId === chat.id && <div role="group" aria-label="قوائمك الشخصية" className="my-1 space-y-1 border-y border-stone-100 py-1">{conversationLists.map((list) => <button key={list.id} type="button" role="menuitem" onClick={() => void addConversationToList(chat.id, list)} className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-right text-[11px] text-stone-600 hover:bg-blue-50"><span className="truncate">{list.name}</span><span className="shrink-0 text-[9px] text-stone-400">{list.itemCount || 0}</span></button>)}<button type="button" role="menuitem" onClick={() => void createConversationListForChat(chat.id)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-right text-[11px] font-bold text-blue-800 hover:bg-blue-50">قائمة شخصية جديدة</button></div>}
+                  <button type="button" role="menuitem" disabled={!chat.customer?.id || chat.readOnly || savingCustomerFlags} onClick={() => void toggleConversationBlock(chat)} title={chat.readOnly ? "الحظر متاح للمحادثات المسندة إليك" : undefined} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-red-700 hover:bg-red-50 disabled:opacity-50"><Ban size={16} className="shrink-0" /><span className="text-xs font-bold">{chat.customer?.isBlocked ? "إلغاء الحظر للجميع" : "حظر العميل للجميع"}</span></button>
+                  <button type="button" role="menuitem" onClick={() => { if (window.confirm("مسح سجل الدردشة من حسابك فقط؟ ستظل الرسائل محفوظة في النظام ولن تتأثر حسابات زملائك.")) void updatePersonalConversationSettings(chat.id, { clear: true }, "مُسح سجل الدردشة من حسابك فقط."); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><Eraser size={16} className="shrink-0 text-stone-500" /><span className="text-xs font-bold">مسح الدردشة من حسابي</span></button>
+                  <button type="button" role="menuitem" onClick={() => { if (window.confirm("إزالة المحادثة من قائمتك الشخصية فقط؟ سيبقى سجلها محفوظًا للزملاء ولن تُحذف رسائل النظام.")) void updatePersonalConversationSettings(chat.id, { isDeleted: true }, "أُزيلت المحادثة من قائمتك الشخصية."); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-red-700 hover:bg-red-50"><Trash2 size={16} className="shrink-0" /><span className="text-xs font-bold">حذف من قائمتي فقط</span></button>
+                </div>}
+              </article>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</>}
             </div>
         {hasMoreChats && <button type="button" onClick={() => void loadMoreChats()} disabled={loadingMoreChats} className="m-3 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">{loadingMoreChats ? "جارٍ تحميل المزيد..." : "تحميل المزيد من المحادثات"}</button>}
         <div className="space-y-2 border-t border-stone-100 px-4 py-3 text-[10px] text-stone-400"><div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متصل بالنظام</span><span className="truncate">{user?.email}</span></div><div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-2"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">واتساب</a></div></div>

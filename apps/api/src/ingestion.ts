@@ -230,6 +230,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       ...(decision.action === "MENU" || decision.action === "BYPASS" ? { firstResponseAt: null, lastAgentResponseAt: null, slaBreachedAt: null } : {})
     }
   });
+  await prisma.conversationPreference.updateMany({ where: { conversationId: conversation.id, isDeleted: true }, data: { isDeleted: false } });
   if (awaitingMenu && previousAssignedAgentId) {
     io?.to(`agent:${previousAssignedAgentId}`).emit("conversation:unassigned", conversation);
   }
@@ -343,10 +344,13 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     isActive: true,
     AND: [adminScope, { OR: [{ role: Role.ADMIN }, viewerWhere] }]
   }, select: { id: true } });
+  const mutedPreferences = await prisma.conversationPreference.findMany({ where: { conversationId: conversation.id, isMuted: true }, select: { userId: true } });
+  const mutedUserIds = new Set(mutedPreferences.map((preference) => preference.userId));
   const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.STICKER ? "ملصق" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
   const tag = `inbound-${conversation.id}`;
-  void sendPushNotification(admins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
-  if (assignedViewer) void sendPushNotification([assignedViewer.id], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
+  const unmutedAdmins = admins.filter((admin) => !mutedUserIds.has(admin.id));
+  if (unmutedAdmins.length) void sendPushNotification(unmutedAdmins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
+  if (assignedViewer && !mutedUserIds.has(assignedViewer.id)) void sendPushNotification([assignedViewer.id], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
   if (conversation.assignedAgentId) {
     await scheduleSla(conversation.id, message.id);
     await scheduleUnansweredReassignment(conversation.id, message.id, conversation.assignedAgentId);

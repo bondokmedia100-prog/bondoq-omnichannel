@@ -76,6 +76,7 @@ export default function AdminDashboard() {
   const messageListRef = useRef<HTMLDivElement>(null);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const notifiedMessagesRef = useRef(new Set<string>());
+  const mutedConversationIdsRef = useRef(new Set<string>());
   const stickToBottom = useRef(true);
 
   useEffect(() => { setSoundEnabled(isNotificationSoundEnabled()); }, []);
@@ -133,8 +134,12 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (!getToken()) return router.replace("/login");
     let connection: Socket | undefined;
-    api("/api/auth/me").then((profile) => {
+    let disposed = false;
+    api("/api/auth/me").then(async (profile) => {
       if (profile.role === "AGENT" || profile.role === "BRANCH_USER") return router.replace("/agent/workspace");
+      const muted = await api<{ conversationIds: string[] }>("/api/me/muted-conversations").catch(() => ({ conversationIds: [] }));
+      if (disposed) return;
+      mutedConversationIdsRef.current = new Set(muted.conversationIds || []);
       setUser(profile); load(profile);
       connection = io(API_URL, { auth: { token: getToken() } });
       setSocket(connection);
@@ -142,7 +147,7 @@ export default function AdminDashboard() {
       connection.on("message:new", (event) => {
         load(profile);
         const conversationId = event.conversationId || event.conversation?.id;
-        if (event.message?.direction === "INBOUND" && conversationId) {
+        if (event.message?.direction === "INBOUND" && conversationId && !mutedConversationIdsRef.current.has(conversationId)) {
           const messageId = event.message.id;
           if (!messageId || !notifiedMessagesRef.current.has(messageId)) {
             if (messageId) {
@@ -204,7 +209,7 @@ export default function AdminDashboard() {
         router.replace("/login");
       } else setError("تعذر الاتصال بالخادم. بقي تسجيل الدخول محفوظًا؛ أعد تحميل الصفحة عند عودة الاتصال.");
     });
-    return () => { connection?.disconnect(); };
+    return () => { disposed = true; connection?.disconnect(); };
   }, [router]);
 
   async function openConversation(item: AnyRecord, targetMessageId?: string) {

@@ -154,6 +154,8 @@ model User {
   whatsappCallSessions     WhatsAppCallSession[]
   favoriteConversations    ConversationFavorite[]
   pinnedConversations      ConversationPin[]
+  conversationPreferences  ConversationPreference[]
+  conversationLists        ConversationList[]
   favoriteCustomers        CustomerFavorite[]
   messageReactions         MessageReaction[]
   agentQuickReplies        AgentQuickReply[]
@@ -269,6 +271,8 @@ model Conversation {
   privateNotes           ConversationPrivateNote[]
   favorites              ConversationFavorite[]
   pins                   ConversationPin[]
+  personalPreferences    ConversationPreference[]
+  personalListMemberships ConversationListItem[]
   orderDetails           OrderDetails[]
   auditLogs              AuditLog[]
   csatSurvey             CsatSurvey?
@@ -548,6 +552,46 @@ model ConversationPin {
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([userId, conversationId])
+  @@index([conversationId, createdAt])
+}
+
+model ConversationPreference {
+  userId         String
+  conversationId String
+  isArchived     Boolean      @default(false)
+  isMuted        Boolean      @default(false)
+  isDeleted      Boolean      @default(false)
+  clearedAt      DateTime?
+  readAt         DateTime?
+  updatedAt      DateTime     @updatedAt
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@index([conversationId, isMuted])
+  @@index([userId, isArchived, isDeleted])
+}
+
+model ConversationList {
+  id        String                @id @default(cuid())
+  userId    String
+  name      String
+  createdAt DateTime              @default(now())
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     ConversationListItem[]
+
+  @@unique([userId, name])
+  @@index([userId, createdAt])
+}
+
+model ConversationListItem {
+  listId         String
+  conversationId String
+  createdAt      DateTime         @default(now())
+  list           ConversationList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([listId, conversationId])
   @@index([conversationId, createdAt])
 }
 
