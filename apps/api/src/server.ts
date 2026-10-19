@@ -1723,7 +1723,7 @@ app.post("/api/conversations/:id/handoff-response", agentGuard, async (req: Auth
     const event = { conversationId: request.conversationId, decision: "DECLINED", agentName: req.user!.name };
     io.to(`agent:${request.fromAgentId}`).emit("conversation:handoff-declined", event);
    await emitConversationEvent(request.conversationId, request.conversation.channel, "handoff:updated", event, { audience: "managers" });
-    void sendPushNotification([request.fromAgentId], { title: "رُفض طلب تحويل المحادثة", body: `رفض ${req.user!.name} استلام محادثة ${request.conversation.customer.displayName || request.conversation.customer.name || "العميل"}؛ بقيت المحادثة لديك.`, url: "/agent/workspace", tag: `handoff-declined-${request.conversationId}` }).catch((error) => console.warn("Handoff decline push notification failed", error));
+    void sendPushNotification([request.fromAgentId], { title: "رُفض طلب تحويل المحادثة", body: `رفض ${req.user!.name} استلام محادثة ${request.conversation.customer.displayName || request.conversation.customer.name || "العميل"}؛ بقيت لديك ويمكنك تحويلها لزميل آخر.`, url: "/agent/workspace", tag: `handoff-declined-${request.conversationId}` }).catch((error) => console.warn("Handoff decline push notification failed", error));
     return res.json({ status: ConversationHandoffStatus.DECLINED, conversationId: request.conversationId });
   }
 
