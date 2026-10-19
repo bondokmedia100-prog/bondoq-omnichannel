@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, rm, chmod, readdir } from "node:fs/promises";
 import path from "node:path";
-import makeWASocket, { DisconnectReason, downloadMediaMessage, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, downloadMediaMessage, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
 import { Channel, ConversationBotState, ConversationStatus, Department, MessageKind, Role } from "@prisma/client";
 import QRCode from "qrcode";
 import { prisma } from "./prisma";
@@ -606,7 +606,7 @@ async function startSocket() {
   await Promise.all(authFiles.filter((entry) => entry.isFile()).map((entry) => chmod(path.join(authDir, entry.name), 0o600)));
   await saveState({ mode: "BAILEYS", status: "CONNECTING", qrDataUrl: "", lastError: "" });
   const { state: auth, saveCreds } = await useMultiFileAuthState(authDir);
-  const current = makeWASocket({ auth, printQRInTerminal: false, syncFullHistory: true, markOnlineOnConnect: false, browser: ["Bondoq CRM", "Chrome", "1.0.0"] });
+  const current = makeWASocket({ auth, printQRInTerminal: false, syncFullHistory: true, markOnlineOnConnect: false, browser: Browsers.macOS("Desktop") });
   socket = current;
   current.ev.on("creds.update", saveCreds);
   current.ev.on("connection.update", (update) => {
