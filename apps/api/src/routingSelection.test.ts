@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canReceiveChannel, channelEligibilityWhere, chooseRoundRobinAgent, isEligibleForAutomaticAssignment, shouldReassignUnansweredConversation } from "./routingSelection";
+import { canReceiveChannel, channelEligibilityWhere, chooseLeastLoadedAgent, chooseRoundRobinAgent, isEligibleForAutomaticAssignment, shouldReassignUnansweredConversation } from "./routingSelection";
 
 test("round-robins across every online agent in order", () => {
   const agents = [{ id: "a" }, { id: "b" }, { id: "c" }];
@@ -11,6 +11,19 @@ test("round-robins across every online agent in order", () => {
 
 test("returns no assignee for an empty online pool", () => {
   assert.equal(chooseRoundRobinAgent([], 0), undefined);
+});
+
+test("assigns to the agent with the fewest active conversations", () => {
+  const agents = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const activeCounts = new Map([["a", 5], ["b", 2], ["c", 4]]);
+  assert.equal(chooseLeastLoadedAgent(agents, activeCounts, 0)?.id, "b");
+});
+
+test("round-robins only among equally least-loaded agents", () => {
+  const agents = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const activeCounts = new Map([["a", 2], ["b", 1], ["c", 1]]);
+  assert.deepEqual([0, 1, 2].map((turn) => chooseLeastLoadedAgent(agents, activeCounts, turn)?.id), ["b", "c", "b"]);
+  assert.equal(chooseLeastLoadedAgent([], activeCounts, 0), undefined);
 });
 
 test("maps supported channels to the matching agent eligibility field", () => {

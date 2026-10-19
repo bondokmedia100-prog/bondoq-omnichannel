@@ -35,6 +35,13 @@ export function chooseRoundRobinAgent<T extends { id: string }>(agents: T[], rou
   return agents[index];
 }
 
+export function chooseLeastLoadedAgent<T extends { id: string }>(agents: T[], activeCounts: ReadonlyMap<string, number>, roundRobinTurn: number): T | undefined {
+  if (!agents.length) return undefined;
+  const minimum = Math.min(...agents.map((agent) => activeCounts.get(agent.id) ?? 0));
+  const leastLoaded = agents.filter((agent) => (activeCounts.get(agent.id) ?? 0) === minimum);
+  return chooseRoundRobinAgent(leastLoaded, roundRobinTurn);
+}
+
 export function shouldReassignUnansweredConversation(conversation: {
   status: string;
   assignedAgentId: string | null;
