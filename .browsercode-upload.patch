@@ -1,0 +1,809 @@
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index a19fcc8..3436979 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -154,6 +154,8 @@ model User {
+   whatsappCallSessions     WhatsAppCallSession[]
+   favoriteConversations    ConversationFavorite[]
+   pinnedConversations      ConversationPin[]
++  conversationPreferences  ConversationPreference[]
++  conversationLists        ConversationList[]
+   favoriteCustomers        CustomerFavorite[]
+   messageReactions         MessageReaction[]
+   agentQuickReplies        AgentQuickReply[]
+@@ -269,6 +271,8 @@ model Conversation {
+   privateNotes           ConversationPrivateNote[]
+   favorites              ConversationFavorite[]
+   pins                   ConversationPin[]
++  personalPreferences    ConversationPreference[]
++  personalListMemberships ConversationListItem[]
+   orderDetails           OrderDetails[]
+   auditLogs              AuditLog[]
+   csatSurvey             CsatSurvey?
+@@ -551,6 +555,46 @@ model ConversationPin {
+   @@index([conversationId, createdAt])
+ }
+ 
++model ConversationPreference {
++  userId         String
++  conversationId String
++  isArchived     Boolean      @default(false)
++  isMuted        Boolean      @default(false)
++  isDeleted      Boolean      @default(false)
++  clearedAt      DateTime?
++  readAt         DateTime?
++  updatedAt      DateTime     @updatedAt
++  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
++  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
++
++  @@id([userId, conversationId])
++  @@index([conversationId, isMuted])
++  @@index([userId, isArchived, isDeleted])
++}
++
++model ConversationList {
++  id        String                @id @default(cuid())
++  userId    String
++  name      String
++  createdAt DateTime              @default(now())
++  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
++  items     ConversationListItem[]
++
++  @@unique([userId, name])
++  @@index([userId, createdAt])
++}
++
++model ConversationListItem {
++  listId         String
++  conversationId String
++  createdAt      DateTime         @default(now())
++  list           ConversationList @relation(fields: [listId], references: [id], onDelete: Cascade)
++  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
++
++  @@id([listId, conversationId])
++  @@index([conversationId, createdAt])
++}
++
+ model DirectoryCategory {
+   id        String           @id @default(cuid())
+   name      String           @unique
+diff --git a/apps/api/src/ingestion.ts b/apps/api/src/ingestion.ts
+index 10b29eb..9c0d33b 100644
+--- a/apps/api/src/ingestion.ts
++++ b/apps/api/src/ingestion.ts
+@@ -230,6 +230,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
+       ...(decision.action === "MENU" || decision.action === "BYPASS" ? { firstResponseAt: null, lastAgentResponseAt: null, slaBreachedAt: null } : {})
+     }
+   });
++  await prisma.conversationPreference.updateMany({ where: { conversationId: conversation.id, isDeleted: true }, data: { isDeleted: false } });
+   if (awaitingMenu && previousAssignedAgentId) {
+     io?.to(`agent:${previousAssignedAgentId}`).emit("conversation:unassigned", conversation);
+   }
+@@ -343,10 +344,13 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
+     isActive: true,
+     AND: [adminScope, { OR: [{ role: Role.ADMIN }, viewerWhere] }]
+   }, select: { id: true } });
++  const mutedPreferences = await prisma.conversationPreference.findMany({ where: { conversationId: conversation.id, isMuted: true }, select: { userId: true } });
++  const mutedUserIds = new Set(mutedPreferences.map((preference) => preference.userId));
+   const preview = inbound.text?.trim() || (inbound.kind === MessageKind.IMAGE ? "صورة مرفقة" : inbound.kind === MessageKind.STICKER ? "ملصق" : inbound.kind === MessageKind.AUDIO ? "رسالة صوتية" : inbound.kind === MessageKind.VIDEO ? "مقطع فيديو" : inbound.kind === MessageKind.FILE ? "ملف مرفق" : "رسالة واردة");
+   const tag = `inbound-${conversation.id}`;
+-  void sendPushNotification(admins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
+-  if (assignedViewer) void sendPushNotification([assignedViewer.id], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
++  const unmutedAdmins = admins.filter((admin) => !mutedUserIds.has(admin.id));
++  if (unmutedAdmins.length) void sendPushNotification(unmutedAdmins.map((admin) => admin.id), { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/admin/dashboard?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Admin push notification failed", error));
++  if (assignedViewer && !mutedUserIds.has(assignedViewer.id)) void sendPushNotification([assignedViewer.id], { title: customer.name || customer.phone || "رسالة واردة", body: preview.slice(0, 160), url: `/agent/workspace?conversation=${encodeURIComponent(conversation.id)}`, tag }).catch((error) => console.warn("Agent push notification failed", error));
+   if (conversation.assignedAgentId) {
+     await scheduleSla(conversation.id, message.id);
+     await scheduleUnansweredReassignment(conversation.id, message.id, conversation.assignedAgentId);
+diff --git a/apps/api/src/server.ts b/apps/api/src/server.ts
+index fdffe89..9c6d998 100644
+--- a/apps/api/src/server.ts
++++ b/apps/api/src/server.ts
+@@ -526,33 +526,138 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
+     ? { externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } }
+     : groupFilter === "0" ? { NOT: { externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } } } : undefined;
+   const status = typeof req.query.status === "string" ? req.query.status : undefined;
++  if (req.query.archived !== undefined && !["0", "1"].includes(String(req.query.archived))) return res.status(400).json({ error: "مرشح الأرشيف غير صالح" });
++  const archivedView = req.query.archived === "1";
+   const paginated = req.query.limit !== undefined || req.query.cursor !== undefined;
+   const cursor = req.query.cursor === undefined ? null : decodePageCursor(req.query.cursor);
+   if (req.query.cursor !== undefined && !cursor) return res.status(400).json({ error: "مؤشر صفحة المحادثات غير صالح" });
+   const limit = pageLimit(req.query.limit);
+   const conversations = await prisma.conversation.findMany({
+     where: {
+-      ...(scope.length || groupFilterWhere ? { AND: [...scope, ...(groupFilterWhere ? [groupFilterWhere] : []), ...(cursor ? [{ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] }] : [])] } : {}),
++      AND: [
++        ...scope,
++        ...(groupFilterWhere ? [groupFilterWhere] : []),
++        ...(cursor ? [{ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] }] : []),
++        archivedView
++          ? { personalPreferences: { some: { userId: actor.id, isArchived: true, isDeleted: false } } }
++          : { NOT: { personalPreferences: { some: { userId: actor.id, OR: [{ isDeleted: true }, { isArchived: true }] } } } }
++      ],
+       ...(deniedChannels.length ? { NOT: deniedChannels.map((deniedChannel) => ({ channel: deniedChannel })) } : {}),
+       ...(channel && channel !== "ALL" ? { channel: channel as Channel } : {}),
+       ...(status && status !== "ALL" ? { status: status as ConversationStatus } : {}),
+-      ...(!scope.length && cursor ? { OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] } : {})
+     },
+-    include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } },
++    include: {
++      customer: true,
++      assignedAgent: { select: { id: true, name: true, presence: true } },
++      personalPreferences: { where: { userId: actor.id } },
++      messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 }
++    },
+     orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }], take: paginated ? limit + 1 : 100
+   });
+-  if (!paginated) return res.json(conversations.map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation) })));
++  const readAtFilters = conversations.flatMap((conversation) => {
++    const readAt = conversation.personalPreferences[0]?.readAt;
++    return readAt ? [{ conversationId: conversation.id, createdAt: { gt: readAt } }] : [];
++  });
++  const inboundCounts = readAtFilters.length ? await prisma.message.groupBy({
++    by: ["conversationId"],
++    where: { direction: MessageDirection.INBOUND, OR: readAtFilters },
++    _count: { _all: true }
++  }) : [];
++  const inboundCountByConversation = new Map(inboundCounts.map((row) => [row.conversationId, row._count._all]));
++  const withPersonalState = (conversation: typeof conversations[number]) => {
++    const { personalPreferences, ...item } = conversation;
++    const personalState = personalPreferences[0] || null;
++    const messages = personalState?.clearedAt ? item.messages.filter((message) => message.createdAt > personalState.clearedAt!) : item.messages;
++    const unreadCount = personalState?.readAt ? inboundCountByConversation.get(item.id) || 0 : item.unreadCount;
++    return { ...item, messages, personalState, unreadCount, readOnly: !canWorkOnConversation(actor, item) };
++  };
++  if (!paginated) return res.json(conversations.map(withPersonalState));
+   const hasMore = conversations.length > limit;
+-  const items = conversations.slice(0, limit).map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation) }));
++  const items = conversations.slice(0, limit).map(withPersonalState);
+   res.json({ items, hasMore, nextCursor: hasMore && items.length ? encodePageCursor(items[items.length - 1].lastMessageAt, items[items.length - 1].id) : null });
+ });
+ 
++app.patch("/api/conversations/:id/personal-settings", agentGuard, async (req: AuthedRequest, res: express.Response) => {
++  const parsed = z.object({
++    isArchived: z.boolean().optional(),
++    isMuted: z.boolean().optional(),
++    isDeleted: z.boolean().optional(),
++    markRead: z.boolean().optional(),
++    clear: z.boolean().optional()
++  }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
++  if (!parsed.success) return res.status(400).json({ error: "إعدادات المحادثة غير صالحة" });
++  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
++  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
++  if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
++  const { markRead, clear, ...values } = parsed.data;
++  const data = {
++    ...values,
++    ...(markRead !== undefined ? { readAt: markRead ? new Date() : null } : {}),
++    ...(clear ? { clearedAt: new Date() } : {})
++  };
++  const personalState = await prisma.conversationPreference.upsert({
++    where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } },
++    create: { userId: req.user!.id, conversationId: conversation.id, ...data },
++    update: data
++  });
++  const action = parsed.data.isDeleted ? "CONVERSATION_HIDDEN_FOR_USER"
++    : parsed.data.isArchived ? "CONVERSATION_ARCHIVED_FOR_USER"
++      : clear ? "CONVERSATION_CLEARED_FOR_USER" : "CONVERSATION_PREFERENCE_UPDATED";
++  await audit(req.user!.id, action, conversation.id, { ...parsed.data });
++  res.json({ conversationId: conversation.id, personalState });
++});
++
++app.get("/api/me/muted-conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
++  const preferences = await prisma.conversationPreference.findMany({ where: { userId: req.user!.id, isMuted: true }, select: { conversationId: true } });
++  res.json({ conversationIds: preferences.map((preference) => preference.conversationId) });
++});
++
++app.get("/api/conversation-lists", agentGuard, async (req: AuthedRequest, res: express.Response) => {
++  const lists = await prisma.conversationList.findMany({
++    where: { userId: req.user!.id },
++    include: { _count: { select: { items: true } } },
++    orderBy: [{ createdAt: "asc" }, { name: "asc" }]
++  });
++  res.json(lists.map(({ _count, ...list }) => ({ ...list, itemCount: _count.items })));
++});
++
++app.post("/api/conversation-lists", agentGuard, async (req: AuthedRequest, res: express.Response) => {
++  const parsed = z.object({ name: z.string().trim().min(1).max(48) }).strict().safeParse(req.body);
++  if (!parsed.success) return res.status(400).json({ error: "اسم القائمة غير صالح" });
++  try {
++    const list = await prisma.conversationList.create({ data: { userId: req.user!.id, name: parsed.data.name } });
++    await audit(req.user!.id, "CONVERSATION_LIST_CREATED", undefined, { listId: list.id, name: list.name });
++    res.status(201).json({ ...list, itemCount: 0 });
++  } catch (error) {
++    if (isUniqueConstraintError(error)) return res.status(409).json({ error: "لديك قائمة بهذا الاسم بالفعل" });
++    throw error;
++  }
++});
++
++app.put("/api/conversation-lists/:id/conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
++  const parsed = z.object({ conversationId: z.string().min(1) }).strict().safeParse(req.body);
++  if (!parsed.success) return res.status(400).json({ error: "المحادثة غير صالحة" });
++  const [list, conversation] = await Promise.all([
++    prisma.conversationList.findFirst({ where: { id: req.params.id, userId: req.user!.id }, select: { id: true, name: true } }),
++    prisma.conversation.findUnique({ where: { id: parsed.data.conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } })
++  ]);
++  if (!list) return res.status(404).json({ error: "القائمة غير موجودة" });
++  if (!conversation || !await canReadConversationOrHistory(req.user!, conversation)) return res.status(404).json({ error: "المحادثة غير موجودة أو ليست ضمن صلاحياتك" });
++  await prisma.conversationListItem.upsert({
++    where: { listId_conversationId: { listId: list.id, conversationId: conversation.id } },
++    create: { listId: list.id, conversationId: conversation.id }, update: {}
++  });
++  await audit(req.user!.id, "CONVERSATION_ADDED_TO_PERSONAL_LIST", conversation.id, { listId: list.id, name: list.name });
++  res.json({ listId: list.id, conversationId: conversation.id });
++});
++
+ app.get("/api/conversations/favorites", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+   const canSeeAll = req.user!.role === Role.ADMIN || req.user!.role === Role.SUPERVISOR && hasPermission(req.user!, "canViewAllConversations");
+   const deniedChannels = inaccessibleChannels(req.user!);
+   const favorites = await prisma.conversationFavorite.findMany({
+     where: { userId: req.user!.id, AND: [
+       ...(!canSeeAll ? [{ conversation: { is: { assignedAgentId: req.user!.id } } }] : []),
++      { conversation: { is: { personalPreferences: { none: { userId: req.user!.id, isDeleted: true } } } } },
+       ...(deniedChannels.length ? [{ conversation: { is: { channel: { notIn: deniedChannels } } } }] : [])
+     ] },
+     include: { conversation: { include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: { createdAt: "desc" }, take: 1 } } } },
+@@ -567,6 +672,7 @@ app.get("/api/conversations/pins", agentGuard, async (req: AuthedRequest, res: e
+   const pins = await prisma.conversationPin.findMany({
+     where: { userId: req.user!.id, AND: [
+       ...(!canSeeAll ? [{ conversation: { is: { assignedAgentId: req.user!.id } } }] : []),
++      { conversation: { is: { personalPreferences: { none: { userId: req.user!.id, isDeleted: true } } } } },
+       ...(deniedChannels.length ? [{ conversation: { is: { channel: { notIn: deniedChannels } } } }] : [])
+     ] },
+     include: { conversation: { include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } },
+@@ -611,7 +717,9 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
+     if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+     if (deniedChannels.includes(conversation.channel)) return res.status(403).json({ error: "لا تملك صلاحية البحث في قناة هذه المحادثة" });
+     if (!await canReadConversationOrHistory(actor, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+-    const where = { conversationId, ...messageMatch };
++    const personalState = await prisma.conversationPreference.findUnique({ where: { userId_conversationId: { userId: actor.id, conversationId } }, select: { isDeleted: true, clearedAt: true } });
++    if (personalState?.isDeleted) return res.status(404).json({ error: "المحادثة غير موجودة في قائمتك الشخصية" });
++    const where = { conversationId, ...(personalState?.clearedAt ? { createdAt: { gt: personalState.clearedAt } } : {}), ...messageMatch };
+     const [items, total] = await Promise.all([
+       prisma.message.findMany({ where, select: { id: true, text: true, transcription: true, kind: true, direction: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: offsetValue, take: 50 }),
+       prisma.message.count({ where })
+@@ -647,18 +755,38 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
+     : status === "WAITING" ? { status: { in: [ConversationStatus.PENDING, ConversationStatus.QUEUED] } }
+       : status === "DONE" ? { status: { in: [ConversationStatus.RESOLVED, ConversationStatus.CLOSED] } }
+         : Object.values(ConversationStatus).includes(status as ConversationStatus) ? { status: status as ConversationStatus } : {};
++  const clearedPreferences = await prisma.conversationPreference.findMany({
++    where: { userId: actor.id, isDeleted: false, clearedAt: { not: null } },
++    select: { conversationId: true, clearedAt: true }
++  });
++  const visibleMessageMatch: Prisma.ConversationWhereInput = { OR: [
++    {
++      AND: [
++        { OR: [
++          { personalPreferences: { none: { userId: actor.id } } },
++          { personalPreferences: { some: { userId: actor.id, isDeleted: false, clearedAt: null } } }
++        ] },
++        { messages: { some: messageMatch } }
++      ]
++    },
++    ...clearedPreferences.map((preference) => ({
++      id: preference.conversationId,
++      messages: { some: { AND: [messageMatch, { createdAt: { gt: preference.clearedAt! } }] } }
++    }))
++  ] };
+   const where: Prisma.ConversationWhereInput = {
+     AND: [
+       ...scope,
+       ...(deniedChannels.length ? [{ NOT: { channel: { in: deniedChannels } } }] : []),
+       ...(groupFilterWhere ? [groupFilterWhere] : []),
++      { NOT: { personalPreferences: { some: { userId: actor.id, isDeleted: true } } } },
+       statusFilter,
+       ...(channel ? [{ channel }] : []),
+       ...(req.query.favorite === "1" ? [{ favorites: { some: { userId: actor.id } } }] : []),
+       ...(req.query.pinned === "1" ? [{ pins: { some: { userId: actor.id } } }] : []),
+       { OR: [
+         { customer: { is: { OR: customerMatches } } },
+-        { messages: { some: messageMatch } }
++        visibleMessageMatch
+       ] }
+     ]
+   };
+@@ -667,12 +795,18 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
+     include: {
+       customer: { select: { id: true, name: true, displayName: true, phone: true, avatarUrl: true, isBlocked: true } },
+       assignedAgent: { select: { id: true, name: true } },
++      personalPreferences: { where: { userId: actor.id } },
+       messages: { where: messageMatch, select: { id: true, text: true, transcription: true, kind: true, direction: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 3 }
+     },
+     orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }], skip: offsetValue, take: 51
+   });
+   const hasMore = rows.length > 50;
+-  const items = rows.slice(0, 50).map((conversation) => ({ ...conversation, readOnly: !canWorkOnConversation(actor, conversation), matchType: conversation.messages.length ? "MESSAGE" : "CUSTOMER" }));
++  const items = rows.slice(0, 50).map((conversation) => {
++    const { personalPreferences, ...item } = conversation;
++    const personalState = personalPreferences[0] || null;
++    const messages = personalState?.clearedAt ? item.messages.filter((message) => message.createdAt > personalState.clearedAt!) : item.messages;
++    return { ...item, messages, personalState, readOnly: !canWorkOnConversation(actor, item), matchType: messages.length ? "MESSAGE" : "CUSTOMER" };
++  });
+   res.json({ items, hasMore, nextOffset: offsetValue + items.length });
+ });
+ 
+@@ -709,9 +843,14 @@ app.put("/api/conversations/:id/pin", agentGuard, async (req: AuthedRequest, res
+ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+   const messageLimit = req.query.messageLimit === undefined ? null : pageLimit(req.query.messageLimit);
+   const canViewAllPrivateNotes = canViewAllPrivateConversationNotes(req.user!);
++  const existingPersonalState = await prisma.conversationPreference.findUnique({
++    where: { userId_conversationId: { userId: req.user!.id, conversationId: req.params.id } },
++    select: { isArchived: true, isMuted: true, isDeleted: true, clearedAt: true, readAt: true }
++  });
++  if (existingPersonalState?.isDeleted) return res.status(404).json({ error: "المحادثة غير موجودة في قائمتك الشخصية" });
+   let conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, include: {
+     customer: { include: { orders: { orderBy: { createdAt: "desc" }, take: 10 }, tags: { include: { tag: true } } } }, assignedAgent: { select: { id: true, name: true } },
+-    messages: { include: { author: { select: { id: true, name: true } }, mediaAsset: { select: { fileName: true, contentType: true, size: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: messageLimit ? messageLimit + 1 : 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "desc" }, take: 100 }, internalNotes: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" }, take: 100 },
++    messages: { ...(existingPersonalState?.clearedAt ? { where: { createdAt: { gt: existingPersonalState.clearedAt } } } : {}), include: { author: { select: { id: true, name: true } }, mediaAsset: { select: { fileName: true, contentType: true, size: true } }, quotedMessage: { select: { id: true, text: true, kind: true, createdAt: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: messageLimit ? messageLimit + 1 : 200 }, whisperNotes: { include: { author: { select: { name: true } } }, orderBy: { createdAt: "desc" }, take: 100 }, internalNotes: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" }, take: 100 },
+     privateNotes: { ...(canViewAllPrivateNotes ? {} : { where: { OR: [{ authorId: req.user!.id }, { recipientId: req.user!.id }] } }), include: { author: { select: { id: true, name: true } }, recipient: { select: { id: true, name: true } } }, orderBy: { createdAt: "desc" }, take: 100 },
+     whatsappCallSessions: { orderBy: { createdAt: "desc" }, take: 50, select: { id: true, direction: true, transport: true, status: true, createdAt: true, endedAt: true, recording: { select: { durationSeconds: true } } } }
+   } });
+@@ -721,6 +860,7 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
+   conversation.privateNotes = conversation.privateNotes.filter((note) => canViewPrivateConversationNote(req.user!, note));
+   if (!canReadConversation(req.user!, conversation)) conversation.whisperNotes = [];
+   if (readOnly) conversation.customer.orders = conversation.customer.orders.filter((order) => order.conversationId === conversation!.id);
++  if (existingPersonalState?.clearedAt) conversation.messages = conversation.messages.map((message) => message.quotedMessage && message.quotedMessage.createdAt <= existingPersonalState.clearedAt! ? { ...message, quotedMessage: null } : message);
+   const openedConversation = conversation;
+   if ((req.user!.role === Role.AGENT || req.user!.role === Role.BRANCH_USER) && openedConversation.assignedAgentId === req.user!.id && openedConversation.serviceTag && openedConversation.serviceTag !== "تواصل مباشر") {
+     try {
+@@ -774,7 +914,11 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
+     const receivedAt = await lastInboundAt(conversation.id);
+     if (receivedAt) conversation = { ...conversation, lastInboundAt: receivedAt };
+   }
+-  if (!readOnly) await prisma.conversation.update({ where: { id: conversation.id }, data: { unreadCount: 0 } });
++  const personalState = !readOnly ? await prisma.conversationPreference.upsert({
++    where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } },
++    create: { userId: req.user!.id, conversationId: conversation.id, readAt: new Date() },
++    update: { readAt: new Date() }
++  }) : existingPersonalState;
+   await audit(req.user!.id, "CONVERSATION_OPENED", conversation.id);
+   const hasMoreMessages = Boolean(messageLimit && conversation.messages.length > messageLimit);
+   if (hasMoreMessages) conversation.messages.pop();
+@@ -783,7 +927,8 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
+   conversation.internalNotes.reverse();
+   conversation.privateNotes.reverse();
+   if (!readOnly) void markBaileysMessagesRead(conversation.messages.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
+-  res.json(messageLimit ? { ...conversation, hasMoreMessages, readOnly, canSendPrivateNote: !readOnly } : { ...conversation, readOnly, canSendPrivateNote: !readOnly });
++  const response = { ...conversation, personalState, ...(!readOnly ? { unreadCount: 0 } : {}), readOnly, canSendPrivateNote: !readOnly };
++  res.json(messageLimit ? { ...response, hasMoreMessages } : response);
+ });
+ 
+ app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest, res: express.Response) => {
+@@ -812,23 +957,26 @@ app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest
+   const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
+   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
++  const personalState = await prisma.conversationPreference.findUnique({ where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } }, select: { isDeleted: true, clearedAt: true } });
++  if (personalState?.isDeleted) return res.status(404).json({ error: "المحادثة غير موجودة في قائمتك الشخصية" });
+   const limit = pageLimit(req.query.limit);
+   let before: { createdAt: Date; id: string } | null = null;
+   if (req.query.before !== undefined) {
+     if (typeof req.query.before !== "string" || req.query.before.length > 128) return res.status(400).json({ error: "مؤشر الرسائل غير صالح" });
+-    before = await prisma.message.findFirst({ where: { id: req.query.before, conversationId: conversation.id }, select: { createdAt: true, id: true } });
++    before = await prisma.message.findFirst({ where: { id: req.query.before, conversationId: conversation.id, ...(personalState?.clearedAt ? { createdAt: { gt: personalState.clearedAt } } : {}) }, select: { createdAt: true, id: true } });
+     if (!before) return res.status(400).json({ error: "مؤشر الرسائل غير صالح لهذه المحادثة" });
+   }
+   const messages = await prisma.message.findMany({
+     where: {
+       conversationId: conversation.id,
++      ...(personalState?.clearedAt ? { createdAt: { gt: personalState.clearedAt } } : {}),
+       ...(before ? { OR: [{ createdAt: { lt: before.createdAt } }, { createdAt: before.createdAt, id: { lt: before.id } }] } : {})
+     },
+-    include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } },
++    include: { author: { select: { id: true, name: true } }, quotedMessage: { select: { id: true, text: true, kind: true, createdAt: true, author: { select: { name: true } } } }, reactions: { include: { user: { select: { id: true, name: true } } } } },
+     orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: limit + 1
+   });
+   const hasMore = messages.length > limit;
+-  const page = messages.slice(0, limit).reverse();
++  const page = messages.slice(0, limit).reverse().map((message) => personalState?.clearedAt && message.quotedMessage && message.quotedMessage.createdAt <= personalState.clearedAt ? { ...message, quotedMessage: null } : message);
+   if (canWorkOnConversation(req.user!, conversation)) void markBaileysMessagesRead(page.filter((message) => message.direction === MessageDirection.INBOUND).map((message) => message.externalId || "")).catch((error) => console.warn("WhatsApp read receipt failed", error));
+   res.json({ messages: page, hasMore, nextBefore: hasMore && page.length ? page[0].id : null });
+ });
+@@ -866,10 +1014,15 @@ app.get("/api/contacts/phone-search", agentGuard, async (req: AuthedRequest, res
+   catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "أدخل رقمًا دوليًا صحيحًا" }); }
+   const customers = await customersMatchingPhone(phone);
+   const candidates = await conversationsMatchingPhone(phone, customers.map((customer) => customer.id));
+-  const conversations = [];
++  const personalPreferences = await prisma.conversationPreference.findMany({ where: { userId: req.user!.id, conversationId: { in: candidates.map((conversation) => conversation.id) } } });
++  const preferenceById = new Map(personalPreferences.map((preference) => [preference.conversationId, preference]));
++  const conversations: any[] = [];
+   for (const conversation of candidates) {
+     if (await canReadConversationOrHistory(req.user!, conversation)) {
+-      conversations.push({ ...conversation, readOnly: !canWorkOnConversation(req.user!, conversation) });
++      const personalState = preferenceById.get(conversation.id) || null;
++      if (personalState?.isDeleted) continue;
++      const messages = personalState?.clearedAt ? conversation.messages.filter((message) => message.createdAt > personalState.clearedAt!) : conversation.messages;
++      conversations.push({ ...conversation, messages, personalState, readOnly: !canWorkOnConversation(req.user!, conversation) });
+     }
+   }
+   res.json({ phone, customer: conversations[0]?.customer || customers[0] || null, conversations });
+diff --git a/apps/web/components/AdminDashboard.tsx b/apps/web/components/AdminDashboard.tsx
+index 9062cdc..0aabefb 100644
+--- a/apps/web/components/AdminDashboard.tsx
++++ b/apps/web/components/AdminDashboard.tsx
+@@ -76,6 +76,7 @@ export default function AdminDashboard() {
+   const messageListRef = useRef<HTMLDivElement>(null);
+   const messageEndRef = useRef<HTMLDivElement>(null);
+   const notifiedMessagesRef = useRef(new Set<string>());
++  const mutedConversationIdsRef = useRef(new Set<string>());
+   const stickToBottom = useRef(true);
+ 
+   useEffect(() => { setSoundEnabled(isNotificationSoundEnabled()); }, []);
+@@ -133,8 +134,12 @@ export default function AdminDashboard() {
+   useEffect(() => {
+     if (!getToken()) return router.replace("/login");
+     let connection: Socket | undefined;
+-    api("/api/auth/me").then((profile) => {
++    let disposed = false;
++    api("/api/auth/me").then(async (profile) => {
+       if (profile.role === "AGENT" || profile.role === "BRANCH_USER") return router.replace("/agent/workspace");
++      const muted = await api<{ conversationIds: string[] }>("/api/me/muted-conversations").catch(() => ({ conversationIds: [] }));
++      if (disposed) return;
++      mutedConversationIdsRef.current = new Set(muted.conversationIds || []);
+       setUser(profile); load(profile);
+       connection = io(API_URL, { auth: { token: getToken() } });
+       setSocket(connection);
+@@ -142,7 +147,7 @@ export default function AdminDashboard() {
+       connection.on("message:new", (event) => {
+         load(profile);
+         const conversationId = event.conversationId || event.conversation?.id;
+-        if (event.message?.direction === "INBOUND" && conversationId) {
++        if (event.message?.direction === "INBOUND" && conversationId && !mutedConversationIdsRef.current.has(conversationId)) {
+           const messageId = event.message.id;
+           if (!messageId || !notifiedMessagesRef.current.has(messageId)) {
+             if (messageId) {
+@@ -204,7 +209,7 @@ export default function AdminDashboard() {
+         router.replace("/login");
+       } else setError("تعذر الاتصال بالخادم. بقي تسجيل الدخول محفوظًا؛ أعد تحميل الصفحة عند عودة الاتصال.");
+     });
+-    return () => { connection?.disconnect(); };
++    return () => { disposed = true; connection?.disconnect(); };
+   }, [router]);
+ 
+   async function openConversation(item: AnyRecord, targetMessageId?: string) {
+diff --git a/apps/web/components/AgentWorkspace.tsx b/apps/web/components/AgentWorkspace.tsx
+index 62c92c6..44ad0d2 100644
+--- a/apps/web/components/AgentWorkspace.tsx
++++ b/apps/web/components/AgentWorkspace.tsx
+@@ -3,7 +3,7 @@
+ import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
+ import { useRouter } from "next/navigation";
+ import { io, type Socket } from "socket.io-client";
+-import { ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
++import { Archive, ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, Eraser, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
+ import { API_URL, ApiError, api, getToken } from "@/lib/api";
+ import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
+ import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
+@@ -129,6 +129,11 @@ export default function AgentWorkspace() {
+   const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
+   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+   const [favoriteCustomerIds, setFavoriteCustomerIds] = useState<string[]>([]);
++  const [mutedConversationIds, setMutedConversationIds] = useState<string[]>([]);
++  const [conversationLists, setConversationLists] = useState<AnyRecord[]>([]);
++  const [openConversationMenuId, setOpenConversationMenuId] = useState("");
++  const [listMenuConversationId, setListMenuConversationId] = useState("");
++  const [swipedConversationId, setSwipedConversationId] = useState("");
+   const [savingCustomer, setSavingCustomer] = useState(false);
+   const [savingCustomerFavorite, setSavingCustomerFavorite] = useState(false);
+   const [savingCustomerFlags, setSavingCustomerFlags] = useState(false);
+@@ -168,6 +173,11 @@ export default function AgentWorkspace() {
+   const [handoffResponseDecision, setHandoffResponseDecision] = useState<"ACCEPT" | "DECLINE" | "">("");
+   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+   const [sendingProducts, setSendingProducts] = useState(false);
++  const conversationMenuRef = useRef<HTMLDivElement | null>(null);
++  const conversationGestureRef = useRef<{ id: string; x: number; y: number; pointerType: string } | null>(null);
++  const conversationLongPressTimerRef = useRef<number | null>(null);
++  const suppressConversationClickRef = useRef(false);
++  const mutedConversationIdsRef = useRef(new Set<string>());
+   const presenceRef = useRef("ONLINE");
+   const sendingRef = useRef(false);
+   const detailRequest = useRef(0);
+@@ -183,6 +193,9 @@ export default function AgentWorkspace() {
+   historyModeRef.current = statusFilter === "HISTORY";
+   const teamModeRef = useRef(false);
+   teamModeRef.current = statusFilter === "TEAM";
++  const archivedModeRef = useRef(false);
++  archivedModeRef.current = statusFilter === "ARCHIVED";
++  mutedConversationIdsRef.current = new Set(mutedConversationIds);
+   const chatScopeRef = useRef("OWN");
+   const conversationChannelFilterRef = useRef(filter);
+   conversationChannelFilterRef.current = filter;
+@@ -218,6 +231,7 @@ export default function AgentWorkspace() {
+     if (channel !== "ALL") params.set("channel", channel);
+     const groups = whatsappGroupFilterRef.current;
+     if (groups !== "ALL") params.set("whatsappGroups", groups === "GROUPS" ? "1" : "0");
++    if (archivedModeRef.current) params.set("archived", "1");
+     return params;
+   }
+   function resetChatList() {
+@@ -276,9 +290,12 @@ export default function AgentWorkspace() {
+   function selectStatusFilter(next: string) {
+     const history = next === "HISTORY";
+     const team = next === "TEAM";
++    const wasArchived = statusFilter === "ARCHIVED";
++    const archived = next === "ARCHIVED";
+     const scope = team ? "TEAM" : history ? "HISTORY" : "OWN";
++    archivedModeRef.current = archived;
+     setStatusFilter(next);
+-    if (scope !== chatScopeRef.current || history || team) {
++    if (scope !== chatScopeRef.current || history || team || archived || wasArchived) {
+       historyModeRef.current = history;
+       teamModeRef.current = team;
+       chatScopeRef.current = scope;
+@@ -305,6 +322,7 @@ export default function AgentWorkspace() {
+     whatsappGroupFilterRef.current = next;
+     historyModeRef.current = false;
+     teamModeRef.current = team;
++    archivedModeRef.current = false;
+     setFilter("WHATSAPP");
+     setWhatsappGroupFilter(next);
+     setStatusFilter(team ? "TEAM" : "ALL");
+@@ -331,6 +349,8 @@ export default function AgentWorkspace() {
+         const queuedMessages = loadingMessagesRef.current.get(id) || [];
+         loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
+         setDetail({ ...conversation, messages: mergeMessages(aroundPage?.messages || conversation.messages || [], queuedMessages), hasMoreMessages: aroundPage?.hasMore ?? conversation.hasMoreMessages, hasMoreAfterMessages: Boolean(aroundPage?.hasMoreAfter), nextAfterMessageId: aroundPage?.nextAfter || null }); setHasMoreNewerMessages(Boolean(aroundPage?.hasMoreAfter)); setSavedOrder(null);
++        conversationsRef.current = conversationsRef.current.map((chat) => chat.id === id ? { ...chat, personalState: conversation.personalState, unreadCount: conversation.unreadCount } : chat);
++        setConversations(conversationsRef.current);
+       }
+     } catch (error) { if (request === detailRequest.current) { detailLoadingIdRef.current = ""; setNotice(error instanceof Error ? error.message : "تعذر فتح المحادثة"); } }
+   }
+@@ -488,13 +508,140 @@ export default function AgentWorkspace() {
+ 
+   async function toggleFavorite() {
+     if (!activeId) return;
+-    const favorite = !favoriteIds.includes(activeId);
++    await toggleConversationFavorite(activeId);
++  }
++
++  async function toggleConversationFavorite(conversationId: string) {
++    const favorite = !favoriteIds.includes(conversationId);
+     try {
+-      await api(`/api/conversations/${activeId}/favorite`, { method: "PUT", body: JSON.stringify({ favorite }) });
+-      setFavoriteIds((old) => favorite ? [...old, activeId] : old.filter((id) => id !== activeId));
++      await api(`/api/conversations/${conversationId}/favorite`, { method: "PUT", body: JSON.stringify({ favorite }) });
++      setFavoriteIds((old) => favorite ? [...new Set([...old, conversationId])] : old.filter((id) => id !== conversationId));
++      setOpenConversationMenuId("");
+     } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث المفضلة"); }
+   }
+ 
++  async function updatePersonalConversationSettings(conversationId: string, changes: AnyRecord, successMessage: string) {
++    try {
++      const result = await api(`/api/conversations/${conversationId}/personal-settings`, { method: "PATCH", body: JSON.stringify(changes) });
++      const removeFromCurrentView = changes.isDeleted === true || changes.isArchived === true || changes.isArchived === false && statusFilter === "ARCHIVED";
++      if (removeFromCurrentView) {
++        conversationsRef.current = conversationsRef.current.filter((chat) => chat.id !== conversationId);
++        setConversations(conversationsRef.current);
++      } else {
++        setConversations((current) => current.map((chat) => chat.id === conversationId ? { ...chat, personalState: result.personalState, unreadCount: changes.markRead ? 0 : chat.unreadCount } : chat));
++      }
++      setDetail((current: AnyRecord) => current?.id === conversationId ? { ...current, personalState: result.personalState, unreadCount: changes.markRead ? 0 : current.unreadCount } : current);
++      if (changes.isMuted !== undefined) {
++        const nextMutedIds = changes.isMuted ? [...new Set([...mutedConversationIdsRef.current, conversationId])] : [...mutedConversationIdsRef.current].filter((id) => id !== conversationId);
++        mutedConversationIdsRef.current = new Set(nextMutedIds);
++        setMutedConversationIds(nextMutedIds);
++        if (changes.isMuted) setIncomingNotice((current) => current?.conversationId === conversationId ? null : current);
++      }
++      if (changes.isDeleted && activeIdRef.current === conversationId) returnToChatList();
++      if (changes.clear && activeIdRef.current === conversationId) {
++        const refreshed = await api(`/api/conversations/${conversationId}?messageLimit=50`);
++        setDetail((current: AnyRecord) => current?.id === conversationId ? refreshed : current);
++      }
++      setOpenConversationMenuId("");
++      setListMenuConversationId("");
++      setNotice(successMessage);
++      void loadChats();
++      return true;
++    } catch (error) {
++      setNotice(error instanceof Error ? error.message : "تعذر تحديث إعداد المحادثة");
++      return false;
++    }
++  }
++
++  async function toggleConversationBlock(chat: AnyRecord) {
++    const customerId = chat.customer?.id;
++    if (!customerId || savingCustomerFlags) return;
++    const nextValue = !chat.customer?.isBlocked;
++    if (nextValue && !window.confirm("حظر هذا العميل للجميع؟ سيُمنع إرسال الردود إليه، وستُحفظ رسائله الواردة للمراجعة الإدارية.")) return;
++    setSavingCustomerFlags(true);
++    try {
++      const customer = await api(`/api/customers/${customerId}/flags`, { method: "PATCH", body: JSON.stringify({ isBlocked: nextValue }) });
++      setConversations((current) => current.map((item) => item.customer?.id === customerId ? { ...item, customer: { ...item.customer, ...customer } } : item));
++      setDetail((current: AnyRecord) => current?.customer?.id === customerId ? { ...current, customer: { ...current.customer, ...customer } } : current);
++      setOpenConversationMenuId("");
++      setNotice(nextValue ? "حُظر العميل للجميع." : "أُلغي حظر العميل للجميع.");
++      void loadChats();
++    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحديث حالة العميل"); }
++    finally { setSavingCustomerFlags(false); }
++  }
++
++  async function showConversationLists(conversationId: string) {
++    if (listMenuConversationId === conversationId) { setListMenuConversationId(""); return; }
++    try {
++      const lists = await api<AnyRecord[]>("/api/conversation-lists");
++      setConversationLists(lists);
++      setListMenuConversationId(conversationId);
++    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر تحميل قوائمك الشخصية"); }
++  }
++
++  async function addConversationToList(conversationId: string, list: AnyRecord) {
++    try {
++      await api(`/api/conversation-lists/${list.id}/conversations`, { method: "PUT", body: JSON.stringify({ conversationId }) });
++      setListMenuConversationId(""); setOpenConversationMenuId("");
++      setNotice(`أُضيفت المحادثة إلى قائمة «${list.name}» في حسابك.`);
++    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذرت إضافة المحادثة إلى القائمة"); }
++  }
++
++  async function createConversationListForChat(conversationId: string) {
++    const name = window.prompt("اكتب اسم القائمة الشخصية:")?.trim();
++    if (!name) return;
++    try {
++      let list = conversationLists.find((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
++      if (!list) {
++        list = await api("/api/conversation-lists", { method: "POST", body: JSON.stringify({ name }) });
++        setConversationLists((current) => [...current, list]);
++      }
++      await addConversationToList(conversationId, list);
++    } catch (error) { setNotice(error instanceof Error ? error.message : "تعذر إنشاء القائمة الشخصية"); }
++  }
++
++  function openConversationMenu(conversationId: string) {
++    setSwipedConversationId("");
++    setListMenuConversationId("");
++    setOpenConversationMenuId((current) => current === conversationId ? "" : conversationId);
++  }
++
++  function startConversationGesture(event: ReactPointerEvent<HTMLElement>, conversationId: string) {
++    if (!event.isPrimary || event.pointerType === "mouse" && event.button !== 0) return;
++    if (conversationLongPressTimerRef.current !== null) window.clearTimeout(conversationLongPressTimerRef.current);
++    const gesture = { id: conversationId, x: event.clientX, y: event.clientY, pointerType: event.pointerType };
++    conversationGestureRef.current = gesture;
++    if (event.pointerType !== "mouse") {
++      conversationLongPressTimerRef.current = window.setTimeout(() => {
++        if (conversationGestureRef.current?.id !== conversationId) return;
++        suppressConversationClickRef.current = true;
++        openConversationMenu(conversationId);
++      }, 550);
++    }
++  }
++
++  function moveConversationGesture(event: ReactPointerEvent<HTMLElement>) {
++    const gesture = conversationGestureRef.current;
++    if (!gesture) return;
++    const dx = event.clientX - gesture.x;
++    const dy = event.clientY - gesture.y;
++    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
++      if (conversationLongPressTimerRef.current !== null) window.clearTimeout(conversationLongPressTimerRef.current);
++      conversationLongPressTimerRef.current = null;
++    }
++    if (gesture.pointerType !== "mouse" && dx < -56 && Math.abs(dx) > Math.abs(dy)) {
++      suppressConversationClickRef.current = true;
++      setSwipedConversationId(gesture.id);
++    }
++  }
++
++  function endConversationGesture() {
++    if (conversationLongPressTimerRef.current !== null) window.clearTimeout(conversationLongPressTimerRef.current);
++    conversationLongPressTimerRef.current = null;
++    conversationGestureRef.current = null;
++    if (suppressConversationClickRef.current) window.setTimeout(() => { suppressConversationClickRef.current = false; }, 350);
++  }
++
+   async function togglePin() {
+     if (!activeId) return;
+     const pinned = !pinnedIds.includes(activeId);
+@@ -797,9 +944,14 @@ export default function AgentWorkspace() {
+     let connection: Socket | undefined;
+     let current = true;
+     const initialize = async () => {
+-      const profile = await api("/api/auth/me");
++      const [profile, muted] = await Promise.all([
++        api("/api/auth/me"),
++        api<{ conversationIds: string[] }>("/api/me/muted-conversations").catch(() => ({ conversationIds: [] }))
++      ]);
+       if (!current) return;
+       if (profile.role !== "AGENT" && profile.role !== "BRANCH_USER") return router.replace("/admin/dashboard");
++      setMutedConversationIds(muted.conversationIds || []);
++      mutedConversationIdsRef.current = new Set(muted.conversationIds || []);
+       setUser(profile); setPresence(profile.presence); presenceRef.current = profile.presence;
+       connection = io(API_URL, { auth: { token: getToken() } }); socketRef.current = connection; setSocket(connection);
+       connection.on("connect", () => {
+@@ -876,7 +1028,7 @@ export default function AgentWorkspace() {
+       connection.on("message:new", (event) => {
+         const conversationId = event.conversationId || event.conversation?.id;
+         if (event.message?.direction !== "OUTBOUND" || event.message.authorId !== user?.id) void loadChats();
+-        if (event.message?.direction === "INBOUND" && conversationId) {
++        if (event.message?.direction === "INBOUND" && conversationId && !mutedConversationIdsRef.current.has(conversationId)) {
+           const messageId = event.message.id;
+           if (!messageId || !notifiedMessagesRef.current.has(messageId)) {
+             if (messageId) {
+@@ -961,6 +1113,8 @@ export default function AgentWorkspace() {
+           const queuedMessages = loadingMessagesRef.current.get(id) || [];
+           loadingMessagesRef.current.delete(id); detailLoadingIdRef.current = "";
+           setDetail({ ...conversation, messages: mergeMessages(conversation.messages || [], queuedMessages) });
++          conversationsRef.current = conversationsRef.current.map((chat) => chat.id === id ? { ...chat, personalState: conversation.personalState, unreadCount: conversation.unreadCount } : chat);
++          setConversations(conversationsRef.current);
+         }
+       }
+     };
+@@ -1111,7 +1265,11 @@ export default function AgentWorkspace() {
+         (callCloseButton || topmostDialog.querySelector<HTMLButtonElement>('button[aria-label^="إغلاق"], button[aria-label^="إلغاء"], button[aria-label^="إخفاء"], button[aria-label="تصغير نافذة المكالمة"]'))?.click();
+         return;
+       }
+-      if (showHeaderOptions) {
++      if (openConversationMenuId) {
++        event.preventDefault(); event.stopImmediatePropagation();
++        setOpenConversationMenuId("");
++        setListMenuConversationId("");
++      } else if (showHeaderOptions) {
+         event.preventDefault(); event.stopImmediatePropagation();
+         setShowHeaderOptions(false);
+         headerOptionsRef.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus();
+@@ -1141,7 +1299,23 @@ export default function AgentWorkspace() {
+     };
+     document.addEventListener("keydown", handleEscape, true);
+     return () => document.removeEventListener("keydown", handleEscape, true);
+-  }, [showHeaderOptions, showPlusMenu, showCanned, showMobileProfile, showCustomerSidebar, returnToChatList]);
++  }, [openConversationMenuId, showHeaderOptions, showPlusMenu, showCanned, showMobileProfile, showCustomerSidebar, returnToChatList]);
++
++  useEffect(() => {
++    if (!openConversationMenuId) return;
++    const closeIfOutside = (event: Event) => {
++      if (event.target instanceof Node && !conversationMenuRef.current?.contains(event.target)) {
++        setOpenConversationMenuId("");
++        setListMenuConversationId("");
++      }
++    };
++    document.addEventListener("mousedown", closeIfOutside);
++    document.addEventListener("touchstart", closeIfOutside);
++    return () => {
++      document.removeEventListener("mousedown", closeIfOutside);
++      document.removeEventListener("touchstart", closeIfOutside);
++    };
++  }, [openConversationMenuId]);
+ 
+   useEffect(() => {
+     if (!showHeaderOptions) return;
+@@ -1573,7 +1747,7 @@ export default function AgentWorkspace() {
+ 
+   const hasGlobalSearchQuery = search.trim().length >= 2 || search.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit))).replace(/\D/g, "").length >= 3;
+   const visible = conversations.filter((chat) => {
+-    const statusMatches = statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
++    const statusMatches = statusFilter === "TEAM" || (statusFilter === "HISTORY" ? Boolean(chat.readOnly) : statusFilter === "ALL" || (statusFilter === "FAVORITES" ? favoriteIds.includes(chat.id) : statusFilter === "PINNED" ? pinnedIds.includes(chat.id) : statusFilter === "ARCHIVED" ? Boolean(chat.personalState?.isArchived) : statusFilter === "ACTIVE" ? ["OPEN", "PENDING", "QUEUED"].includes(chat.status) : chat.status === statusFilter));
+     const groupMatches = whatsappGroupFilter === "ALL" || (whatsappGroupFilter === "GROUPS" ? isWhatsAppGroupConversation(chat) : !isWhatsAppGroupConversation(chat));
+     return statusMatches && (filter === "ALL" || chat.channel === filter) && groupMatches && (!search.trim() || hasGlobalSearchQuery || `${customerDisplayName(chat.customer)} ${chat.customer?.phone || ""} ${chat.messages?.[0]?.text || ""}`.toLowerCase().includes(search.toLowerCase()));
+   });
+@@ -1685,7 +1859,7 @@ export default function AgentWorkspace() {
+               </div>}
+             <div className="soft-scroll mt-3 flex gap-1 overflow-x-auto pb-2">{availableChannels.map((item) => <button key={item.id} onClick={() => selectChannelFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${filter === item.id ? "bg-[#d32f2f] text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
+             {filter === "WHATSAPP" && <div role="group" aria-label="نوع محادثة WhatsApp" className="soft-scroll -mt-1 mb-2 flex gap-1 overflow-x-auto pb-2">{[{ id: "ALL", label: "الكل" }, { id: "DIRECT", label: "الأفراد" }, { id: "GROUPS", label: "المجموعات" }].map((item) => <button key={item.id} type="button" aria-pressed={whatsappGroupFilter === item.id} onClick={() => selectWhatsAppConversationKind(item.id as "ALL" | "DIRECT" | "GROUPS")} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${whatsappGroupFilter === item.id ? "bg-emerald-700 text-white" : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100"}`}>{item.label}</button>)}</div>}
+-              <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مؤرشفة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
++              <div className="soft-scroll flex gap-1 overflow-x-auto pb-3">{[{ id: "ACTIVE", label: "نشطة" }, { id: "ARCHIVED", label: "مؤرشفة" }, { id: "TEAM", label: "كل المحادثات" }, { id: "HISTORY", label: "سجل محادثاتي" }, { id: "FAVORITES", label: "المفضلة" }, { id: "PINNED", label: "المثبتة" }, { id: "RESOLVED", label: "تم الحل" }, { id: "CLOSED", label: "مغلقة" }, { id: "ALL", label: "الكل" }].map((item) => <button key={item.id} onClick={() => selectStatusFilter(item.id)} className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-bold ${statusFilter === item.id ? "bg-stone-800 text-white" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>{item.label}</button>)}</div>
+           </div>
+           {chatLoadError && <div role="alert" className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-[10px] text-red-800"><span>{chatLoadError}</span><button type="button" onClick={() => void loadChats()} className="shrink-0 font-bold underline">إعادة المحاولة</button></div>}
+             <div className="soft-scroll flex-1 overflow-y-auto border-t border-stone-100">
+@@ -1702,7 +1876,24 @@ export default function AgentWorkspace() {
+                 </article>)}
+                 {!globalSearchLoading && !globalSearchError && !globalSearchResults.length && <p className="px-4 py-10 text-center text-xs text-stone-400">لا توجد نتائج مطابقة.</p>}
+                 {globalSearchHasMore && <button type="button" onClick={() => void loadMoreGlobalSearch()} disabled={globalSearchLoading} className="m-3 w-[calc(100%-1.5rem)] rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 disabled:opacity-50">{globalSearchLoading ? "جارٍ التحميل..." : "عرض نتائج إضافية"}</button>}
+-              </> : <>{visible.map((chat) => <button key={chat.id} onClick={() => openChat(chat.id)} className={`flex w-full gap-3 border-b border-stone-100 px-4 py-3 text-right transition hover:bg-[#fffaf2] ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`}><div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center gap-1.5"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b>{isWhatsAppGroupConversation(chat) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}</span><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة"}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div></button>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</>}
++              </> : <>{visible.map((chat) => <article key={chat.id} className={`group relative border-b border-stone-100 ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`} style={{ touchAction: "pan-y" }} onPointerDown={(event) => startConversationGesture(event, chat.id)} onPointerMove={moveConversationGesture} onPointerUp={endConversationGesture} onPointerCancel={endConversationGesture} onContextMenu={(event) => { event.preventDefault(); setSwipedConversationId(""); setListMenuConversationId(""); setOpenConversationMenuId(chat.id); }}>
++                <button type="button" onClick={() => { if (suppressConversationClickRef.current) { suppressConversationClickRef.current = false; return; } setSwipedConversationId(""); void openChat(chat.id); }} className="flex w-full gap-3 px-4 py-3 text-right transition hover:bg-[#fffaf2]">
++                  <div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}{chat.personalState?.isMuted && <BellOff size={12} className="absolute -bottom-1 -right-1 rounded-full bg-white text-stone-500" />}</div>
++                  <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center gap-1.5"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b>{isWhatsAppGroupConversation(chat) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}</span><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || (chat.personalState?.clearedAt ? "محادثة ممسوحة من حسابك" : "مرفق أو رسالة")}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div>
++                </button>
++                <button type="button" aria-label={`المزيد من الخيارات لمحادثة ${customerDisplayName(chat.customer)}`} aria-haspopup="menu" aria-expanded={openConversationMenuId === chat.id} onClick={() => openConversationMenu(chat.id)} className={`absolute left-2 top-2 grid h-8 w-8 place-items-center rounded-lg bg-white/95 text-stone-500 shadow-sm ring-1 ring-stone-200 hover:bg-amber-50 hover:text-amber-800 focus-visible:opacity-100 ${swipedConversationId === chat.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}><MoreHorizontal size={17} /></button>
++                {openConversationMenuId === chat.id && <div ref={conversationMenuRef} role="menu" aria-label={`إجراءات ${customerDisplayName(chat.customer)}`} className="absolute left-2 top-2 z-30 max-h-[70vh] w-60 max-w-[calc(100%-1rem)] overflow-y-auto rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
++                  <button type="button" role="menuitem" onClick={() => void updatePersonalConversationSettings(chat.id, { markRead: true }, "تم تمييز المحادثة كمقروءة في حسابك فقط.")} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-emerald-50"><CheckCheck size={16} className="shrink-0 text-emerald-700" /><span className="text-xs font-bold">تمييز كمقروءة</span></button>
++                  <button type="button" role="menuitem" onClick={() => void updatePersonalConversationSettings(chat.id, { isArchived: !chat.personalState?.isArchived }, chat.personalState?.isArchived ? "أُعيدت المحادثة إلى قائمتك النشطة." : "أُرشفت المحادثة في حسابك فقط.")} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Archive size={16} className="shrink-0 text-amber-700" /><span className="text-xs font-bold">{chat.personalState?.isArchived ? "إلغاء الأرشفة" : "أرشفة"}</span></button>
++                  <button type="button" role="menuitem" onClick={() => void updatePersonalConversationSettings(chat.id, { isMuted: !chat.personalState?.isMuted }, chat.personalState?.isMuted ? "أُلغي كتم التنبيهات في حسابك." : "كُتمت تنبيهات هذه المحادثة في حسابك.")} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><BellOff size={16} className="shrink-0 text-stone-500" /><span className="text-xs font-bold">{chat.personalState?.isMuted ? "إلغاء كتم التنبيهات" : "كتم التنبيهات"}</span></button>
++                  <button type="button" role="menuitem" onClick={() => void toggleConversationFavorite(chat.id)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-amber-50"><Star size={16} className="shrink-0 text-amber-500" fill={favoriteIds.includes(chat.id) ? "currentColor" : "none"} /><span className="text-xs font-bold">{favoriteIds.includes(chat.id) ? "إزالة من المفضلة" : "إضافة إلى المفضلة"}</span></button>
++                  <button type="button" role="menuitem" aria-expanded={listMenuConversationId === chat.id} onClick={() => void showConversationLists(chat.id)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-blue-50"><ListChecks size={16} className="shrink-0 text-blue-700" /><span className="text-xs font-bold">إضافة إلى قائمة</span></button>
++                  {listMenuConversationId === chat.id && <div role="group" aria-label="قوائمك الشخصية" className="my-1 space-y-1 border-y border-stone-100 py-1">{conversationLists.map((list) => <button key={list.id} type="button" role="menuitem" onClick={() => void addConversationToList(chat.id, list)} className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-right text-[11px] text-stone-600 hover:bg-blue-50"><span className="truncate">{list.name}</span><span className="shrink-0 text-[9px] text-stone-400">{list.itemCount || 0}</span></button>)}<button type="button" role="menuitem" onClick={() => void createConversationListForChat(chat.id)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-right text-[11px] font-bold text-blue-800 hover:bg-blue-50">قائمة شخصية جديدة</button></div>}
++                  <button type="button" role="menuitem" disabled={!chat.customer?.id || chat.readOnly || savingCustomerFlags} onClick={() => void toggleConversationBlock(chat)} title={chat.readOnly ? "الحظر متاح للمحادثات المسندة إليك" : undefined} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-red-700 hover:bg-red-50 disabled:opacity-50"><Ban size={16} className="shrink-0" /><span className="text-xs font-bold">{chat.customer?.isBlocked ? "إلغاء الحظر للجميع" : "حظر العميل للجميع"}</span></button>
++                  <button type="button" role="menuitem" onClick={() => { if (window.confirm("مسح سجل الدردشة من حسابك فقط؟ ستظل الرسائل محفوظة في النظام ولن تتأثر حسابات زملائك.")) void updatePersonalConversationSettings(chat.id, { clear: true }, "مُسح سجل الدردشة من حسابك فقط."); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-stone-700 hover:bg-stone-50"><Eraser size={16} className="shrink-0 text-stone-500" /><span className="text-xs font-bold">مسح الدردشة من حسابي</span></button>
++                  <button type="button" role="menuitem" onClick={() => { if (window.confirm("إزالة المحادثة من قائمتك الشخصية فقط؟ سيبقى سجلها محفوظًا للزملاء ولن تُحذف رسائل النظام.")) void updatePersonalConversationSettings(chat.id, { isDeleted: true }, "أُزيلت المحادثة من قائمتك الشخصية."); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-red-700 hover:bg-red-50"><Trash2 size={16} className="shrink-0" /><span className="text-xs font-bold">حذف من قائمتي فقط</span></button>
++                </div>}
++              </article>)}{!visible.length && <div className="px-4 py-12 text-center text-xs text-stone-400">لا توجد محادثات هنا بعد.</div>}</>}
+             </div>
+         {hasMoreChats && <button type="button" onClick={() => void loadMoreChats()} disabled={loadingMoreChats} className="m-3 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[10px] font-bold text-stone-600 hover:bg-stone-50 disabled:opacity-50">{loadingMoreChats ? "جارٍ تحميل المزيد..." : "تحميل المزيد من المحادثات"}</button>}
+         <div className="space-y-2 border-t border-stone-100 px-4 py-3 text-[10px] text-stone-400"><div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متصل بالنظام</span><span className="truncate">{user?.email}</span></div><div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-2"><a href="tel:+201018040600" className="font-semibold text-stone-500 hover:text-amber-800">برمجة م/ محمود سلامه</a><a href="https://wa.me/201018040600" target="_blank" rel="noreferrer" className="font-semibold text-emerald-700 hover:text-emerald-800">واتساب</a></div></div>

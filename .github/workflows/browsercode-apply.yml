@@ -1,0 +1,24 @@
+name: Apply temporary BrowserCode patch
+
+on:
+  push:
+    branches:
+      - feat/personal-chat-actions
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/personal-chat-actions
+      - name: Apply patch and remove temporary files
+        run: |
+          git apply --index .browsercode-upload.patch
+          rm .browsercode-upload.patch .github/workflows/browsercode-apply.yml
+          git add -A
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "feat: add personal conversation actions"
+          git push origin HEAD:feat/personal-chat-actions
