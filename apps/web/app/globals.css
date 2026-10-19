@@ -163,6 +163,7 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
 .desktop-profile-toggle,
 .mobile-profile-toggle { display: none !important; }
 @media (min-width: 851px) {
+  .workspace-grid > .workspace-profile-collapsed { display: none !important; }
   .workspace-grid[data-profile-collapsed="true"] { grid-template-columns: 260px minmax(0, 1fr) !important; }
   .workspace-grid[data-profile-collapsed="true"] > .workspace-profile { display: none !important; }
   .workspace-chat fieldset:disabled ~ div .desktop-profile-toggle { display: flex !important; }
