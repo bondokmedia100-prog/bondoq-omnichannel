@@ -41,6 +41,10 @@ let reconnectDelay = 2000;
 let callReplyText = defaultCallReply;
 const pendingCalls = new Map<string, { callId: string; callerJid: string; phoneNumber: string; conversationId?: string; assignedAgentId?: string; customerName: string; isVideo: boolean; receivedAt: string }>();
 const presenceTimers = new Map<string, NodeJS.Timeout>();
+const presenceSubscribers = new Map<string, Set<string>>();
+const presenceJidsBySubscriber = new Map<string, Set<string>>();
+const presenceSubscribedJids = new Set<string>();
+const presenceSubscriptionRequests = new Map<string, { socket: WASocket; promise: Promise<void> }>();
 const profilePictureCache = new Map<string, { url: string | undefined; expiresAt: number }>();
 const profilePictureRequests = new Map<string, Promise<string | undefined>>();
 const groupSubjectCache = new Map<string, string>();
@@ -226,9 +230,61 @@ export async function sendBaileysPresence(remoteJid: string, activity: "composin
   return true;
 }
 
-export async function subscribeBaileysPresence(remoteJid: string) {
-  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED" || !/@(?:s\.whatsapp\.net|lid)$/i.test(remoteJid) || isWhatsAppGroupJid(remoteJid)) return;
-  await socket.presenceSubscribe(remoteJid);
+export async function subscribeBaileysPresence(remoteJid: string, subscriberId: string) {
+  if (!/@(?:s\.whatsapp\.net|lid)$/i.test(remoteJid) || isWhatsAppGroupJid(remoteJid)) return;
+  const subscribers = presenceSubscribers.get(remoteJid) || new Set<string>();
+  subscribers.add(subscriberId);
+  presenceSubscribers.set(remoteJid, subscribers);
+  const jids = presenceJidsBySubscriber.get(subscriberId) || new Set<string>();
+  jids.add(remoteJid);
+  presenceJidsBySubscriber.set(subscriberId, jids);
+  const current = socket;
+  if (current && state.mode === "BAILEYS" && state.status === "CONNECTED") await ensureBaileysPresenceSubscription(current, remoteJid);
+}
+
+async function ensureBaileysPresenceSubscription(current: WASocket, remoteJid: string) {
+  if (socket !== current || state.mode !== "BAILEYS" || state.status !== "CONNECTED") return false;
+  if (presenceSubscribedJids.has(remoteJid)) return true;
+  const pending = presenceSubscriptionRequests.get(remoteJid);
+  if (pending?.socket === current) {
+    await pending.promise;
+    return presenceSubscribedJids.has(remoteJid);
+  }
+  const promise = current.presenceSubscribe(remoteJid).then(() => {
+    if (socket === current) presenceSubscribedJids.add(remoteJid);
+  });
+  presenceSubscriptionRequests.set(remoteJid, { socket: current, promise });
+  try {
+    await promise;
+    return presenceSubscribedJids.has(remoteJid);
+  } finally {
+    if (presenceSubscriptionRequests.get(remoteJid)?.promise === promise) presenceSubscriptionRequests.delete(remoteJid);
+  }
+}
+
+export function unsubscribeBaileysPresence(remoteJid: string, subscriberId: string) {
+  const subscribers = presenceSubscribers.get(remoteJid);
+  subscribers?.delete(subscriberId);
+  if (subscribers && !subscribers.size) presenceSubscribers.delete(remoteJid);
+  const jids = presenceJidsBySubscriber.get(subscriberId);
+  jids?.delete(remoteJid);
+  if (jids && !jids.size) presenceJidsBySubscriber.delete(subscriberId);
+}
+
+export function unsubscribeAllBaileysPresence(subscriberId: string) {
+  for (const remoteJid of presenceJidsBySubscriber.get(subscriberId) || []) unsubscribeBaileysPresence(remoteJid, subscriberId);
+}
+
+async function resubscribeActiveBaileysPresence(current: WASocket) {
+  for (const [remoteJid, subscribers] of presenceSubscribers) {
+    if (socket !== current) return;
+    if (!subscribers.size) continue;
+    try {
+      await ensureBaileysPresenceSubscription(current, remoteJid);
+    } catch (error) {
+      console.warn("WhatsApp customer presence resubscription failed", error);
+    }
+  }
 }
 
 async function persistBaileysPresence(update: any) {
@@ -675,6 +731,7 @@ function scheduleReconnect(delay = reconnectDelay) {
 
 async function startSocket() {
   stopRequested = false;
+  presenceSubscribedJids.clear();
   await mkdir(authDir, { recursive: true, mode: 0o700 });
   await chmod(authDir, 0o700);
   const authFiles = await readdir(authDir, { withFileTypes: true });
@@ -697,6 +754,7 @@ async function startSocket() {
         const jid = current.user?.id || "";
         const phoneNumber = phoneFromJid(jid) || jid.split(":")[0].split("@")[0];
         await saveState({ mode: "BAILEYS", status: "CONNECTED", qrDataUrl: "", phoneNumber, accountName: current.user?.name || "WhatsApp", lastError: "" });
+        void resubscribeActiveBaileysPresence(current).catch((error) => console.warn("WhatsApp customer presence resubscription failed", error));
         void refreshRecentCustomerProfilePictures(current).catch((error) => console.warn("WhatsApp profile-picture sync failed", error));
         void current.groupFetchAllParticipating()
           .then((groups) => syncWhatsAppGroups(current, groups))
