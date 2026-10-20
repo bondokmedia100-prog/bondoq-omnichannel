@@ -33,12 +33,8 @@ export function withConversationAssignmentLock<T>(conversationId: string, work: 
   return withRedisLock(connection, `assignment:conversation:${conversationId}`, work, { leaseMs: 120_000 });
 }
 
-export function recordConversationAssignment(conversationId: string, agentId: string) {
-  return prisma.conversationAssignment.upsert({
-    where: { conversationId_agentId: { conversationId, agentId } },
-    create: { conversationId, agentId },
-    update: { lastAssignedAt: new Date() }
-  });
+function withAgentAssignmentLock<T>(agentId: string, work: () => Promise<T>) {
+  return withRedisLock(connection, `assignment:agent:${agentId}`, work, { leaseMs: 120_000, waitMs: 30_000 });
 }
 
 export async function assignConversation(conversationId: string, department?: Department | null, options: AssignmentOptions = {}) {
@@ -64,13 +60,11 @@ export async function assignConversation(conversationId: string, department?: De
     const isMessenger = currentConversation.channel === Channel.MESSENGER;
     const hqAndRemote = !isMessenger && (targetDepartment === Department.HEADQUARTERS || targetDepartment === Department.WORK_FROM_HOME);
     const isBranchQueue = !isMessenger && (targetDepartment === Department.BRANCH || (!targetDepartment && Boolean(currentConversation.branchId)));
-    const candidates = await prisma.user.findMany({
-      where: {
-        role: isMessenger ? Role.AGENT : isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
-        isActive: true,
-        presence: Presence.ONLINE,
-        ...await channelAssignmentWhere(currentConversation.channel),
-        ...(!isMessenger ? {
+    const candidateWhere = {
+      role: isMessenger ? Role.AGENT : isBranchQueue ? Role.BRANCH_USER : Role.AGENT,
+      isActive: true,
+      presence: Presence.ONLINE,
+      ...(!isMessenger ? {
           ...(isBranchQueue
           ? { branchId: currentConversation.branchId || "__unassigned_branch__" }
           : targetDepartment === Department.CUSTOMER_CARE
@@ -80,9 +74,12 @@ export async function assignConversation(conversationId: string, department?: De
             : targetDepartment
               ? { department: { in: [targetDepartment, Department.HEADQUARTERS, Department.WORK_FROM_HOME] } }
               : { department: { not: Department.ADMINISTRATION } })
-        } : {})
-      },
-      select: { id: true, role: true, isActive: true, presence: true, department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true },
+      } : {})
+    };
+    const candidateSelect = { id: true, role: true, isActive: true, presence: true, department: true, whatsappAccess: true, messengerAccess: true, telegramAccess: true, canReceiveWhatsApp: true, canReceiveMessenger: true, canReceiveTelegram: true } as const;
+    const candidates = await prisma.user.findMany({
+      where: { ...candidateWhere, ...await channelAssignmentWhere(currentConversation.channel) },
+      select: candidateSelect,
       orderBy: { id: "asc" }
     });
     const connected = await connectedUserIds(candidates.map((agent) => agent.id));
@@ -107,25 +104,37 @@ export async function assignConversation(conversationId: string, department?: De
     if (options.forceReassign && previousAgentId && agents.some((agent) => agent.id === previousAgentId) && !assignableAgents.length) return currentConversation;
 
     if (!assignableAgents.length) {
-      const released = await prisma.conversation.updateMany({
-        where: { id: conversationId, assignedAgentId: previousAgentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] } },
-        data: { assignedAgentId: null, status: ConversationStatus.QUEUED }
+      const released = await prisma.$transaction(async (tx) => {
+        const result = await tx.conversation.updateMany({
+          where: { id: conversationId, assignedAgentId: previousAgentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] } },
+          data: { assignedAgentId: null, status: ConversationStatus.QUEUED }
+        });
+        if (result.count && previousAgentId) await tx.conversationAssignment.upsert({
+          where: { conversationId_agentId: { conversationId, agentId: previousAgentId } },
+          create: { conversationId, agentId: previousAgentId },
+          update: { lastAssignedAt: new Date() }
+        });
+        return result.count;
       });
       const waiting = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
-      if (released.count && previousAgentId) {
-        await recordConversationAssignment(conversationId, previousAgentId);
-        if (await canNotifyAgentOfChannel(previousAgentId, waiting.channel)) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", waiting);
+      if (released && previousAgentId) {
+        try {
+          if (await canNotifyAgentOfChannel(previousAgentId, waiting.channel)) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", waiting);
+        } catch (error) { console.warn("Ineligible agent unassignment notification failed", previousAgentId, conversationId, error); }
       }
-      if (waiting.status === ConversationStatus.QUEUED && !waiting.assignedAgentId) await emitConversationEvent(waiting.id, waiting.channel, "conversation:queued", waiting);
+      if (waiting.status === ConversationStatus.QUEUED && !waiting.assignedAgentId) {
+        try { await emitConversationEvent(waiting.id, waiting.channel, "conversation:queued", waiting); }
+        catch (error) { console.warn("Queued conversation notification failed", conversationId, error); }
+      }
       return waiting;
     }
 
-    const { agent, claimed } = await withRedisLock(connection, "assignment:allocation", async () => {
+    const { agent, claimed, assignedConversation } = await withRedisLock(connection, "assignment:allocation", async () => {
       const activeAssignments = await prisma.conversation.groupBy({
         by: ["assignedAgentId"],
         where: {
           assignedAgentId: { in: assignableAgents.map((candidate) => candidate.id) },
-          status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] }
+          status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] }
         },
         _count: { _all: true }
       });
@@ -134,50 +143,112 @@ export async function assignConversation(conversationId: string, department?: De
         if (assignedAgentId) activeCounts.set(assignedAgentId, _count._all);
       }
       const turn = await connection.incr("assignment:round-robin:global") - 1;
-      const agent = chooseLeastLoadedAgent(assignableAgents, activeCounts, turn);
-      if (!agent) return { agent, claimed: 0 };
-      const result = await prisma.conversation.updateMany({
-        where: {
-          id: conversationId, assignedAgentId: previousAgentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] },
-          ...(expectedInboundAt ? {
-            lastInboundAt: expectedInboundAt,
-            AND: [
-              { OR: [{ lastAgentResponseAt: null }, { lastAgentResponseAt: { lt: expectedInboundAt } }] },
-              { messages: { none: {
-                direction: MessageDirection.OUTBOUND, authorId: { not: null }, createdAt: { gte: expectedInboundAt },
-                OR: [{ deliveryStatus: { not: "FAILED" } }, { deliveryStatus: null }]
-              } } },
-              { messages: { none: {
-                direction: MessageDirection.INBOUND, id: { not: options.expectedUnanswered!.messageId }, createdAt: { gte: expectedInboundAt }
-              } } }
-            ]
-          } : {})
-        },
-        data: { assignedAgentId: agent.id, status: ConversationStatus.OPEN }
-      });
-      return { agent, claimed: result.count };
+      let remainingAgents = [...assignableAgents];
+      while (remainingAgents.length) {
+        const agent = chooseLeastLoadedAgent(remainingAgents, activeCounts, turn);
+        if (!agent) break;
+        const attempt = await withAgentAssignmentLock(agent.id, async () => {
+          const freshAgent = await prisma.user.findFirst({
+            where: { ...candidateWhere, ...await channelAssignmentWhere(currentConversation.channel), id: agent.id },
+            select: candidateSelect
+          });
+          if (!freshAgent) return { eligible: false, assignedConversation: null };
+          const [connected, departmentModes] = await Promise.all([
+            connectedUserIds([agent.id]),
+            getDepartmentChannelModes(currentConversation.channel)
+          ]);
+          const departmentAccess = freshAgent.department ? departmentModes[freshAgent.department] : MessengerAccessMode.DISABLED;
+          const principal = {
+            ...freshAgent,
+            departmentWhatsAppAccess: currentConversation.channel === Channel.WHATSAPP ? departmentAccess : undefined,
+            departmentMessengerAccess: currentConversation.channel === Channel.MESSENGER ? departmentAccess : undefined,
+            departmentTelegramAccess: currentConversation.channel === Channel.TELEGRAM ? departmentAccess : undefined
+          };
+          if (!isEligibleForAutomaticAssignment({
+            isActive: freshAgent.isActive,
+            presence: freshAgent.presence,
+            connected: connected.has(agent.id),
+            fullAccess: effectiveChannelAccess(principal, currentConversation.channel) === MessengerAccessMode.FULL
+          })) return { eligible: false, assignedConversation: null };
+          const assignedConversation = await prisma.$transaction(async (tx) => {
+            const result = await tx.conversation.updateMany({
+              where: {
+                id: conversationId, assignedAgentId: previousAgentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING, ConversationStatus.QUEUED] },
+                ...(expectedInboundAt ? {
+                  lastInboundAt: expectedInboundAt,
+                  AND: [
+                    { OR: [{ lastAgentResponseAt: null }, { lastAgentResponseAt: { lt: expectedInboundAt } }] },
+                    { messages: { none: {
+                      direction: MessageDirection.OUTBOUND, authorId: { not: null }, createdAt: { gte: expectedInboundAt },
+                      OR: [{ deliveryStatus: { not: "FAILED" } }, { deliveryStatus: null }]
+                    } } },
+                    { messages: { none: {
+                      direction: MessageDirection.INBOUND, id: { not: options.expectedUnanswered!.messageId }, createdAt: { gte: expectedInboundAt }
+                    } } }
+                  ]
+                } : {})
+              },
+              data: { assignedAgentId: agent.id, status: ConversationStatus.OPEN }
+            });
+            if (!result.count) return null;
+            const assignedAt = new Date();
+            if (previousAgentId) await tx.conversationAssignment.upsert({
+              where: { conversationId_agentId: { conversationId, agentId: previousAgentId } },
+              create: { conversationId, agentId: previousAgentId },
+              update: { lastAssignedAt: assignedAt }
+            });
+            await tx.conversationAssignment.upsert({
+              where: { conversationId_agentId: { conversationId, agentId: agent.id } },
+              create: { conversationId, agentId: agent.id },
+              update: { lastAssignedAt: assignedAt }
+            });
+            await tx.auditLog.create({ data: { conversationId, action: previousAgentId ? "CONVERSATION_AUTO_REASSIGNED" : "CONVERSATION_AUTO_ASSIGNED", details: { from: previousAgentId, agentId: agent.id } } });
+            return tx.conversation.findUniqueOrThrow({ where: { id: conversationId } });
+          });
+          return { eligible: true, assignedConversation };
+        });
+        if (!attempt.eligible) {
+          remainingAgents = remainingAgents.filter((candidate) => candidate.id !== agent.id);
+          continue;
+        }
+        return { agent, claimed: Number(Boolean(attempt.assignedConversation)), assignedConversation: attempt.assignedConversation };
+      }
+      return { agent: null, claimed: 0, assignedConversation: null };
     }, { leaseMs: 120_000, waitMs: 120_000 });
     if (!agent) return currentConversation;
     if (!claimed) return prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
-    if (previousAgentId) await recordConversationAssignment(conversationId, previousAgentId);
-    await recordConversationAssignment(conversationId, agent.id);
-    const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
-    await prisma.auditLog.create({ data: { conversationId, action: previousAgentId ? "CONVERSATION_AUTO_REASSIGNED" : "CONVERSATION_AUTO_ASSIGNED", details: { from: previousAgentId, agentId: agent.id } } });
-    if (previousAgentId && previousAgentId !== agent.id && await canNotifyAgentOfChannel(previousAgentId, conversation.channel)) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", conversation);
+    const conversation = assignedConversation || await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
+    if (previousAgentId && previousAgentId !== agent.id) {
+      try {
+        if (await canNotifyAgentOfChannel(previousAgentId, conversation.channel)) io?.to(`agent:${previousAgentId}`).emit("conversation:unassigned", conversation);
+      } catch (error) { console.warn("Previous agent unassignment notification failed", previousAgentId, conversationId, error); }
+    }
     io?.to(`agent:${agent.id}`).emit("conversation:assigned", { ...conversation, isAutoReassignment: Boolean(options.expectedUnanswered) });
-    await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", conversation);
+    try { await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", conversation); }
+    catch (error) { console.warn("Conversation assignment notification failed", conversationId, error); }
     return conversation;
   });
 }
 
 export async function dispatchQueued() {
+  let cursor: { lastMessageAt: Date; id: string } | undefined;
   while (true) {
-    const waiting = await prisma.conversation.findMany({ where: { status: ConversationStatus.QUEUED, assignedAgentId: null, awaitingRouting: false, botState: "ASSIGNED_TO_AGENT" }, orderBy: { lastMessageAt: "asc" }, take: 50 });
+    const waiting = await prisma.conversation.findMany({
+      where: {
+        status: ConversationStatus.QUEUED, assignedAgentId: null, awaitingRouting: false, botState: "ASSIGNED_TO_AGENT",
+        ...(cursor ? { OR: [
+          { lastMessageAt: { gt: cursor.lastMessageAt } },
+          { lastMessageAt: cursor.lastMessageAt, id: { gt: cursor.id } }
+        ] } : {})
+      },
+      orderBy: [{ lastMessageAt: "asc" }, { id: "asc" }],
+      take: 50
+    });
     if (!waiting.length) return;
     let progressed = false;
     for (const conversation of waiting) {
       const assigned = await assignConversation(conversation.id);
-      if (assigned.status !== ConversationStatus.QUEUED) {
+      if (assigned.status !== ConversationStatus.QUEUED || assigned.assignedAgentId) {
         if (assigned.assignedAgentId) {
           const inbound = await prisma.message.findFirst({ where: { conversationId: assigned.id, direction: MessageDirection.INBOUND }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { id: true } });
           if (inbound) await scheduleUnansweredReassignment(assigned.id, inbound.id, assigned.assignedAgentId);
@@ -186,31 +257,36 @@ export async function dispatchQueued() {
         break;
       }
     }
-    if (!progressed) return;
+    if (progressed) cursor = undefined;
+    else {
+      const last = waiting[waiting.length - 1];
+      cursor = { lastMessageAt: last.lastMessageAt, id: last.id };
+    }
   }
 }
 
 export async function releaseAgentConversations(agentId: string) {
-  const assigned = await prisma.$transaction(async (tx) => {
+  const assigned = await withAgentAssignmentLock(agentId, () => prisma.$transaction(async (tx) => {
     const current = await tx.conversation.findMany({
       where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
       select: { id: true, channel: true }
     });
     if (!current.length) return current;
-    await tx.conversationAssignment.createMany({
-      data: current.map(({ id }) => ({ conversationId: id, agentId })),
-      skipDuplicates: true
-    });
+    await tx.conversationAssignment.createMany({ data: current.map(({ id }) => ({ conversationId: id, agentId })), skipDuplicates: true });
     await tx.conversation.updateMany({
       where: { assignedAgentId: agentId, status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] } },
       data: { assignedAgentId: null, status: ConversationStatus.QUEUED }
     });
     return current;
-  });
+  }));
   if (!assigned.length) return 0;
   for (const conversation of assigned) {
-    if (await canNotifyAgentOfChannel(agentId, conversation.channel)) io?.to(`agent:${agentId}`).emit("conversation:unassigned", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
-    await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
+    try {
+      if (await canNotifyAgentOfChannel(agentId, conversation.channel)) io?.to(`agent:${agentId}`).emit("conversation:unassigned", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
+      await emitConversationEvent(conversation.id, conversation.channel, "conversation:updated", { id: conversation.id, assignedAgentId: null, status: ConversationStatus.QUEUED });
+    } catch (error) {
+      console.warn("Agent conversation release notification failed", agentId, conversation.id, error);
+    }
   }
   await dispatchQueued();
   return assigned.length;
@@ -221,11 +297,17 @@ setAgentDisconnectHandler(async (agentId) => {
 });
 
 export async function scheduleSla(conversationId: string, messageId: string) {
-  await slaQueue.add("check-first-response", { conversationId, messageId }, { delay: config.slaResponseMinutes * 60_000, removeOnComplete: true, removeOnFail: 100 });
+  await slaQueue.add("check-first-response", { conversationId, messageId }, {
+    delay: config.slaResponseMinutes * 60_000, attempts: 5, backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: true, removeOnFail: 100
+  });
 }
 
 export async function scheduleUnansweredReassignment(conversationId: string, messageId: string, assignedAgentId: string) {
   const inbound = await prisma.message.findFirst({ where: { id: messageId, conversationId, direction: MessageDirection.INBOUND }, select: { createdAt: true } });
   if (!inbound) return;
-  await reassignmentQueue.add("reassign-unanswered", { conversationId, messageId, assignedAgentId }, { delay: config.unansweredReassignMinutes * 60_000, removeOnComplete: true, removeOnFail: 100 });
+  await reassignmentQueue.add("reassign-unanswered", { conversationId, messageId, assignedAgentId }, {
+    delay: config.unansweredReassignMinutes * 60_000, attempts: 5, backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: true, removeOnFail: 100
+  });
 }
