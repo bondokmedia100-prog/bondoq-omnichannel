@@ -11,7 +11,7 @@ import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { sendPushNotification } from "./pushNotifications";
 import { repacketizeOggOpusToCode3 } from "./oggOpus";
 import { assignConversation, withInboundConversationLock } from "./routing";
-import { parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
+import { matchesStoredBaileysMessageKey, parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
 import { baileysDeliveryStatus, isDeliveryStatusAdvance } from "./baileysReceipt";
 import { channelViewerWhere } from "./messengerAccess";
 import { isWhatsAppGroupJid } from "./whatsappGroup";
@@ -48,6 +48,10 @@ const presenceSubscriptionRequests = new Map<string, { socket: WASocket; promise
 const profilePictureCache = new Map<string, { url: string | undefined; expiresAt: number }>();
 const profilePictureRequests = new Map<string, Promise<string | undefined>>();
 const groupSubjectCache = new Map<string, string>();
+const silentBaileysLogger: any = {
+  trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {},
+  child() { return silentBaileysLogger; }
+};
 
 let state: WhatsAppConnectionState = {
   mode: "BAILEYS", status: "DISCONNECTED", qrDataUrl: "", phoneNumber: "", accountName: "", lastError: ""
@@ -319,9 +323,26 @@ async function persistBaileysReceipt(update: any) {
   if (!id || !remoteJid) return;
   const deliveryStatus = baileysDeliveryStatus(update);
   if (!deliveryStatus) return;
-  const storedKey = serializeBaileysMessageKey({ remoteJid, id, fromMe: true });
-  const storedIds = [`WHATSAPP:${id}`, `WHATSAPP:baileys:${remoteJid}:${id}`, ...(storedKey ? [`WHATSAPP:${storedKey}`] : [])];
-  const message = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, direction: "OUTBOUND" }, select: { id: true, conversationId: true, deliveryStatus: true } });
+  const storedKey = serializeBaileysMessageKey(key);
+  const alternateRemoteJid = String(key.remoteJidAlt || "");
+  const storedIds = [`WHATSAPP:${id}`, `WHATSAPP:baileys:${remoteJid}:${id}`, ...(alternateRemoteJid ? [`WHATSAPP:baileys:${alternateRemoteJid}:${id}`] : []), ...(storedKey ? [`WHATSAPP:${storedKey}`] : [])];
+  let message = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, direction: "OUTBOUND" }, select: { id: true, conversationId: true, deliveryStatus: true } });
+  if (!message) {
+    const remoteJids = [...new Set([remoteJid, alternateRemoteJid, phoneFromJid(remoteJid), phoneFromJid(alternateRemoteJid)].filter(Boolean))];
+    const conversations = await prisma.conversation.findMany({
+      where: { channel: Channel.WHATSAPP, OR: [{ externalConversationId: { in: remoteJids } }, { externalCustomerId: { in: remoteJids } }] },
+      select: { id: true }
+    });
+    if (!conversations.length) return;
+    const candidates = await prisma.message.findMany({
+      where: {
+        conversationId: { in: conversations.map((conversation) => conversation.id) }, direction: "OUTBOUND",
+        OR: [{ externalId: { startsWith: "WHATSAPP:baileys-key:" } }, { externalId: { startsWith: "WHATSAPP:baileys:" } }]
+      },
+      select: { id: true, conversationId: true, deliveryStatus: true, externalId: true }
+    });
+    message = candidates.find((candidate) => matchesStoredBaileysMessageKey(candidate.externalId, key)) || null;
+  }
   if (!message || !isDeliveryStatusAdvance(message.deliveryStatus, deliveryStatus)) return;
   const atOrAbove = deliveryStatus === "DELIVERED" ? ["DELIVERED", "READ", "PLAYED"]
     : deliveryStatus === "READ" ? ["READ", "PLAYED"] : ["PLAYED"];
@@ -738,7 +759,7 @@ async function startSocket() {
   await Promise.all(authFiles.filter((entry) => entry.isFile()).map((entry) => chmod(path.join(authDir, entry.name), 0o600)));
   await saveState({ mode: "BAILEYS", status: "CONNECTING", qrDataUrl: "", lastError: "" });
   const { state: auth, saveCreds } = await useMultiFileAuthState(authDir);
-  const current = makeWASocket({ auth, printQRInTerminal: false, syncFullHistory: true, markOnlineOnConnect: false, browser: ["Bondoq CRM", "Chrome", "1.0.0"] });
+  const current = makeWASocket({ auth, logger: silentBaileysLogger as any, printQRInTerminal: false, syncFullHistory: true, markOnlineOnConnect: false, browser: ["Bondoq CRM", "Chrome", "1.0.0"] });
   socket = current;
   current.ev.on("creds.update", saveCreds);
   current.ev.on("connection.update", (update) => {

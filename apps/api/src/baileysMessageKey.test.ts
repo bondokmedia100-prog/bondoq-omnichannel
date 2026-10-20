@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
+import { matchesStoredBaileysMessageKey, parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
 
 test("Baileys outbound keys round-trip without losing provider fields", () => {
   const key = { remoteJid: "123:4@s.whatsapp.net", id: "ABC:DEF", fromMe: true, participant: "agent@s.whatsapp.net" };
@@ -20,4 +20,13 @@ test("only complete outbound provider keys are serialized", () => {
   assert.equal(parseStoredBaileysMessageKey("WHATSAPP:baileys-key:invalid", "OUTBOUND"), null);
   const inboundKey = `WHATSAPP:baileys-key:${Buffer.from(JSON.stringify({ remoteJid: "123@s.whatsapp.net", id: "ABC", fromMe: false })).toString("base64url")}`;
   assert.equal(parseStoredBaileysMessageKey(inboundKey, "OUTBOUND"), null);
+});
+
+test("matches receipt keys that omit provider-only fields", () => {
+  const stored = serializeBaileysMessageKey({ remoteJid: "123@s.whatsapp.net", id: "ABC", fromMe: true, participant: "agent@s.whatsapp.net" })!;
+  assert.equal(matchesStoredBaileysMessageKey(`WHATSAPP:${stored}`, { remoteJid: "123@s.whatsapp.net", id: "ABC", fromMe: true }), true);
+  assert.equal(matchesStoredBaileysMessageKey(`WHATSAPP:${stored}`, { remoteJid: "456@lid", remoteJidAlt: "123@s.whatsapp.net", id: "ABC", fromMe: true }), true);
+  assert.equal(matchesStoredBaileysMessageKey(`WHATSAPP:${stored}`, { remoteJid: "123@s.whatsapp.net", id: "OTHER", fromMe: true }), false);
+  assert.equal(matchesStoredBaileysMessageKey(`WHATSAPP:${stored}`, { remoteJid: "456@s.whatsapp.net", id: "ABC", fromMe: true }), false);
+  assert.equal(matchesStoredBaileysMessageKey(`WHATSAPP:${stored}`, { remoteJid: "123@s.whatsapp.net", id: "ABC", fromMe: false }), false);
 });

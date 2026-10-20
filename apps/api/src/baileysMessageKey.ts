@@ -28,3 +28,11 @@ export function parseStoredBaileysMessageKey(externalId: string, direction: "INB
   }
   return null;
 }
+
+export function matchesStoredBaileysMessageKey(externalId: string, receiptKey: unknown) {
+  if (!receiptKey || typeof receiptKey !== "object") return false;
+  const key = receiptKey as Record<string, unknown>;
+  const storedKey = parseStoredBaileysMessageKey(externalId, "OUTBOUND");
+  const receiptRemoteJids = [key.remoteJid, key.remoteJidAlt].filter((value): value is string => typeof value === "string");
+  return Boolean(storedKey?.fromMe && key.fromMe === true && storedKey.id === String(key.id || "") && receiptRemoteJids.includes(storedKey.remoteJid));
+}
