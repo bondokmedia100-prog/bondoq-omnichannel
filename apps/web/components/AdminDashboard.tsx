@@ -68,6 +68,7 @@ export default function AdminDashboard() {
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [customerActivity, setCustomerActivity] = useState<"typing" | "recording" | "">("");
   const [conversationActivities, setConversationActivities] = useState<Record<string, AnyRecord>>({});
+  const customerActivityTimersRef = useRef(new Map<string, number>());
   const [socket, setSocket] = useState<Socket | null>(null);
   const detailRequest = useRef(0);
   const detailLoadingIdRef = useRef("");
@@ -172,13 +173,32 @@ export default function AdminDashboard() {
       });
        connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
         connection.on("whatsapp:customer-activity", (event) => {
+          const conversationId = String(event?.conversationId || "");
+          if (!conversationId) return;
+          const active = event.activity === "typing" || event.activity === "recording";
+          const previousTimer = customerActivityTimersRef.current.get(conversationId);
+          if (previousTimer) window.clearTimeout(previousTimer);
+          if (active) {
+            const timer = window.setTimeout(() => {
+              if (customerActivityTimersRef.current.get(conversationId) !== timer) return;
+              customerActivityTimersRef.current.delete(conversationId);
+              setConversationActivities((current) => {
+                if (current[conversationId]?.actor !== "customer") return current;
+                const next = { ...current };
+                delete next[conversationId];
+                return next;
+              });
+              if (conversationId === activeConversationRef.current) setCustomerActivity("");
+            }, 11_000);
+            customerActivityTimersRef.current.set(conversationId, timer);
+          } else customerActivityTimersRef.current.delete(conversationId);
           setConversationActivities((current) => {
             const next = { ...current };
-            if (event.activity === "typing" || event.activity === "recording") next[event.conversationId] = { activity: event.activity, actor: "customer" };
-            else if (next[event.conversationId]?.actor === "customer") delete next[event.conversationId];
+            if (active) next[conversationId] = { activity: event.activity, actor: "customer" };
+            else if (next[conversationId]?.actor === "customer") delete next[conversationId];
             return next;
           });
-          if (event.conversationId === activeConversationRef.current) setCustomerActivity(event.activity === "typing" || event.activity === "recording" ? event.activity : "");
+          if (conversationId === activeConversationRef.current) setCustomerActivity(active ? event.activity : "");
         });
         connection.on("whatsapp:agent-activity", (event) => {
           setConversationActivities((current) => {
@@ -234,7 +254,12 @@ export default function AdminDashboard() {
         router.replace("/login");
       } else setError("تعذر الاتصال بالخادم. بقي تسجيل الدخول محفوظًا؛ أعد تحميل الصفحة عند عودة الاتصال.");
     });
-    return () => { disposed = true; connection?.disconnect(); };
+    return () => {
+      disposed = true;
+      for (const timer of customerActivityTimersRef.current.values()) window.clearTimeout(timer);
+      customerActivityTimersRef.current.clear();
+      connection?.disconnect();
+    };
   }, [router]);
 
   async function openConversation(item: AnyRecord, targetMessageId?: string) {

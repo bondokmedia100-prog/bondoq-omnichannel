@@ -15,6 +15,7 @@ import { matchesStoredBaileysMessageKey, parseStoredBaileysMessageKey, serialize
 import { baileysDeliveryStatus, isDeliveryStatusAdvance } from "./baileysReceipt";
 import { channelViewerWhere } from "./messengerAccess";
 import { isWhatsAppGroupJid } from "./whatsappGroup";
+import { baileysPresenceIdentity } from "./whatsappPresence";
 
 process.umask(0o077);
 
@@ -235,15 +236,17 @@ export async function sendBaileysPresence(remoteJid: string, activity: "composin
 }
 
 export async function subscribeBaileysPresence(remoteJid: string, subscriberId: string) {
-  if (!/@(?:s\.whatsapp\.net|lid)$/i.test(remoteJid) || isWhatsAppGroupJid(remoteJid)) return;
-  const subscribers = presenceSubscribers.get(remoteJid) || new Set<string>();
+  const identity = baileysPresenceIdentity(remoteJid);
+  if (!identity) return;
+  const jid = identity.jid;
+  const subscribers = presenceSubscribers.get(jid) || new Set<string>();
   subscribers.add(subscriberId);
-  presenceSubscribers.set(remoteJid, subscribers);
+  presenceSubscribers.set(jid, subscribers);
   const jids = presenceJidsBySubscriber.get(subscriberId) || new Set<string>();
-  jids.add(remoteJid);
+  jids.add(jid);
   presenceJidsBySubscriber.set(subscriberId, jids);
   const current = socket;
-  if (current && state.mode === "BAILEYS" && state.status === "CONNECTED") await ensureBaileysPresenceSubscription(current, remoteJid);
+  if (current && state.mode === "BAILEYS" && state.status === "CONNECTED") await ensureBaileysPresenceSubscription(current, jid);
 }
 
 async function ensureBaileysPresenceSubscription(current: WASocket, remoteJid: string) {
@@ -267,11 +270,14 @@ async function ensureBaileysPresenceSubscription(current: WASocket, remoteJid: s
 }
 
 export function unsubscribeBaileysPresence(remoteJid: string, subscriberId: string) {
-  const subscribers = presenceSubscribers.get(remoteJid);
+  const identity = baileysPresenceIdentity(remoteJid);
+  if (!identity) return;
+  const jid = identity.jid;
+  const subscribers = presenceSubscribers.get(jid);
   subscribers?.delete(subscriberId);
-  if (subscribers && !subscribers.size) presenceSubscribers.delete(remoteJid);
+  if (subscribers && !subscribers.size) presenceSubscribers.delete(jid);
   const jids = presenceJidsBySubscriber.get(subscriberId);
-  jids?.delete(remoteJid);
+  jids?.delete(jid);
   if (jids && !jids.size) presenceJidsBySubscriber.delete(subscriberId);
 }
 
@@ -292,15 +298,38 @@ async function resubscribeActiveBaileysPresence(current: WASocket) {
 }
 
 async function persistBaileysPresence(update: any) {
-  const remoteJid = String(update?.id || "");
-  if (!remoteJid || isWhatsAppGroupJid(remoteJid)) return;
+  const identity = baileysPresenceIdentity(String(update?.id || ""));
+  if (!identity) return;
   const states = Object.values(update?.presences || {}).map((presence: any) => String(presence?.lastKnownPresence || "").toLowerCase());
   if (!states.length) return;
   const activity = states.includes("recording") ? "recording" : states.includes("composing") ? "typing" : null;
-  const conversation = await prisma.conversation.findUnique({
-    where: { channel_externalConversationId: { channel: Channel.WHATSAPP, externalConversationId: remoteJid } },
-    select: { id: true, assignedAgentId: true, branchId: true, channel: true }
+  const conversationSelect = {
+    id: true, assignedAgentId: true, branchId: true, channel: true
+  } as const;
+  let conversation = await prisma.conversation.findFirst({
+    where: {
+      channel: Channel.WHATSAPP,
+      OR: [
+        { externalConversationId: { in: identity.jidAliases } },
+        { externalCustomerId: { in: identity.jidAliases } }
+      ]
+    },
+    orderBy: { lastMessageAt: "desc" },
+    select: conversationSelect
   });
+  if (!conversation && identity.phoneAliases.length) {
+    conversation = await prisma.conversation.findFirst({
+      where: {
+        channel: Channel.WHATSAPP,
+        OR: [
+          { externalConversationId: { in: identity.phoneAliases } },
+          { externalCustomerId: { in: identity.phoneAliases } }
+        ]
+      },
+      orderBy: { lastMessageAt: "desc" },
+      select: conversationSelect
+    });
+  }
   if (!conversation) return;
   const previousTimer = presenceTimers.get(conversation.id);
   if (previousTimer) clearTimeout(previousTimer);

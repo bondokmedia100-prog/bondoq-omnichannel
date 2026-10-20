@@ -102,6 +102,7 @@ export default function AgentWorkspace() {
   const [watching, setWatching] = useState(false);
   const [customerActivity, setCustomerActivity] = useState<"typing" | "recording" | "">("");
   const [conversationActivities, setConversationActivities] = useState<Record<string, AnyRecord>>({});
+  const customerActivityTimersRef = useRef(new Map<string, number>());
   const [notice, setNotice] = useState("");
   const [incomingNotice, setIncomingNotice] = useState<AnyRecord | null>(null);
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
@@ -992,14 +993,33 @@ export default function AgentWorkspace() {
         connection.on("message:updated", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((message: AnyRecord) => message.id === event.message.id ? event.message : message) } : old));
         connection.on("message:deleted", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).filter((message: AnyRecord) => message.id !== event.messageId) } : old));
          connection.on("message:status", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((message: AnyRecord) => message.id === event.message.id ? { ...message, deliveryStatus: event.message.deliveryStatus } : message) } : old));
-       connection.on("whatsapp:customer-activity", (event) => {
-         setConversationActivities((current) => {
-           const next = { ...current };
-           if (event.activity === "typing" || event.activity === "recording") next[event.conversationId] = { activity: event.activity, actor: "customer" };
-           else if (next[event.conversationId]?.actor === "customer") delete next[event.conversationId];
-           return next;
-         });
-         if (event.conversationId === activeIdRef.current) setCustomerActivity(event.activity === "typing" || event.activity === "recording" ? event.activity : "");
+        connection.on("whatsapp:customer-activity", (event) => {
+          const conversationId = String(event?.conversationId || "");
+          if (!conversationId) return;
+          const active = event.activity === "typing" || event.activity === "recording";
+          const previousTimer = customerActivityTimersRef.current.get(conversationId);
+          if (previousTimer) window.clearTimeout(previousTimer);
+          if (active) {
+            const timer = window.setTimeout(() => {
+              if (customerActivityTimersRef.current.get(conversationId) !== timer) return;
+              customerActivityTimersRef.current.delete(conversationId);
+              setConversationActivities((current) => {
+                if (current[conversationId]?.actor !== "customer") return current;
+                const next = { ...current };
+                delete next[conversationId];
+                return next;
+              });
+              if (conversationId === activeIdRef.current) setCustomerActivity("");
+            }, 11_000);
+            customerActivityTimersRef.current.set(conversationId, timer);
+          } else customerActivityTimersRef.current.delete(conversationId);
+          setConversationActivities((current) => {
+            const next = { ...current };
+            if (active) next[conversationId] = { activity: event.activity, actor: "customer" };
+            else if (next[conversationId]?.actor === "customer") delete next[conversationId];
+            return next;
+          });
+          if (conversationId === activeIdRef.current) setCustomerActivity(active ? event.activity : "");
        });
        connection.on("whatsapp:agent-activity", (event) => {
          setConversationActivities((current) => {
@@ -1153,7 +1173,13 @@ export default function AgentWorkspace() {
         router.replace("/login");
       } else setNotice("تعذر الاتصال بالخادم. بقي تسجيل الدخول محفوظًا؛ أعد تحميل الصفحة عند عودة الاتصال.");
     });
-    return () => { current = false; if (socketRef.current === connection) socketRef.current = null; connection?.disconnect(); };
+    return () => {
+      current = false;
+      for (const timer of customerActivityTimersRef.current.values()) window.clearTimeout(timer);
+      customerActivityTimersRef.current.clear();
+      if (socketRef.current === connection) socketRef.current = null;
+      connection?.disconnect();
+    };
   }, [router]);
 
   useEffect(() => { setSoundEnabled(isNotificationSoundEnabled()); }, []);
