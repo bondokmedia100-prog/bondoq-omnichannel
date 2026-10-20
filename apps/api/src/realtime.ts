@@ -140,6 +140,7 @@ export function initRealtime(server: HttpServer) {
   });
   io.on("connection", (socket) => {
     const user = socket.data.user as SessionUser;
+    const whatsappPresenceJids = new Map<string, string>();
     const canObserveAllConversations = user.role === Role.ADMIN || user.role === Role.SUPERVISOR && hasPermission(user, "canViewAllConversations");
     socket.join(`user:${user.id}`);
     socket.join(`agent:${user.id}`);
@@ -151,7 +152,8 @@ export function initRealtime(server: HttpServer) {
       if (!conversation || !canReadConversation(currentUser, conversation) && !canReadTeamConversations(currentUser, conversation)) return;
       socket.join(`conversation:${conversationId}`);
       if (conversation.channel === Channel.WHATSAPP) {
-        void import("./BaileysWhatsAppService").then(({ subscribeBaileysPresence }) => subscribeBaileysPresence(conversation.externalConversationId)).catch(() => {});
+        whatsappPresenceJids.set(conversationId, conversation.externalConversationId);
+        void import("./BaileysWhatsAppService").then(({ subscribeBaileysPresence }) => subscribeBaileysPresence(conversation.externalConversationId, socket.id)).catch((error) => console.warn("WhatsApp customer presence subscription failed", { conversationId, error }));
       }
       if (canObserveAllConversations) {
         io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: true, userId: currentUser.id });
@@ -159,9 +161,14 @@ export function initRealtime(server: HttpServer) {
     });
     socket.on("conversation:leave", (conversationId: string) => {
       socket.leave(`conversation:${conversationId}`);
+      const remoteJid = whatsappPresenceJids.get(conversationId);
+      whatsappPresenceJids.delete(conversationId);
+      if (remoteJid) void import("./BaileysWhatsAppService").then(({ unsubscribeBaileysPresence }) => unsubscribeBaileysPresence(remoteJid, socket.id)).catch((error) => console.warn("WhatsApp customer presence unsubscribe failed", { conversationId, error }));
       if (canObserveAllConversations) io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: false, userId: user.id });
     });
     socket.on("disconnect", () => {
+      whatsappPresenceJids.clear();
+      void import("./BaileysWhatsAppService").then(({ unsubscribeAllBaileysPresence }) => unsubscribeAllBaileysPresence(socket.id)).catch((error) => console.warn("WhatsApp customer presence cleanup failed", error));
       if (user.role !== Role.AGENT && user.role !== Role.BRANCH_USER) return;
       setTimeout(async () => {
         try {
