@@ -1121,14 +1121,14 @@ export default function AgentWorkspace() {
       connection.on("sla:breached", () => setNotice("تنبيه: تجاوزت هذه المحادثة مهلة الرد المحددة."));
         const initialChatsRequest = ++chatLoadRequest.current;
         const handoffRequests = profile.role === "AGENT" ? api("/api/agents/handoff-requests") : Promise.resolve([]);
-        const [chatPage, replies, catalog, favorites, customerFavorites, pins, requests, muted] = await Promise.all([api(`/api/conversations?${buildConversationListParams(50, undefined, false, false)}`), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins"), handoffRequests, api("/api/me/muted-conversations")]);
+        const [chatPage, replies, catalog, favorites, customerFavorites, pins, requests, mutedConversations] = await Promise.all([api(`/api/conversations?${buildConversationListParams(50, undefined, false, false)}`), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins"), handoffRequests, api("/api/me/muted-conversations")]);
          if (!current) return;
          const chats = initialChatsRequest === chatLoadRequest.current ? chatPage.items || [] : conversationsRef.current;
           if (initialChatsRequest === chatLoadRequest.current && chatScopeRef.current === "OWN") {
             conversationsRef.current = chats; chatScopeRef.current = "OWN"; loadedExtraChatsRef.current = false;
            setConversations(chats); setChatCursor(chatPage.nextCursor || null); setHasMoreChats(Boolean(chatPage.hasMore)); setChatLoadError("");
          }
-        setCanned(replies); setProducts(catalog); setFavoriteIds(favorites.map((item: AnyRecord) => item.id)); setPinnedIds(pins.map((item: AnyRecord) => item.id)); setFavoriteCustomerIds(customerFavorites.ids || []); setMutedConversationIds(muted.conversationIds || []); mutedConversationIdsRef.current = new Set(muted.conversationIds || []); setIncomingHandoffs((current) => [...requests, ...current.filter((item) => !requests.some((request: AnyRecord) => request.conversationId === item.conversationId))]);
+        setCanned(replies); setProducts(catalog); setFavoriteIds(favorites.map((item: AnyRecord) => item.id)); setPinnedIds(pins.map((item: AnyRecord) => item.id)); setFavoriteCustomerIds(customerFavorites.ids || []); setMutedConversationIds(mutedConversations.conversationIds || []); mutedConversationIdsRef.current = new Set(mutedConversations.conversationIds || []); setIncomingHandoffs((current) => [...requests, ...current.filter((item) => !requests.some((request: AnyRecord) => request.conversationId === item.conversationId))]);
       if (chats.length && !activeIdRef.current) {
         const requestedId = new URLSearchParams(window.location.search).get("conversation");
         const requestedChat = requestedId && chats.find((chat: AnyRecord) => chat.id === requestedId);
