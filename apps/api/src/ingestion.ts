@@ -10,6 +10,7 @@ import { buildRoutingMenuText, decideBotAction, findMatchingAutoReply, formatAge
 import { getChatbotSettings } from "./chatbotSettings";
 import { sendPushNotification } from "./pushNotifications";
 import { detectImageContentType, safeFileName } from "./mediaStorage";
+import { isWebmContainer } from "./webpSticker";
 import { isWithinBusinessHours } from "./businessHours";
 import { startOfCairoDay } from "./cairoTime";
 import { normalizePhoneNumber, phoneNumbersMatch } from "./egyptianPhoneFormatter";
@@ -52,6 +53,14 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     try { conversation = await findWhatsAppConversationByPhone(normalizePhoneNumber(inbound.customerPhone)); } catch {}
   }
   const customerId = `external_${inbound.channel.toLowerCase()}_${inbound.externalCustomerId}`;
+  const existingCustomer = await prisma.customer.findUnique({ where: { id: conversation?.customerId || customerId }, select: { channelIdentifiers: true } });
+  const previousIdentifiers = existingCustomer?.channelIdentifiers && typeof existingCustomer.channelIdentifiers === "object" && !Array.isArray(existingCustomer.channelIdentifiers)
+    ? existingCustomer.channelIdentifiers as Prisma.InputJsonObject : {};
+  const channelIdentifiers: Prisma.InputJsonObject = {
+    ...previousIdentifiers,
+    ...(isWhatsAppGroup ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true } : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }),
+    ...(inbound.customerUsername ? { telegramUsername: inbound.customerUsername.replace(/^@/, "") } : {})
+  };
   const customerUpdate = {
     ...(inbound.customerName ? { name: inbound.customerName } : {}),
     ...(isWhatsAppGroup ? { displayName: groupSubject } : {}),
@@ -59,9 +68,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     ...(isWhatsAppGroup ? { phone: null } : inbound.customerPhone ? { phone: inbound.customerPhone } : {}),
     ...(inbound.latitude === undefined ? {} : { lastLatitude: inbound.latitude }),
     ...(inbound.longitude === undefined ? {} : { lastLongitude: inbound.longitude }),
-    channelIdentifiers: isWhatsAppGroup
-      ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
-      : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
+    channelIdentifiers
   };
   const customer = conversation
     ? await prisma.customer.update({ where: { id: conversation.customerId }, data: customerUpdate })
@@ -76,9 +83,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
         avatarUrl: inbound.profilePictureUrl,
         lastLatitude: inbound.latitude,
         lastLongitude: inbound.longitude,
-        channelIdentifiers: isWhatsAppGroup
-          ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true }
-          : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }
+        channelIdentifiers
       }
     });
   if (!conversation) {
@@ -127,15 +132,19 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   let message;
   try {
     const declaredType = cachedMedia?.contentType || String(metadata.mediaMimeType || "application/octet-stream");
+    const stickerVideo = inbound.kind === MessageKind.STICKER && metadata.telegramStickerIsVideo === true && cachedMedia?.contentType === "video/webm" && isWebmContainer(cachedMedia.body);
+    const stickerImageType = inbound.kind === MessageKind.STICKER && cachedMedia ? detectImageContentType(cachedMedia.body) : undefined;
     const contentType = inbound.kind === MessageKind.IMAGE && cachedMedia
       ? detectImageContentType(cachedMedia.body) || declaredType.split(";")[0].toLowerCase()
-      : declaredType.split(";")[0].toLowerCase();
+      : inbound.kind === MessageKind.STICKER && cachedMedia
+        ? stickerImageType || (stickerVideo ? "video/webm" : declaredType.split(";")[0].toLowerCase())
+        : declaredType.split(";")[0].toLowerCase();
     const extension = contentType.split(";")[0].split("/")[1]?.replace(/[^a-zA-Z0-9.+-]/g, "") || "bin";
     const fileName = inbound.mediaFileName || (inbound.kind === MessageKind.AUDIO
       ? `${metadata.voiceNote === true ? "voice-note" : "audio"}.${extension}`
       : inbound.kind === MessageKind.IMAGE ? `image.${extension}` : inbound.kind === MessageKind.VIDEO ? `video.${extension}` : `attachment.${extension}`);
     message = await prisma.$transaction(async (tx) => {
-      const mediaToCache = cachedMedia && (inbound.kind !== MessageKind.IMAGE && inbound.kind !== MessageKind.STICKER || Boolean(detectImageContentType(cachedMedia.body)))
+      const mediaToCache = cachedMedia && (inbound.kind !== MessageKind.IMAGE && inbound.kind !== MessageKind.STICKER || Boolean(detectImageContentType(cachedMedia.body) || stickerVideo))
         ? cachedMedia : undefined;
       const asset = mediaToCache ? await tx.mediaAsset.create({ data: {
         fileName: safeFileName(fileName), contentType, size: mediaToCache.body.length, data: Uint8Array.from(mediaToCache.body)

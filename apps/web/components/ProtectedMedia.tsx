@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { API_URL, getToken } from "@/lib/api";
+import { API_URL, api, getToken } from "@/lib/api";
 
 type AnyRecord = Record<string, any>;
 
@@ -29,8 +29,11 @@ export default function ProtectedMedia({ conversationId, message, onOpenImage }:
 
   if (error) return <span className="mb-2 flex items-center gap-2 text-[10px] text-red-700">تعذر تحميل المرفق <button type="button" onClick={() => { setError(false); setAttempt((value) => value + 1); }} className="underline">إعادة المحاولة</button></span>;
   if (!source) return <span className="mb-2 block text-[10px] text-stone-400">جارٍ تحميل المرفق...</span>;
+  if (message.kind === "STICKER" && message.mediaAsset?.contentType === "video/webm") return <video src={source} autoPlay loop muted playsInline controls onError={() => setError(true)} className="mb-2 max-h-56 max-w-full rounded-xl" />;
   if (message.kind === "IMAGE" || message.kind === "STICKER") return <button type="button" onClick={() => onOpenImage?.(source)} className="mb-2 block" aria-label="تكبير الصورة"><img src={source} alt={message.kind === "STICKER" ? "ملصق" : "صورة من العميل"} onError={() => setError(true)} className="max-h-72 max-w-full rounded-xl object-contain" /></button>;
-  if (message.kind === "AUDIO") return <audio controls src={source} onError={() => setError(true)} className="mb-2 max-w-full" />;
+  if (message.kind === "AUDIO") return <audio controls src={source} onError={() => setError(true)} onEnded={() => {
+    if (message.direction === "INBOUND") void api(`/api/conversations/${conversationId}/messages/${message.id}/played`, { method: "POST" }).catch(() => {});
+  }} className="mb-2 max-w-full" />;
   if (message.kind === "VIDEO") return <video controls src={source} onError={() => setError(true)} className="mb-2 max-h-72 max-w-full rounded-xl" />;
   const fileName = typeof message.mediaAsset?.fileName === "string" ? message.mediaAsset.fileName : "مرفق";
   return <a href={source} download={fileName} className="mb-2 block text-xs font-bold text-blue-700 underline">تنزيل {fileName}</a>;

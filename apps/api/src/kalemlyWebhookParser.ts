@@ -8,6 +8,7 @@ export type NormalizedInbound = {
   externalCustomerId: string;
   customerPhone?: string;
   customerName?: string;
+  customerUsername?: string;
   profilePictureUrl?: string;
   text?: string;
   kind: MessageKind;

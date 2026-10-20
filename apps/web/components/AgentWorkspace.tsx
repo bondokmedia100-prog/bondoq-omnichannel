@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
-import { Archive, ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, Eraser, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, ArrowRight, Ban, Bell, BellOff, BookUser, CalendarDays, Camera, CakeSlice, Check, CheckCheck, CheckCircle2, Circle, Clock3, Copy, Eraser, FileText, Forward, Image as ImageIcon, ListChecks, LockKeyhole, MapPin, MessageCircle, Mic, MicOff, MoreHorizontal, PanelLeft, Pencil, Phone, PhoneCall, Pin, Plus, Printer, Reply as ReplyIcon, Search, Send, Smile, Sparkles, Star, Trash2, UserRound, Users, Video, X } from "lucide-react";
 import { API_URL, ApiError, api, getToken } from "@/lib/api";
 import { cairoInputToIso, formatCairoDateTime, formatCairoTime } from "@/lib/egyptianDate";
 import { displayPhoneNumber } from "@/lib/egyptianPhoneFormatter";
@@ -14,6 +14,7 @@ import IncomingWhatsAppCallModal, { type IncomingCall } from "./IncomingWhatsApp
 import WhatsAppCallModal from "./WhatsAppCallModal";
 import AgentQuickRepliesModal from "./AgentQuickRepliesModal";
 import ProtectedMedia from "./ProtectedMedia";
+import CopyableCustomerIdentities, { customerIdentityPreview } from "./CopyableCustomerIdentities";
 import ImageEditorDialog from "./ImageEditorDialog";
 import { hasMessageTextLinks, isNotificationSoundEnabled, latestOutgoingTextMessage, mergeMessages, mergePendingMessage, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled, splitMessageTextLinks } from "@/lib/messageHelpers";
 
@@ -44,6 +45,7 @@ export default function AgentWorkspace() {
   const [pollOptionsText, setPollOptionsText] = useState("");
   const [sendingPoll, setSendingPoll] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [showConversationSidebar, setShowConversationSidebar] = useState(true);
   const [conversationSidebarWidth, setConversationSidebarWidth] = useState(285);
   const [conversationSidebarWidthLoaded, setConversationSidebarWidthLoaded] = useState(false);
@@ -98,6 +100,8 @@ export default function AgentWorkspace() {
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [presence, setPresence] = useState("ONLINE");
   const [watching, setWatching] = useState(false);
+  const [customerActivity, setCustomerActivity] = useState<"typing" | "recording" | "">("");
+  const [conversationActivities, setConversationActivities] = useState<Record<string, AnyRecord>>({});
   const [notice, setNotice] = useState("");
   const [incomingNotice, setIncomingNotice] = useState<AnyRecord | null>(null);
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
@@ -208,11 +212,13 @@ export default function AgentWorkspace() {
   const messageEndRef = useRef<HTMLDivElement>(null);
   const headerOptionsRef = useRef<HTMLDivElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
+  const stickerPickerRef = useRef<HTMLDivElement>(null);
   const plusButtonRef = useRef<HTMLButtonElement>(null);
   const replyInputRef = useRef<HTMLTextAreaElement>(null);
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
   const stickToBottom = useRef(true);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const stickerInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const imageEditorResolverRef = useRef<((file: File | null) => void) | null>(null);
@@ -220,6 +226,8 @@ export default function AgentWorkspace() {
   const recordingStartRef = useRef(false);
   const recordingCancelledRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
+  const agentPresenceRef = useRef<{ conversationId: string; activity: "composing" | "recording" | "paused"; sentAt: number }>({ conversationId: "", activity: "paused", sentAt: 0 });
+  const agentPresenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [order, setOrder] = useState({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" });
 
   function buildConversationListParams(limit: number, cursor?: string, history = historyModeRef.current, team = teamModeRef.current) {
@@ -337,7 +345,7 @@ export default function AgentWorkspace() {
     if (detailLoadingIdRef.current && detailLoadingIdRef.current !== id) loadingMessagesRef.current.delete(detailLoadingIdRef.current);
     if (activeId !== id) { setOrder({ product: "تورتة", size: "", filling: "", cakeMessage: "", deliveryAt: "", deliveryAddress: "", notes: "", price: "", deposit: "" }); setSelectedProductIds([]); }
     const request = ++detailRequest.current;
-    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = !targetMessageId; setShowJumpToBottom(false); setShowMobileProfile(false); setShowCustomerSidebar(false); setShowHeaderOptions(false); setShowConversationSearch(false); setConversationSearchQuery(""); setConversationSearchMatches([]); setHighlightedMessageId(targetMessageId || ""); setHasMoreNewerMessages(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote(""); setPrivateNoteMode(false);
+    activeIdRef.current = id; detailLoadingIdRef.current = id; stickToBottom.current = !targetMessageId; setShowJumpToBottom(false); setShowMobileProfile(false); setShowCustomerSidebar(false); setShowHeaderOptions(false); setShowConversationSearch(false); setShowStickerPicker(false); setCustomerActivity(""); setConversationSearchQuery(""); setConversationSearchMatches([]); setHighlightedMessageId(targetMessageId || ""); setHasMoreNewerMessages(false); setActiveId(id); setDetail(null); setNotice(""); setSecretNote(""); setPrivateNoteMode(false);
     if (targetMessageId) { setMessageFilter("ALL"); pendingMessageJumpRef.current = { conversationId: id, messageId: targetMessageId }; }
     socketRef.current?.emit("conversation:join", id);
     try {
@@ -497,7 +505,7 @@ export default function AgentWorkspace() {
         setNotice("قبلت طلب التحويل وأصبحت المحادثة ضمن محادثاتك.");
         await loadChats();
         void openChat(conversationId);
-      } else setNotice("رُفض الطلب وعادت المحادثة إلى زميلك؛ يمكنه تحويلها لزميل آخر أو متابعتها.");
+       } else setNotice("رُفض الطلب وعادت المحادثة إلى زميلك؛ يمكنه تحويلها لزميل آخر أو متابعتها.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "تعذر الرد على طلب التحويل";
       setHandoffError({ conversationId, message });
@@ -537,7 +545,9 @@ export default function AgentWorkspace() {
         setMutedConversationIds(nextMutedIds);
         if (changes.isMuted) setIncomingNotice((current) => current?.conversationId === conversationId ? null : current);
       }
-      if (changes.isDeleted && activeIdRef.current === conversationId) returnToChatList();
+      if (changes.isDeleted) {
+        if (activeIdRef.current === conversationId) returnToChatList();
+      }
       if (changes.clear && activeIdRef.current === conversationId) {
         const refreshed = await api(`/api/conversations/${conversationId}?messageLimit=50`);
         setDetail((current: AnyRecord) => current?.id === conversationId ? refreshed : current);
@@ -981,7 +991,24 @@ export default function AgentWorkspace() {
        connection.on("message:reaction-removed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((message: AnyRecord) => message.id === event.messageId ? { ...message, reactions: (message.reactions || []).filter((reaction: AnyRecord) => reaction.userId !== event.userId) } : message) } : old));
         connection.on("message:updated", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((message: AnyRecord) => message.id === event.message.id ? event.message : message) } : old));
         connection.on("message:deleted", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).filter((message: AnyRecord) => message.id !== event.messageId) } : old));
-        connection.on("message:status", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((message: AnyRecord) => message.id === event.message.id ? { ...message, deliveryStatus: event.message.deliveryStatus } : message) } : old));
+         connection.on("message:status", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: (old.messages || []).map((message: AnyRecord) => message.id === event.message.id ? { ...message, deliveryStatus: event.message.deliveryStatus } : message) } : old));
+       connection.on("whatsapp:customer-activity", (event) => {
+         setConversationActivities((current) => {
+           const next = { ...current };
+           if (event.activity === "typing" || event.activity === "recording") next[event.conversationId] = { activity: event.activity, actor: "customer" };
+           else if (next[event.conversationId]?.actor === "customer") delete next[event.conversationId];
+           return next;
+         });
+         if (event.conversationId === activeIdRef.current) setCustomerActivity(event.activity === "typing" || event.activity === "recording" ? event.activity : "");
+       });
+       connection.on("whatsapp:agent-activity", (event) => {
+         setConversationActivities((current) => {
+           const next = { ...current };
+           if (event.activity === "typing" || event.activity === "recording") next[event.conversationId] = { activity: event.activity, actor: "agent", actorId: event.actorId, actorName: event.actorName };
+           else if (!event.actorId || next[event.conversationId]?.actorId === event.actorId) delete next[event.conversationId];
+           return next;
+         });
+       });
         connection.on("conversation:deleted", (event) => {
           void loadChats();
           if (event.conversationId === activeIdRef.current) {
@@ -1094,14 +1121,14 @@ export default function AgentWorkspace() {
       connection.on("sla:breached", () => setNotice("تنبيه: تجاوزت هذه المحادثة مهلة الرد المحددة."));
         const initialChatsRequest = ++chatLoadRequest.current;
         const handoffRequests = profile.role === "AGENT" ? api("/api/agents/handoff-requests") : Promise.resolve([]);
-        const [chatPage, replies, catalog, favorites, customerFavorites, pins, requests] = await Promise.all([api(`/api/conversations?${buildConversationListParams(50, undefined, false, false)}`), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins"), handoffRequests]);
+        const [chatPage, replies, catalog, favorites, customerFavorites, pins, requests, muted] = await Promise.all([api(`/api/conversations?${buildConversationListParams(50, undefined, false, false)}`), api("/api/canned-responses"), api("/api/products"), api("/api/conversations/favorites"), api("/api/customers/favorites"), api("/api/conversations/pins"), handoffRequests, api("/api/me/muted-conversations")]);
          if (!current) return;
          const chats = initialChatsRequest === chatLoadRequest.current ? chatPage.items || [] : conversationsRef.current;
           if (initialChatsRequest === chatLoadRequest.current && chatScopeRef.current === "OWN") {
             conversationsRef.current = chats; chatScopeRef.current = "OWN"; loadedExtraChatsRef.current = false;
            setConversations(chats); setChatCursor(chatPage.nextCursor || null); setHasMoreChats(Boolean(chatPage.hasMore)); setChatLoadError("");
          }
-        setCanned(replies); setProducts(catalog); setFavoriteIds(favorites.map((item: AnyRecord) => item.id)); setPinnedIds(pins.map((item: AnyRecord) => item.id)); setFavoriteCustomerIds(customerFavorites.ids || []); setIncomingHandoffs((current) => [...requests, ...current.filter((item) => !requests.some((request: AnyRecord) => request.conversationId === item.conversationId))]);
+        setCanned(replies); setProducts(catalog); setFavoriteIds(favorites.map((item: AnyRecord) => item.id)); setPinnedIds(pins.map((item: AnyRecord) => item.id)); setFavoriteCustomerIds(customerFavorites.ids || []); setMutedConversationIds(muted.conversationIds || []); mutedConversationIdsRef.current = new Set(muted.conversationIds || []); setIncomingHandoffs((current) => [...requests, ...current.filter((item) => !requests.some((request: AnyRecord) => request.conversationId === item.conversationId))]);
       if (chats.length && !activeIdRef.current) {
         const requestedId = new URLSearchParams(window.location.search).get("conversation");
         const requestedChat = requestedId && chats.find((chat: AnyRecord) => chat.id === requestedId);
@@ -1274,6 +1301,10 @@ export default function AgentWorkspace() {
         event.preventDefault(); event.stopImmediatePropagation();
         setShowHeaderOptions(false);
         headerOptionsRef.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus();
+      } else if (showStickerPicker) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        setShowStickerPicker(false);
+        plusButtonRef.current?.focus();
       } else if (showPlusMenu) {
         event.preventDefault(); event.stopImmediatePropagation();
         setShowPlusMenu(false);
@@ -1300,7 +1331,7 @@ export default function AgentWorkspace() {
     };
     document.addEventListener("keydown", handleEscape, true);
     return () => document.removeEventListener("keydown", handleEscape, true);
-  }, [openConversationMenuId, showHeaderOptions, showPlusMenu, showCanned, showMobileProfile, showCustomerSidebar, returnToChatList]);
+  }, [openConversationMenuId, showHeaderOptions, showStickerPicker, showPlusMenu, showCanned, showMobileProfile, showCustomerSidebar, returnToChatList]);
 
   useEffect(() => {
     if (!openConversationMenuId) return;
@@ -1365,6 +1396,19 @@ export default function AgentWorkspace() {
   }, [showPlusMenu]);
 
   useEffect(() => {
+    if (!showStickerPicker) return;
+    const closeIfOutside = (event: Event) => {
+      if (event.target instanceof Node && !stickerPickerRef.current?.contains(event.target)) setShowStickerPicker(false);
+    };
+    document.addEventListener("mousedown", closeIfOutside);
+    document.addEventListener("touchstart", closeIfOutside);
+    return () => {
+      document.removeEventListener("mousedown", closeIfOutside);
+      document.removeEventListener("touchstart", closeIfOutside);
+    };
+  }, [showStickerPicker]);
+
+  useEffect(() => {
     if (!recording) return;
     const timer = window.setInterval(() => setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000)), 250);
     return () => window.clearInterval(timer);
@@ -1386,6 +1430,8 @@ export default function AgentWorkspace() {
     setCustomerPhone(detail?.customer?.phone || "");
     setCustomerEmail(detail?.customer?.email || "");
   }, [detail?.id, detail?.customer?.displayName, detail?.customer?.name, detail?.customer?.notes, detail?.customer?.phone, detail?.customer?.email]);
+
+  useEffect(() => { setCustomerActivity(""); }, [activeId]);
 
   useEffect(() => {
     if (!detail || !messageEndRef.current) return;
@@ -1417,7 +1463,8 @@ export default function AgentWorkspace() {
     || messageFilter === "FILES" && message.kind === "FILE"
     || messageFilter === "LINKS" && hasMessageTextLinks(message.text));
   const selectedMessages = (detail?.messages || []).filter((message: AnyRecord) => selectedMessageIds.includes(message.id));
-  const deletableSelectedMessages = selectedMessages.filter((message: AnyRecord) => message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus));
+  const savedStickers = [...(detail?.messages || [])].reverse().filter((message: AnyRecord, index: number, messages: AnyRecord[]) => message.kind === "STICKER" && message.mediaAssetId && message.mediaAsset?.contentType === "image/webp" && messages.findIndex((item: AnyRecord) => item.mediaAssetId === message.mediaAssetId) === index).slice(0, 12);
+  const deletableSelectedMessages = selectedMessages.filter((message: AnyRecord) => message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ", "PLAYED"].includes(message.deliveryStatus));
   const forwardableSelectedMessages = selectedMessages.filter((message: AnyRecord) => message.kind !== "SYSTEM" && message.direction !== "INTERNAL" && !String(message.id).startsWith("pending-") && (message.kind !== "LOCATION" || message.latitude != null && message.longitude != null));
   const lastInboundAt = detail?.lastInboundAt || latestInbound?.createdAt;
   const metaChannel = detail?.channel === "MESSENGER";
@@ -1465,7 +1512,7 @@ export default function AgentWorkspace() {
       setDetail((old: AnyRecord) => {
         if (old?.id !== conversationId) return old;
         const currentMessage = correlatedMessageId ? (old.messages || []).find((item: AnyRecord) => item.id === correlatedMessageId) : null;
-        const currentIsFinal = ["SENT", "DELIVERED", "READ", "FAILED"].includes(currentMessage?.deliveryStatus);
+        const currentIsFinal = ["SENT", "DELIVERED", "READ", "PLAYED", "FAILED"].includes(currentMessage?.deliveryStatus);
         const settledMessage = currentIsFinal ? { ...currentMessage, localPreviewUrl: undefined } : message;
         const removedIds = new Set([localId, message.id, ...(correlatedMessageId ? [correlatedMessageId] : [])]);
         return { ...old, messages: mergeMessages((old.messages || []).filter((item: AnyRecord) => !removedIds.has(item.id)), settledMessage) };
@@ -1493,7 +1540,7 @@ export default function AgentWorkspace() {
     const quickReply = pendingQuickReply;
     if (!message && !quickReply?.mediaAssetId) return;
     const contentType = String(quickReply?.mediaAsset?.contentType || "");
-    const kind = !quickReply?.mediaAssetId ? "TEXT" : contentType === "image/webp" ? "STICKER" : contentType.startsWith("image/") ? "IMAGE" : contentType.startsWith("audio/") ? "AUDIO" : contentType.startsWith("video/") ? "VIDEO" : "FILE";
+    const kind = !quickReply?.mediaAssetId ? "TEXT" : contentType.startsWith("image/") ? "IMAGE" : contentType.startsWith("audio/") ? "AUDIO" : contentType.startsWith("video/") ? "VIDEO" : "FILE";
     const sent = await deliverReply({ text: message || undefined, kind, mediaAssetId: quickReply?.mediaAssetId, applyTagIds: quickReply?.tagIds, quotedMessageId: replyingTo?.id, draftRevision: replyDraftRevisionRef.current });
     if (sent) setPendingQuickReply(null);
   }
@@ -1550,7 +1597,7 @@ export default function AgentWorkspace() {
     const contentType = (file.type || extensionType[extension] || "").split(";")[0].toLowerCase();
       const kind = contentType === "image/webp" ? "STICKER" : contentType.startsWith("image/") ? "IMAGE" : contentType.startsWith("audio/") ? "AUDIO" : contentType.startsWith("video/") ? "VIDEO" : "FILE";
       const previewUrl = ["IMAGE", "STICKER", "AUDIO", "VIDEO"].includes(kind) ? URL.createObjectURL(file) : undefined;
-    const caption = text.trim() || undefined;
+     const caption = kind === "STICKER" ? undefined : text.trim() || undefined;
     const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const pendingMessage = { id: pendingId, conversationId, author: { name: user?.name || "أنت" }, createdAt: new Date().toISOString(), direction: "OUTBOUND", kind, text: caption, localPreviewUrl: previewUrl, deliveryStatus: "UPLOADING" };
     sendingRef.current = true; setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], pendingMessage) } : old); setNotice("جارٍ رفع الملف..."); setSending(true);
@@ -1582,6 +1629,10 @@ export default function AgentWorkspace() {
       if (prepared) await uploadAndSend(prepared);
     }
   }
+  async function sendSavedSticker(message: AnyRecord) {
+    if (!message.mediaAssetId || message.mediaAsset?.contentType !== "image/webp") return;
+    if (await deliverReply({ kind: "STICKER", mediaAssetId: message.mediaAssetId })) setShowStickerPicker(false);
+  }
   function editImageBeforeSend(file: File): Promise<File | null> {
     return new Promise((resolve) => {
       imageEditorResolverRef.current = resolve;
@@ -1597,7 +1648,26 @@ export default function AgentWorkspace() {
     URL.revokeObjectURL(editor.url);
     resolve(file);
   }
-    async function startRecording() {
+    function sendAgentWhatsAppPresence(conversationId: string, activity: "composing" | "recording" | "paused") {
+      const currentActivity = agentPresenceRef.current;
+      if (activity !== "paused") {
+        const conversation = detail?.id === conversationId ? detail : conversationsRef.current.find((item) => item.id === conversationId);
+        if (conversation?.channel !== "WHATSAPP" || conversation.readOnly || privateNoteMode) return;
+      }
+      if (activity === "paused" && (currentActivity.conversationId !== conversationId || currentActivity.activity === "paused")) return;
+      const now = Date.now();
+      const shouldSend = activity === "paused" || currentActivity.conversationId !== conversationId || currentActivity.activity !== activity || now - currentActivity.sentAt >= 2500;
+      agentPresenceRef.current = { conversationId, activity, sentAt: shouldSend ? now : currentActivity.sentAt };
+      if (shouldSend) {
+        void api(`/api/conversations/${conversationId}/whatsapp-presence`, { method: "POST", body: JSON.stringify({ activity }) }).catch(() => {
+          if (agentPresenceRef.current.conversationId === conversationId && agentPresenceRef.current.activity === activity) agentPresenceRef.current.sentAt = 0;
+        });
+      }
+      if (agentPresenceTimerRef.current) clearTimeout(agentPresenceTimerRef.current);
+      agentPresenceTimerRef.current = activity === "composing" ? setTimeout(() => sendAgentWhatsAppPresence(conversationId, "paused"), 3000) : null;
+    }
+
+     async function startRecording() {
       const conversationId = activeId;
       if (recorderRef.current || recordingStartRef.current || !conversationId || sendingRef.current) return;
       if (failedRecording?.conversationId === conversationId) { setNotice("أعد إرسال التسجيل المحفوظ أو أزله قبل بدء تسجيل جديد."); return; }
@@ -1619,7 +1689,8 @@ export default function AgentWorkspace() {
         recorder = createdRecorder;
         const chunks: Blob[] = [];
         createdRecorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
-        createdRecorder.onstop = () => {
+         createdRecorder.onstop = () => {
+          sendAgentWhatsAppPresence(conversationId, "paused");
           audioStream.getTracks().forEach((track) => track.stop()); recorderRef.current = null; setRecording(false);
           setRecordingSeconds(0);
           if (recordingCancelledRef.current) { recordingCancelledRef.current = false; return; }
@@ -1627,8 +1698,9 @@ export default function AgentWorkspace() {
           const extension = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
           void uploadAndSend(new File([blob], `voice-note-${Date.now()}.${extension}`, { type: blob.type }), true, conversationId);
         };
-        recordingCancelledRef.current = false; recordingStartedAtRef.current = Date.now(); recorderRef.current = createdRecorder; createdRecorder.start(); setRecording(true); setRecordingSeconds(0); setNotice("التسجيل جارٍ. أرسل التسجيل أو ألغِه عند الانتهاء.");
+        recordingCancelledRef.current = false; recordingStartedAtRef.current = Date.now(); recorderRef.current = createdRecorder; createdRecorder.start(); sendAgentWhatsAppPresence(conversationId, "recording"); setRecording(true); setRecordingSeconds(0); setNotice("التسجيل جارٍ. أرسل التسجيل أو ألغِه عند الانتهاء.");
       } catch {
+        sendAgentWhatsAppPresence(conversationId, "paused");
         if (recorderRef.current === recorder) recorderRef.current = null;
         stream?.getTracks().forEach((track) => track.stop());
         setNotice("تعذر بدء التسجيل. تحقق من إذن استخدام الميكروفون في المتصفح.");
@@ -1694,6 +1766,7 @@ export default function AgentWorkspace() {
     loadingMessagesRef.current.delete(conversationId);
     socketRef.current?.emit("conversation:leave", conversationId);
     activeIdRef.current = "";
+    setCustomerActivity("");
     setActiveId("");
     setDetail(null);
     setIncomingNotice(null);
@@ -1807,6 +1880,22 @@ export default function AgentWorkspace() {
   useEffect(() => { setCannedReplyIndex(0); }, [showCanned, text, agentQuickReplies, canned]);
 
   useEffect(() => {
+    const current = agentPresenceRef.current;
+    if (current.conversationId && current.conversationId !== activeId && current.activity !== "paused") sendAgentWhatsAppPresence(current.conversationId, "paused");
+    const canShowTyping = Boolean(activeId && detail?.id === activeId && detail.channel === "WHATSAPP" && !detail.readOnly && !privateNoteMode && text.trim());
+    if (canShowTyping) sendAgentWhatsAppPresence(activeId, "composing");
+    else if (agentPresenceRef.current.activity === "composing") sendAgentWhatsAppPresence(agentPresenceRef.current.conversationId, "paused");
+  }, [activeId, detail?.id, detail?.channel, detail?.readOnly, privateNoteMode, text]);
+
+  useEffect(() => () => {
+    if (agentPresenceTimerRef.current) clearTimeout(agentPresenceTimerRef.current);
+    const current = agentPresenceRef.current;
+    if (current.conversationId && current.activity !== "paused") {
+      void api(`/api/conversations/${current.conversationId}/whatsapp-presence`, { method: "POST", body: JSON.stringify({ activity: "paused" }) }).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
     const input = replyInputRef.current;
     if (!input) return;
     input.style.height = "auto";
@@ -1880,7 +1969,7 @@ export default function AgentWorkspace() {
               </> : <>{visible.map((chat) => <article key={chat.id} className={`group relative border-b border-stone-100 ${activeId === chat.id ? "bg-[#fff6e4]" : "bg-white"}`} style={{ touchAction: "pan-y" }} onPointerDown={(event) => startConversationGesture(event, chat.id)} onPointerMove={moveConversationGesture} onPointerUp={endConversationGesture} onPointerCancel={endConversationGesture} onContextMenu={(event) => { event.preventDefault(); setSwipedConversationId(""); setListMenuConversationId(""); setOpenConversationMenuId(chat.id); }}>
                 <button type="button" onClick={() => { if (suppressConversationClickRef.current) { suppressConversationClickRef.current = false; return; } setSwipedConversationId(""); void openChat(chat.id); }} className="flex w-full gap-3 px-4 py-3 text-right transition hover:bg-[#fffaf2]">
                   <div className="relative"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} />{chat.unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#d32f2f] px-1 text-[9px] font-bold text-white">{chat.unreadCount}</span>}{chat.personalState?.isMuted && <BellOff size={12} className="absolute -bottom-1 -right-1 rounded-full bg-white text-stone-500" />}</div>
-                  <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center gap-1.5"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b>{isWhatsAppGroupConversation(chat) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}</span><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div><div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || (chat.personalState?.clearedAt ? "محادثة ممسوحة من حسابك" : "مرفق أو رسالة")}</span><ChannelIcon channel={chat.channel} /></div>{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div>
+                   <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center gap-1.5"><b className="truncate text-xs">{customerDisplayName(chat.customer)}</b>{isWhatsAppGroupConversation(chat) && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>}</span><span className="shrink-0 text-[9px] text-stone-400">{ago(chat.lastMessageAt)}</span></div>{!isWhatsAppGroupConversation(chat) && customerIdentityPreview(chat.customer, chat.channel, chat.externalCustomerId) && <div dir="ltr" className="mt-0.5 truncate text-left text-[9px] font-semibold text-stone-500">{customerIdentityPreview(chat.customer, chat.channel, chat.externalCustomerId)}</div>}<div className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-[10px] text-stone-400">{chat.messages?.[0]?.text || (chat.personalState?.clearedAt ? "محادثة ممسوحة من حسابك" : "مرفق أو رسالة")}</span><ChannelIcon channel={chat.channel} /></div>{conversationActivities[chat.id] && <span role="status" className="mt-1 inline-block text-[9px] font-semibold text-emerald-700">{conversationActivities[chat.id].actor === "customer" ? "العميل" : conversationActivities[chat.id].actorName || "الموظف"} {conversationActivities[chat.id].activity === "recording" ? "يسجل صوتًا..." : "يكتب..."}</span>}{statusFilter === "TEAM" && <span className="mt-1 inline-block rounded-md bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">{chat.assignedAgent?.name ? `مسندة إلى ${chat.assignedAgent.name}` : "في الطابور"}{chat.readOnly ? " · قراءة فقط" : " · مسؤوليتك"}</span>}{chat.serviceTag && <span className="mt-1 inline-block rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">{chat.serviceTag}</span>}{chat.slaBreachedAt && <span className="mt-1 mr-1 inline-block rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">تجاوزت المهلة</span>}</div>
                 </button>
                 <button type="button" aria-label={`المزيد من الخيارات لمحادثة ${customerDisplayName(chat.customer)}`} aria-haspopup="menu" aria-expanded={openConversationMenuId === chat.id} onClick={() => openConversationMenu(chat.id)} className={`absolute left-2 top-2 grid h-8 w-8 place-items-center rounded-lg bg-white/95 text-stone-500 shadow-sm ring-1 ring-stone-200 hover:bg-amber-50 hover:text-amber-800 focus-visible:opacity-100 ${swipedConversationId === chat.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}><MoreHorizontal size={17} /></button>
                 {openConversationMenuId === chat.id && <div ref={conversationMenuRef} role="menu" aria-label={`إجراءات ${customerDisplayName(chat.customer)}`} className="absolute left-2 top-2 z-30 max-h-[70vh] w-60 max-w-[calc(100%-1rem)] overflow-y-auto rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
@@ -1926,18 +2015,22 @@ export default function AgentWorkspace() {
        />}
 
        <section className="workspace-chat panel relative flex min-h-0 flex-col overflow-hidden bg-[#fffdf7]" onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) setIsDraggingFile(true); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); setIsDraggingFile(false); const files = Array.from(event.dataTransfer.files || []); if (files.length) void uploadSelectedFiles(files); }}>
-        <input ref={uploadInputRef} type="file" multiple className="hidden" accept="image/jpeg,image/png,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,audio/webm,audio/aac,video/mp4,video/3gpp,video/quicktime,application/pdf,text/plain,.doc,.docx,.xls,.xlsx" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
+         <input ref={uploadInputRef} type="file" multiple className="hidden" accept="image/jpeg,image/png,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,audio/webm,audio/aac,video/mp4,video/3gpp,video/quicktime,application/pdf,text/plain,.doc,.docx,.xls,.xlsx" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadSelectedFiles(files); }} />
+         <input ref={stickerInputRef} type="file" className="hidden" accept="image/webp,.webp" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadAndSend(file); }} />
         {isDraggingFile && detail && <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-emerald-500 bg-emerald-50/90 text-lg font-extrabold text-emerald-800">أفلت الصورة أو ملصق WebP أو الصوت أو الفيديو أو الملف لإرساله</div>}
         {detail ? <>
                <button type="button" onClick={returnToChatList} aria-label="العودة إلى قائمة المحادثات دون إغلاقها" title="العودة إلى قائمة المحادثات دون إغلاقها" className="conversation-view-back"><ArrowRight size={16} /> العودة إلى المحادثات</button>
-              <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-stone-100 bg-white px-2 sm:px-4">
-               <button type="button" onClick={openCustomerProfile} title={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} aria-label={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} className="flex min-w-0 items-center gap-2 text-right hover:text-amber-800 sm:gap-3">
+               <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-stone-100 bg-white px-2 sm:px-4">
+                <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <button type="button" onClick={openCustomerProfile} title={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} aria-label={`فتح ملف العميل: ${customerDisplayName(detail.customer)}`} className="flex min-w-0 flex-1 items-center gap-2 text-right hover:text-amber-800 sm:gap-3">
                  <Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} />
                   <span className="min-w-0"><span className="line-clamp-2 break-words text-xs font-extrabold sm:text-sm">{customerDisplayName(detail.customer)} {isWhatsAppGroupConversation(detail) && <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">مجموعة</span>} {detail.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] text-red-600">شكوى</span>}</span>
                     <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[9px] text-stone-400 sm:text-[10px]"><ChannelIcon channel={detail.channel} />{isWhatsAppGroupConversation(detail) ? "مجموعة WhatsApp" : detail.customer?.phone ? displayPhoneNumber(detail.customer.phone) : channelName(detail.channel)}<span className="rounded-full bg-emerald-50 px-1.5 py-0.5 font-bold text-emerald-700">{conversationStatusLabel(detail.status)}</span>{detail.serviceTag && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-800">{detail.serviceTag}</span>}</span>
                  </span>
-               </button>
-                <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+                </button>
+                <CopyableCustomerIdentities customer={detail.customer} channel={detail.channel} externalCustomerId={detail.externalCustomerId} compact />
+                </div>
+                 <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
                  <fieldset disabled={Boolean(detail.readOnly)} className="contents">
                    <button type="button" disabled title="مكالمات الفيديو غير متاحة حاليًا؛ النظام يدعم المكالمات الصوتية فقط" aria-label="مكالمة فيديو غير متاحة" className="grid h-8 w-8 place-items-center rounded-lg text-stone-300 disabled:cursor-not-allowed"><Video size={16} /></button>
                     {detail.channel === "WHATSAPP" && !isWhatsAppGroupConversation(detail) && <button type="button" disabled={!callTarget || detail.customer?.isBlocked || Boolean(callConversation)} title={callConversation ? "أنه المكالمة الحالية أولًا" : !callTarget ? "أضف رقمًا إلى ملف العميل أولًا" : detail.customer?.isBlocked ? "العميل محظور داخل النظام" : "مكالمة صوتية عبر WhatsApp"} aria-label="مكالمة صوتية عبر WhatsApp" onClick={() => setCallConversation(detail)} className="grid h-8 w-8 place-items-center rounded-lg text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} /></button>}
@@ -1974,7 +2067,8 @@ export default function AgentWorkspace() {
                  </div>
                </div>
               {metaChannel && <div className={`flex shrink-0 items-center gap-2 px-4 py-2 text-[10px] font-bold ${!metaWindowOpen ? "bg-red-50 text-red-700" : expiringSoon ? "bg-[#FFC107]/20 text-[#8c650a]" : "bg-emerald-50 text-emerald-700"}`}><Clock3 size={14} />{metaWindowOpen ? `نافذة Meta مفتوحة · متبقي ${formatCountdown(windowRemaining)}` : "انتهت نافذة الـ24 ساعة للرد الحر"}{detail.isComplaint && <span className="mr-auto rounded-full bg-red-100 px-2 py-0.5 text-red-700">شكوى · خدمة العملاء</span>}</div>}
-          {watching && <div className="flex h-9 shrink-0 items-center gap-2 border-b border-blue-100 bg-blue-50 px-4 text-[11px] font-semibold text-blue-700"><Users size={14} /> المدير يراقب هذه المحادثة معك الآن</div>}
+           {watching && <div className="flex h-9 shrink-0 items-center gap-2 border-b border-blue-100 bg-blue-50 px-4 text-[11px] font-semibold text-blue-700"><Users size={14} /> المدير يراقب هذه المحادثة معك الآن</div>}
+           {customerActivity && <div role="status" aria-live="polite" className="flex h-8 shrink-0 items-center gap-2 border-b border-emerald-100 bg-emerald-50 px-4 text-[10px] font-semibold text-emerald-800"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-600" />{customerActivity === "recording" ? "العميل يسجل رسالة صوتية..." : "العميل يكتب..."}</div>}
            {notice && <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-100 bg-amber-50 px-4 py-2 text-[11px] text-amber-900"><span>{notice}</span><button onClick={() => setNotice("")}><span>×</span></button></div>}
               {detail.readOnly && <div role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[10px] font-bold text-amber-900">للقراءة فقط · لا يمكن الرد على العميل أو تعديل المحادثة؛ يمكنك مراسلة زميل سرًا</div>}
                <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-stone-200/70 bg-[#f0f2f5] px-3 text-[10px] text-stone-500">
@@ -1998,7 +2092,7 @@ export default function AgentWorkspace() {
                <div ref={messageListRef} onScroll={(event) => { const element = event.currentTarget; const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120; stickToBottom.current = atBottom; setShowJumpToBottom(!atBottom); }} className="chat-message-list soft-scroll relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 py-3 sm:px-5">
               {detail.hasMoreMessages && <button type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlderMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingOlderMessages ? "جارٍ تحميل الرسائل..." : "تحميل الرسائل الأقدم"}</button>}
             <div className="mx-auto rounded-full bg-white px-3 py-1 text-[9px] text-stone-400 shadow-sm">بدأت المحادثة · {formatCairoDateTime(detail.createdAt, false)}</div>
-                  {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} selectionMode={selectionMode} selected={selectedMessageIds.includes(message.id)} onToggleSelection={() => toggleMessageSelection(message.id)} highlighted={highlightedMessageId === message.id} highlightQuery={highlightedMessageId === message.id ? conversationSearchQuery || search : ""} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
+                   {displayedMessages.map((message: AnyRecord) => <Message key={message.id} message={message} conversationId={detail.id} readOnly={Boolean(detail.readOnly)} selectionMode={selectionMode} selected={selectedMessageIds.includes(message.id)} onToggleSelection={() => toggleMessageSelection(message.id)} highlighted={highlightedMessageId === message.id} highlightQuery={highlightedMessageId === message.id ? conversationSearchQuery || search : ""} onQuote={() => { setReplyingTo(message); replyInputRef.current?.focus(); }} onEdit={detail.channel !== "MESSENGER" && message.direction === "OUTBOUND" && message.authorId === user?.id && message.kind === "TEXT" && message.deliveryStatus === "SENT" ? () => beginMessageEdit(message) : undefined} onDelete={message.direction === "OUTBOUND" && message.authorId === user?.id && message.externalId && ["SENT", "DELIVERED", "READ", "PLAYED"].includes(message.deliveryStatus) ? () => void deleteSentMessage(message) : undefined} deleting={deletingMessageId === message.id} onForward={() => setForwardMessage({ ...message, conversationId: detail.id })} editing={editingMessageId === message.id} editingText={editingText} onEditingTextChange={setEditingText} onSaveEdit={() => void saveMessageEdit(message)} onCancelEdit={() => { setEditingMessageId(""); setEditingText(""); }} savingEdit={savingEdit} onReact={(emoji) => void reactToMessage(message, emoji)} onOpenImage={setLightboxImage} />)}
                  {hasMoreNewerMessages && <button type="button" onClick={() => void loadNewerMessages()} disabled={loadingNewerMessages} className="mx-auto rounded-full border border-stone-200 bg-white px-4 py-2 text-[10px] font-bold text-stone-600 shadow-sm disabled:opacity-50">{loadingNewerMessages ? "جارٍ تحميل الرسائل الأحدث..." : "تحميل الرسائل الأحدث"}</button>}
              {(detail.whisperNotes || []).map((note: AnyRecord) => <div key={`whisper-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-[#f0d786] bg-[#fff8e1] px-4 py-3 text-xs leading-6 text-[#755916]"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><CakeSlice size={14} /> توجيه سري من {note.author?.name || "المدير"}<span className="mr-auto text-[9px] font-normal text-[#aa8a36]">{ago(note.createdAt)}</span></div>{note.text}</div>)}
               {(detail.privateNotes || []).map((note: AnyRecord) => <div key={`private-note-${note.id}`} className="mx-auto w-full max-w-xl rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs leading-6 text-violet-950"><div className="mb-1 flex items-center gap-1.5 font-extrabold"><LockKeyhole size={13} /> رسالة سرية {note.authorId === user?.id ? `إلى ${note.recipient?.name || "زميل"}` : `من ${note.author?.name || "زميل"}`}<span className="mr-auto text-[9px] font-normal text-violet-500">{ago(note.createdAt)}</span></div>{note.text}</div>)}
@@ -2024,8 +2118,9 @@ export default function AgentWorkspace() {
                {failedRecording && failedRecording.conversationId === detail.id && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2"><span className="text-[10px] font-bold text-amber-900">لم يُرسل التسجيل بعد؛ احتفظنا به لتتمكن من المحاولة مجددًا.</span><audio controls src={failedRecording.previewUrl} className="h-8 max-w-full" /><button type="button" disabled={sending || privateNoteMode} onClick={retryFailedRecording} className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white disabled:opacity-50">إعادة الإرسال</button><button type="button" onClick={() => setFailedRecording(null)} className="rounded-lg bg-white px-3 py-2 text-[10px] font-bold text-stone-600">إزالة</button></div>}
                {!privateNoteMode && replyingTo && <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-[10px] text-amber-900"><ReplyIcon size={14} /><span className="min-w-0 flex-1 truncate">رد على: {replyingTo.text || (replyingTo.kind === "IMAGE" ? "صورة" : "رسالة مرفقة")}</span><button type="button" onClick={() => setReplyingTo(null)} className="rounded-md px-2 py-1 font-bold hover:bg-amber-100">إلغاء</button></div>}
              {showPlusMenu && <div ref={plusMenuRef} role="menu" aria-label="إضافة إلى الرسالة" className="soft-scroll plus-menu absolute bottom-[calc(4rem+16px)] right-3 z-20 max-h-[min(70vh,440px)] w-[min(320px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-2xl">
-               <div className="grid grid-cols-2 gap-1">
-                 <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); photoInputRef.current?.click(); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><ImageIcon size={15} className="text-emerald-700" /> الصور</button>
+                <div className="grid grid-cols-2 gap-1">
+                  <button type="button" role="menuitem" disabled={detail.channel === "MESSENGER"} title={detail.channel === "MESSENGER" ? "الملصقات غير مدعومة في Messenger" : "اختر ملصقًا سابقًا أو ارفع ملف WebP"} onClick={() => { setShowPlusMenu(false); setShowStickerPicker(true); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-pink-50 disabled:cursor-not-allowed disabled:opacity-40"><Smile size={15} className="text-pink-700" /> الملصقات</button>
+                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); photoInputRef.current?.click(); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><ImageIcon size={15} className="text-emerald-700" /> الصور</button>
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); cameraInputRef.current?.click(); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><Camera size={15} className="text-emerald-700" /> الكاميرا</button>
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); shareLocation(); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><MapPin size={15} className="text-emerald-700" /> الموقع الحالي</button>
                  <button type="button" role="menuitem" disabled={detail.channel !== "WHATSAPP"} title={detail.channel !== "WHATSAPP" ? "بطاقة جهة الاتصال متاحة عبر WhatsApp فقط" : undefined} onClick={() => { setShowPlusMenu(false); setContactQuery(""); setContactResults([]); setShowContactCard(true); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40"><BookUser size={15} className="text-sky-700" /> جهة اتصال</button>
@@ -2035,8 +2130,14 @@ export default function AgentWorkspace() {
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); setShowAiImageComposer(true); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-violet-50"><Sparkles size={15} className="text-violet-700" /> صورة بالذكاء الاصطناعي</button>
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); setShowProducts(true); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-amber-50"><CakeSlice size={15} className="text-amber-700" /> إرسال منتج</button>
                  <button type="button" role="menuitem" onClick={() => { setShowPlusMenu(false); setShowQuickReplyManager(true); }} className="flex min-h-10 items-center gap-2 rounded-xl px-3 text-right text-[11px] font-bold text-stone-700 hover:bg-emerald-50"><MessageCircle size={15} className="text-emerald-700" /> إدارة الردود السريعة</button>
-               </div>
-             </div>}
+                </div>
+              </div>}
+              {showStickerPicker && <div ref={stickerPickerRef} role="dialog" aria-label="اختيار ملصق" className="soft-scroll absolute bottom-[calc(4rem+16px)] right-3 z-30 max-h-[min(70vh,380px)] w-[min(360px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-3 shadow-2xl">
+                <div className="mb-2 flex items-center justify-between"><b className="flex items-center gap-2 text-xs"><Smile size={15} className="text-pink-700" /> ملصقات المحادثة</b><button type="button" onClick={() => setShowStickerPicker(false)} aria-label="إغلاق الملصقات" className="grid h-7 w-7 place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><X size={15} /></button></div>
+                {savedStickers.length ? <div className="grid grid-cols-3 gap-2">{savedStickers.map((sticker: AnyRecord) => <div key={sticker.id} className="min-w-0 rounded-xl border border-stone-100 bg-[#fafaf8] p-2"><ProtectedMedia conversationId={detail.id} message={sticker} /><button type="button" disabled={sending || !messagingEnabled} onClick={() => void sendSavedSticker(sticker)} className="mt-1 min-h-8 w-full rounded-lg bg-emerald-700 px-2 text-[9px] font-bold text-white disabled:opacity-40">إرسال</button></div>)}</div> : <p className="rounded-xl bg-stone-50 px-3 py-4 text-center text-[10px] leading-5 text-stone-500">لا توجد ملصقات WebP محفوظة في هذه المحادثة بعد.</p>}
+                <button type="button" disabled={sending || !messagingEnabled} onClick={() => { setShowStickerPicker(false); stickerInputRef.current?.click(); }} className="mt-2 flex min-h-9 w-full items-center justify-center gap-2 rounded-lg border border-pink-200 bg-pink-50 px-3 text-[10px] font-bold text-pink-800 disabled:opacity-40"><Plus size={13} /> اختيار ملف ملصق WebP</button>
+                {detail.channel === "WHATSAPP" && <p className="mt-2 text-[9px] leading-4 text-stone-400">يتطلب إرسال ملصق WhatsApp اتصال Baileys؛ سيعرض النظام تنبيهًا إذا كان وضع الاتصال الحالي لا يدعمه.</p>}
+              </div>}
               {showCanned && <div role="listbox" aria-label="الردود الجاهزة" className="soft-scroll absolute bottom-[calc(4rem+16px)] right-3 z-10 max-h-60 w-[min(340px,calc(100%-24px))] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">{filteredCanned.map((reply, index) => <button key={reply.id} type="button" role="option" aria-selected={index === cannedReplyIndex} onMouseEnter={() => setCannedReplyIndex(index)} onClick={() => chooseCannedReply(reply)} className={`flex w-full flex-col rounded-xl px-3 py-2 text-right ${index === cannedReplyIndex ? "bg-[#fff8e9]" : "hover:bg-[#fff8e9]"}`}><b className="text-xs text-[#b71c1c]">{reply.shortcut} <span className="font-medium text-stone-500">· {reply.title}</span></b><span className="mt-1 line-clamp-2 text-[10px] leading-5 text-stone-400">{reply.content}</span></button>)}{!filteredCanned.length && <p className="px-3 py-4 text-xs text-stone-400">لا يوجد رد مطابق</p>}</div>}
                {pendingQuickReply && !privateNoteMode && <div className="mb-2 flex min-w-0 items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] text-emerald-900"><span className="min-w-0 flex-1 truncate">رد سريع {pendingQuickReply.shortcut}{pendingQuickReply.mediaAsset?.fileName ? ` · ${pendingQuickReply.mediaAsset.fileName}` : ""}{pendingQuickReply.tagIds?.length ? ` · ستُضاف ${pendingQuickReply.tagIds.length} قائمة` : ""}</span><button type="button" aria-label="إلغاء الرد السريع" onClick={() => setPendingQuickReply(null)} className="grid h-7 w-7 shrink-0 place-items-center rounded-lg hover:bg-white"><X size={14} /></button></div>}
                 <form onSubmit={(event) => { if (privateNoteMode) void sendSecretNote(event); else sendReply(event); }}>
@@ -2054,7 +2155,8 @@ export default function AgentWorkspace() {
                     <div className="flex items-center justify-between gap-2 border-t border-stone-100 px-2 py-1.5">
                       <div className="flex items-center gap-1">
                         {detail.canSendPrivateNote && <button type="button" aria-label={privateNoteMode ? "إيقاف وضع الرسالة السرية" : "إرسال رسالة سرية لزميل"} aria-pressed={privateNoteMode} title={privateNoteMode ? "رسالة سرية لزميل" : "تبديل إلى رسالة سرية"} disabled={sending || sendingSecretNote || recording || requestingRecording} onClick={() => { setPrivateNoteMode((mode) => !mode); setShowCanned(false); setShowPlusMenu(false); }} className={`grid h-8 w-8 place-items-center rounded-lg disabled:opacity-40 ${privateNoteMode ? "bg-violet-100 text-violet-800" : "text-stone-500 hover:bg-violet-50 hover:text-violet-700"}`}><LockKeyhole size={16} /></button>}
-                        <button type="button" disabled={privateNoteMode || !metaWindowOpen || sending || requestingRecording} title={privateNoteMode ? "التسجيل الصوتي متاح لردود العميل فقط" : recording ? "إيقاف التسجيل وإرساله" : requestingRecording ? "جارٍ طلب إذن الميكروفون" : "تسجيل رسالة صوتية"} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-500 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button>
+                         <button type="button" disabled={privateNoteMode || !metaWindowOpen || sending || requestingRecording} title={privateNoteMode ? "التسجيل الصوتي متاح لردود العميل فقط" : recording ? "إيقاف التسجيل وإرساله" : requestingRecording ? "جارٍ طلب إذن الميكروفون" : "تسجيل رسالة صوتية"} onClick={() => void toggleRecording()} className={`grid h-8 w-8 place-items-center rounded-lg ${recording ? "bg-red-50 text-red-600" : "text-stone-500 hover:bg-stone-100"} disabled:opacity-40`}>{recording ? <MicOff size={16} /> : <Mic size={16} />}</button>
+                        <button type="button" aria-label="اختيار ملصق" title={detail.channel === "MESSENGER" ? "الملصقات غير مدعومة في Messenger" : "إرسال أو رفع ملصق WebP"} disabled={privateNoteMode || detail.channel === "MESSENGER" || !messagingEnabled || sending} onClick={() => { setShowPlusMenu(false); setShowCanned(false); setShowStickerPicker(true); }} className="grid h-8 w-8 place-items-center rounded-lg text-pink-700 hover:bg-pink-50 disabled:opacity-40"><Smile size={16} /></button>
                         <button ref={plusButtonRef} type="button" aria-label="إضافة مرفق أو إجراء" aria-haspopup="menu" aria-expanded={showPlusMenu} disabled={privateNoteMode || !messagingEnabled || sending} onClick={() => { setShowCanned(false); setShowPlusMenu((shown) => !shown); }} className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-40"><Plus size={17} /></button>
                       </div>
                       <button type="submit" disabled={privateNoteMode ? (!secretNote.trim() || !privateNoteRecipientId || !privateNoteRecipients.some((recipient) => recipient.id === privateNoteRecipientId) || sendingSecretNote) : ((!text.trim() && !pendingQuickReply?.mediaAssetId) || !messagingEnabled || sending)} className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-[11px] font-bold text-white shadow-sm transition disabled:cursor-not-allowed disabled:opacity-40 ${privateNoteMode ? "bg-violet-700 hover:bg-violet-800" : "bg-[#d32f2f] shadow-red-200 hover:bg-[#b71c1c]"}`}><span>{privateNoteMode ? sendingSecretNote ? "جارٍ الإرسال..." : "إرسال سري" : sending ? "جارٍ الإرسال" : "إرسال"}</span><Send size={14} /></button>
@@ -2074,7 +2176,8 @@ export default function AgentWorkspace() {
            <div className="rounded-2xl bg-[#fff8e9] p-4 text-center"><AvatarLarge name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} /><h3 className="mt-3 font-extrabold">{customerDisplayName(detail.customer)}</h3><p className="mt-1 text-[10px] text-stone-400">عميل منذ {formatCairoDateTime(detail.customer?.createdAt || detail.createdAt, false)}</p><div className="mt-3 flex justify-center gap-2"><a href={detail.customer?.phone ? `tel:${String(detail.customer.phone).replace(/[^0-9+*#;]/g, "")}` : undefined} aria-label="الاتصال بالعميل" title="الاتصال بالعميل" className={`grid h-9 w-9 place-items-center rounded-xl bg-white ${detail.customer?.phone ? "text-stone-500 hover:bg-emerald-50 hover:text-emerald-700" : "pointer-events-none text-stone-300"}`}><Phone size={15} /></a><button type="button" onClick={() => replyInputRef.current?.focus()} aria-label="إرسال رسالة للعميل" title="الانتقال إلى مربع الرد" className="grid h-9 w-9 place-items-center rounded-xl bg-white text-stone-500 hover:bg-amber-50 hover:text-amber-700"><MessageCircle size={15} /></button></div></div>
             {detail.channel === "WHATSAPP" && !isWhatsAppGroupConversation(detail) && <button type="button" disabled={detail.customer?.isBlocked || !callTarget || Boolean(callConversation)} onClick={() => setCallConversation(detail)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3 py-2.5 text-xs font-extrabold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"><PhoneCall size={16} />{callConversation ? "أنه المكالمة الحالية أولًا" : "مكالمة WhatsApp داخل النظام"}</button>}
             <div className="grid grid-cols-2 gap-2"><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isVip")} className={`rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isVip ? "bg-amber-100 text-amber-900" : "bg-stone-100 text-stone-600 hover:bg-amber-50"}`}>{detail.customer?.isVip ? "VIP · إزالة التمييز" : "تمييز العميل VIP"}</button><button type="button" disabled={savingCustomerFlags} onClick={() => void toggleCustomerFlag("isBlocked")} className={`flex items-center justify-center gap-1 rounded-xl px-3 py-2 text-[10px] font-bold disabled:opacity-50 ${detail.customer?.isBlocked ? "bg-red-100 text-red-800" : "bg-stone-100 text-stone-600 hover:bg-red-50 hover:text-red-700"}`}><Ban size={13} />{detail.customer?.isBlocked ? "إلغاء الحظر" : "حظر داخل النظام"}</button></div>
-             <div className="grid grid-cols-2 gap-2"><Info label="الهاتف" value={displayPhoneNumber(detail.customer?.phone)} /><Info label="القناة" value={channelName(detail.channel)} /></div>
+              <div className="grid grid-cols-2 gap-2"><Info label="الهاتف" value={displayPhoneNumber(detail.customer?.phone)} /><Info label="القناة" value={channelName(detail.channel)} /></div>
+              <CopyableCustomerIdentities customer={detail.customer} channel={detail.channel} externalCustomerId={detail.externalCustomerId} />
             <form onSubmit={saveCustomerProfile} className="space-y-3 rounded-2xl border border-stone-100 bg-white p-3">
               <label className="block text-[10px] font-bold text-stone-500">اسم العميل<input value={customerName} onChange={(event) => setCustomerName(event.target.value)} maxLength={120} className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal text-stone-700 outline-none focus:border-amber-300" /></label>
               <label className="block text-[10px] font-bold text-stone-500">رقم الهاتف<input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value)} maxLength={32} dir="ltr" className="mt-1 h-9 w-full rounded-lg border border-stone-200 px-2 text-xs font-normal text-stone-700 outline-none focus:border-amber-300" /></label>
@@ -2099,7 +2202,7 @@ export default function AgentWorkspace() {
       {lightboxImage && <div role="dialog" aria-modal="true" aria-label="معاينة الصورة" onClick={() => setLightboxImage("")} className="fixed inset-0 z-[70] grid place-items-center bg-black/90 p-4"><button type="button" aria-label="إغلاق معاينة الصورة" onClick={() => setLightboxImage("")} className="absolute right-4 top-4 grid h-11 w-11 place-items-center rounded-full bg-white/15 text-2xl text-white hover:bg-white/25">×</button><img src={lightboxImage} alt="معاينة مكبرة" onClick={(event) => event.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-lg object-contain shadow-2xl" /></div>}
      {showContacts && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowContacts(false)}><section role="dialog" aria-modal="true" aria-labelledby="contacts-title" className="panel flex max-h-[85vh] w-full max-w-lg flex-col p-5" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="contacts-title" className="text-base font-extrabold">جهات الاتصال</h2><p className="mt-1 text-xs text-stone-500">اختر اسمًا لفتح محادثة WhatsApp داخل النظام.</p></div><button type="button" onClick={() => setShowContacts(false)} aria-label="إغلاق جهات الاتصال" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><label className="mb-3 flex h-10 items-center gap-2 rounded-xl bg-stone-50 px-3"><Search size={15} className="text-stone-400" /><input autoFocus value={contactQuery} onChange={(event) => setContactQuery(event.target.value)} placeholder="ابحث بالاسم أو رقم الهاتف" className="w-full bg-transparent text-xs outline-none" /></label><div className="soft-scroll min-h-32 flex-1 overflow-y-auto">{loadingContacts ? <p className="py-8 text-center text-xs text-stone-400">جارٍ البحث...</p> : contactResults.map((contact) => <button key={contact.id} type="button" disabled={!contact.phone} onClick={() => void startChatFromContact(contact)} className="flex w-full items-center gap-3 border-b border-stone-100 px-2 py-3 text-right hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><Avatar name={customerDisplayName(contact)} src={contact.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(contact)}</b><span dir="ltr" className="mt-1 block text-right text-[10px] text-stone-400">{contact.phone || "أضف رقم هاتف لبدء محادثة"}</span></span><MessageCircle size={16} className="text-emerald-700" /></button>)}{!loadingContacts && !contactResults.length && <p className="py-8 text-center text-xs text-stone-400">لا توجد جهة اتصال مطابقة.</p>}</div><p className="mt-3 text-[9px] leading-4 text-stone-400">في وضع WhatsApp Business API قد يتطلب بدء مراسلة جديدة استخدام قالب معتمد من Meta.</p></section></div>}
      {forwardMessage && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setForwardMessage(null); setForwardQuery(""); }}><section role="dialog" aria-modal="true" aria-labelledby="forward-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="forward-title" className="text-base font-extrabold">تحويل الرسالة</h2><p className="mt-1 text-xs leading-5 text-stone-500">ستُرسل نسخة من الرسالة إلى محادثة أخرى.</p></div><button type="button" onClick={() => { setForwardMessage(null); setForwardQuery(""); }} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div><input autoFocus value={forwardQuery} onChange={(event) => setForwardQuery(event.target.value)} placeholder="ابحث عن محادثة" className="mb-3 h-10 w-full rounded-xl border border-stone-200 px-3 text-xs outline-none focus:border-amber-400" /><div className="max-h-[55vh] space-y-2 overflow-y-auto">{conversations.filter((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())).map((target) => <button key={target.id} type="button" onClick={() => void forwardMessageTo(target)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50"><Avatar name={customerDisplayName(target.customer)} src={target.customer?.avatarUrl} /><span className="min-w-0 flex-1"><b className="block truncate text-xs">{customerDisplayName(target.customer)}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-stone-400"><ChannelIcon channel={target.channel} />{channelName(target.channel)}</span></span><Forward size={15} className="text-stone-400" /></button>)}{!conversations.some((item) => item.id !== forwardMessage.conversationId && customerDisplayName(item.customer).toLocaleLowerCase().includes(forwardQuery.trim().toLocaleLowerCase())) && <p className="rounded-xl bg-stone-50 p-5 text-center text-xs text-stone-500">لا توجد محادثات مطابقة ضمن المحادثات المحمّلة.</p>}</div></section></div>}
-      {showHandoff && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowHandoff(false)}><section role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="handoff-title" className="text-base font-extrabold">تحويل المحادثة لزميل متاح</h2><p className="mt-1 text-xs leading-5 text-stone-500">اختر زميلًا متصلًا لديه صلاحية على {channelName(detail?.channel || "")}. تبقى المحادثة لديك حتى يقبلها؛ وإذا رفضها، تعود إليك لتتابعها أو تحولها لزميل آخر.</p></div><button type="button" onClick={() => setShowHandoff(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div>{handoffError && handoffError.conversationId === activeId && <div role="alert" className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-700"><p>{handoffError.message}</p>{!handoffColleagues.length && !loadingHandoffColleagues && <button type="button" onClick={() => void openHandoffDialog()} className="mt-1 font-bold underline">إعادة تحميل الزملاء</button>}</div>}<div className="max-h-[55vh] space-y-2 overflow-y-auto">{loadingHandoffColleagues ? <p role="status" className="rounded-xl bg-stone-50 p-5 text-center text-xs text-stone-500">جارٍ تحميل الزملاء...</p> : <>{handoffColleagues.map((colleague) => <button key={colleague.id} type="button" disabled={Boolean(handoffBusyId)} onClick={() => void handoffToColleague(colleague.id, colleague.name)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50 disabled:opacity-60"><Avatar name={colleague.name} /><span className="min-w-0 flex-1"><b className="block truncate text-sm">{colleague.name}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متاح الآن</span></span><span className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">{handoffBusyId === colleague.id ? "جارٍ التحويل..." : "تحويل"}</span></button>)}{!handoffColleagues.length && !handoffError && <div className="rounded-xl bg-stone-50 p-5 text-center text-xs leading-6 text-stone-500">لا يوجد زميل متاح لهذه القناة الآن. جرّب لاحقًا أو أبقِ المحادثة لديك.</div>}</>}</div></section></div>}
+      {showHandoff && <div className="fixed inset-0 z-50 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => setShowHandoff(false)}><section role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="panel w-full max-w-md p-5 sm:p-6" onClick={(event) => event.stopPropagation()}><div className="mb-4 flex items-start justify-between gap-3"><div><h2 id="handoff-title" className="text-base font-extrabold">تحويل المحادثة لزميل متاح</h2><p className="mt-1 text-xs leading-5 text-stone-500">اختر زميلًا متصلًا لديه صلاحية على {channelName(detail?.channel || "")}. تبقى المحادثة لديك حتى يقبلها؛ وإذا رفضها، تعود إليك لتتابعها أو تحولها لزميل آخر.</p></div><button type="button" onClick={() => setShowHandoff(false)} aria-label="إغلاق" className="rounded-lg p-1 text-xl text-stone-400">×</button></div>{handoffError && handoffError.conversationId === activeId && <div role="alert" className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-700"><p>{handoffError.message}</p>{!handoffColleagues.length && !loadingHandoffColleagues && <button type="button" onClick={() => void openHandoffDialog()} className="mt-1 font-bold underline">إعادة تحميل الزملاء</button>}</div>}<div className="max-h-[55vh] space-y-2 overflow-y-auto">{loadingHandoffColleagues ? <p role="status" className="rounded-xl bg-stone-50 p-5 text-center text-xs text-stone-500">جارٍ تحميل الزملاء...</p> : <>{handoffColleagues.map((colleague) => <button key={colleague.id} type="button" disabled={Boolean(handoffBusyId)} onClick={() => void handoffToColleague(colleague.id, colleague.name)} className="flex w-full items-center gap-3 rounded-xl border border-stone-100 bg-white p-3 text-right hover:border-amber-200 hover:bg-amber-50 disabled:opacity-60"><Avatar name={colleague.name} /><span className="min-w-0 flex-1"><b className="block truncate text-sm">{colleague.name}</b><span className="mt-1 flex items-center gap-1.5 text-[10px] text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-500" /> متاح الآن</span></span><span className="rounded-lg bg-[#d32f2f] px-3 py-2 text-[10px] font-bold text-white">{handoffBusyId === colleague.id ? "جارٍ التحويل..." : "تحويل"}</span></button>)}{!handoffColleagues.length && !handoffError && <div className="rounded-xl bg-stone-50 p-5 text-center text-xs leading-6 text-stone-500">لا يوجد زميل مؤهل ومتاح لهذه المحادثة الآن. جرّب لاحقًا أو أبقِها لديك.</div>}</>}</div></section></div>}
     {showProducts && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }}><section role="dialog" aria-modal="true" aria-labelledby="products-title" className="panel max-h-[90vh] w-full max-w-4xl overflow-y-auto p-4 sm:p-6" onClick={(event) => event.stopPropagation()}>
        <div className="mb-4 flex items-center justify-between gap-3"><div><h2 id="products-title" className="text-lg font-extrabold">كتالوج حلواني بندق</h2><p className="text-xs text-stone-400">حدد منتجًا واحدًا أو أكثر لإرسال السعر والصورة معًا</p></div><button type="button" aria-label="إغلاق الكتالوج" onClick={() => { setShowProducts(false); setSelectedProductIds([]); }} className="rounded-lg px-3 py-1 text-xl text-stone-400">×</button></div>
        <label className="mb-3 flex h-10 items-center gap-2 rounded-xl border border-stone-200 bg-white px-3"><Search size={15} className="text-stone-400" /><input value={productSearch} onChange={(event) => setProductSearch(event.target.value)} placeholder="ابحث باسم المنتج أو الكود" className="w-full bg-transparent text-xs outline-none" /></label>
@@ -2147,14 +2250,14 @@ function Message({ message, conversationId, readOnly = false, selectionMode = fa
   const hasMedia = ["IMAGE", "AUDIO", "VIDEO", "FILE", "STICKER"].includes(message.kind);
   const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
   const contactCard = metadata.contactCard && typeof metadata.contactCard === "object" ? metadata.contactCard : null;
-  const deliveryLabel = message.deliveryStatus === "UPLOADING" ? "جارٍ رفع الملف" : message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
+  const deliveryLabel = message.deliveryStatus === "UPLOADING" ? "جارٍ رفع الملف" : message.deliveryStatus === "PENDING" ? "جارٍ الإرسال" : message.deliveryStatus === "QUEUED" ? "في قائمة الإرسال" : message.deliveryStatus === "FAILED" ? "تعذر الإرسال" : message.deliveryStatus === "PLAYED" ? "تم تشغيلها" : message.deliveryStatus === "READ" ? "مقروء" : message.deliveryStatus === "DELIVERED" ? "تم التسليم" : message.author?.name || "تم الإرسال";
         return <div id={`message-${message.id}`} className={`agent-message-row flex items-center gap-2 ${outgoing ? "justify-start" : "justify-end"} ${highlighted ? "search-message-highlight" : ""}`}>{selectionMode && outgoing && <MessageSelectionControl selected={selected} onToggle={onToggleSelection} />}<div className="group relative w-fit max-w-[80%]" style={selectionMode ? { maxWidth: "calc(80% - 2.25rem)" } : undefined}><div className={`agent-message-bubble ${selected ? "ring-2 ring-emerald-500 ring-offset-1" : ""} ${outgoing ? "agent-message-outbound rounded-tr-sm bg-[#d9fdd3]" : "agent-message-inbound rounded-tl-sm bg-white"} max-w-full rounded-2xl px-3 py-2 shadow-sm`}>
     {message.quotedMessage && <div className="mb-2 rounded-lg border-r-2 border-[#d32f2f] bg-stone-50/80 px-2.5 py-1.5 text-[10px] text-stone-500"><b>{message.quotedMessage.author?.name || "رسالة مقتبسة"}</b><p className="mt-0.5 line-clamp-2">{message.quotedMessage.text || (message.quotedMessage.kind === "IMAGE" ? "صورة" : "مرفق")}</p></div>}
     {hasMedia && (message.localPreviewUrl ? ["IMAGE", "STICKER"].includes(message.kind) ? <button type="button" onClick={() => onOpenImage?.(message.localPreviewUrl)} className="mb-2 block"><img src={message.localPreviewUrl} alt={message.kind === "STICKER" ? "ملصق قيد الإرسال" : "صورة قيد الإرسال"} className="max-h-56 rounded-xl object-contain" /></button> : message.kind === "AUDIO" ? <audio controls src={message.localPreviewUrl} className="mb-2 max-w-full" /> : message.kind === "VIDEO" ? <video controls src={message.localPreviewUrl} className="mb-2 max-h-56 max-w-full rounded-xl" /> : <span className="mb-2 block text-xs">ملف مرفق قيد الإرسال</span> : message.mediaAssetId ? <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} /> : message.kind === "IMAGE" && outgoing && message.mediaUrl ? <button type="button" onClick={() => onOpenImage?.(message.mediaUrl)} className="mb-2 block"><img src={message.mediaUrl} alt="منتج حلواني بندق" className="max-h-56 rounded-xl object-cover" /></button> : <ProtectedMedia conversationId={conversationId} message={message} onOpenImage={onOpenImage} />)}
      {message.kind === "AUDIO" && message.transcription && <p className="mb-2 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs leading-6 text-stone-700">تفريغ صوتي: {message.transcription}</p>}
      {contactCard && <div className="mb-2 flex min-w-52 items-center gap-3 rounded-xl border border-emerald-100 bg-white p-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-emerald-50 text-emerald-800"><BookUser size={19} /></span><span className="min-w-0"><b className="block truncate text-sm">{contactCard.name || "جهة اتصال"}</b><a href={`tel:+${String(contactCard.phone || "").replace(/[^0-9]/g, "")}`} dir="ltr" className="mt-1 block text-xs text-emerald-800 underline">+{String(contactCard.phone || "").replace(/[^0-9]/g, "")}</a></span></div>}
       {editing ? <div className="my-2 min-w-[230px]"><textarea autoFocus rows={3} maxLength={4000} value={editingText} onChange={(event) => onEditingTextChange?.(event.target.value)} className="w-full resize-y rounded-xl border border-amber-200 bg-white p-2 text-sm leading-6 outline-none focus:border-amber-400" /><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={onCancelEdit} className="rounded-lg bg-stone-100 px-3 py-1.5 text-[10px] font-bold text-stone-600">إلغاء</button><button type="button" disabled={savingEdit || !editingText.trim()} onClick={onSaveEdit} className="rounded-lg bg-[#d32f2f] px-3 py-1.5 text-[10px] font-bold text-white disabled:opacity-50">{savingEdit ? "جارٍ الحفظ..." : "حفظ التعديل"}</button></div></div> : message.kind === "POLL" ? <div className="min-w-[220px] rounded-xl border border-sky-100 bg-sky-50/60 p-3"><div className="mb-1 text-[9px] font-extrabold uppercase tracking-wide text-sky-700">استطلاع</div><p className="whitespace-pre-wrap text-sm font-bold leading-6">{message.text}</p><div className="mt-2 space-y-1.5">{(Array.isArray(metadata.pollOptions) ? metadata.pollOptions : []).map((option: string, index: number) => <div key={`${option}-${index}`} className="rounded-lg border border-sky-100 bg-white px-2.5 py-1.5 text-xs">{option}</div>)}</div><p className="mt-2 text-[9px] text-stone-400">التصويت والنتائج متاحان على المنصة الأصلية.</p></div> : message.kind === "LOCATION" ? <a className="flex items-center gap-2 text-sm text-blue-700 underline" href={`https://maps.google.com/?q=${message.latitude},${message.longitude}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} /> فتح موقع العميل</a> : message.text && <p className="message-body whitespace-pre-wrap text-sm leading-7">{splitMessageTextLinks(message.text).map((part, index) => part.href ? <a key={index} href={part.href} target="_blank" rel="noopener noreferrer" dir="ltr" className="text-blue-700 underline decoration-blue-300 underline-offset-2">{part.text}</a> : <span key={index}>{part.text}</span>)}</p>}
-     <div className="agent-message-time mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{metadata.forwardedFrom && <span>محوّلة · </span>}{outgoing && `${deliveryLabel} · `}{formatCairoTime(message.createdAt)}{metadata.editedAt && <span className="text-stone-400"> · معدلة</span>}{outgoing && ["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus) && (message.deliveryStatus === "SENT" ? <Check size={11} className="text-stone-400" /> : <CheckCheck size={11} className={message.deliveryStatus === "READ" ? "text-sky-600" : "text-stone-400"} />)}</div>
+      <div className="agent-message-time mt-1.5 flex items-center gap-1 text-[9px] text-stone-400">{metadata.forwardedFrom && <span>محوّلة · </span>}{outgoing && `${deliveryLabel} · `}{formatCairoTime(message.createdAt)}{metadata.editedAt && <span className="text-stone-400"> · معدلة</span>}{outgoing && ["SENT", "DELIVERED", "READ", "PLAYED"].includes(message.deliveryStatus) && (message.deliveryStatus === "SENT" ? <Check size={11} className="text-stone-400" /> : <CheckCheck size={11} className={message.deliveryStatus === "READ" || message.deliveryStatus === "PLAYED" ? "text-sky-600" : "text-stone-400"} />)}</div>
        {!!message.reactions?.length && <div className="mt-2 flex flex-wrap gap-1">{message.reactions.map((reaction: AnyRecord) => readOnly ? <span key={reaction.id} title={reaction.user?.name || "تفاعل"} className="rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[10px]">{reaction.emoji}</span> : <button key={reaction.id} type="button" title={reaction.user?.name || "تفاعل"} onClick={() => onReact?.(reaction.emoji)} className="rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[10px]">{reaction.emoji}</button>)}</div>}
         {!readOnly && !selectionMode && <>
           <div className="mt-2 flex items-center justify-end gap-1 border-t border-stone-100/70 pt-1.5">{onEdit && <button type="button" onClick={onEdit} title="تعديل الرسالة" aria-label="تعديل الرسالة" className="grid h-7 w-7 place-items-center rounded-lg text-stone-400 hover:bg-white hover:text-stone-700"><Pencil size={13} /></button>}{onDelete && <button type="button" disabled={deleting} onClick={onDelete} title="حذف الرسالة" aria-label="حذف الرسالة" className="grid h-7 w-7 place-items-center rounded-lg text-stone-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"><Trash2 size={13} /></button>}{onForward && message.kind !== "SYSTEM" && <button type="button" onClick={onForward} title="تحويل الرسالة إلى محادثة أخرى" aria-label="تحويل الرسالة إلى محادثة أخرى" className="grid h-7 w-7 place-items-center rounded-lg text-stone-400 hover:bg-white hover:text-stone-700"><Forward size={13} /></button>}{["👍", "❤️", "😂"].map((emoji) => <button type="button" key={emoji} onClick={() => onReact?.(emoji)} title={`تفاعل ${emoji}`} className="grid h-7 min-w-7 place-items-center rounded-lg text-sm hover:bg-white">{emoji}</button>)}</div>
