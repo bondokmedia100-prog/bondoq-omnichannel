@@ -341,7 +341,7 @@ async function persistBaileysReceipt(update: any) {
       },
       select: { id: true, conversationId: true, deliveryStatus: true, externalId: true }
     });
-    message = candidates.find((candidate) => matchesStoredBaileysMessageKey(candidate.externalId, key)) || null;
+    message = candidates.find((candidate) => candidate.externalId && matchesStoredBaileysMessageKey(candidate.externalId, key)) || null;
   }
   if (!message || !isDeliveryStatusAdvance(message.deliveryStatus, deliveryStatus)) return;
   const atOrAbove = deliveryStatus === "DELIVERED" ? ["DELIVERED", "READ", "PLAYED"]
