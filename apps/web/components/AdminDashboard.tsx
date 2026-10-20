@@ -147,7 +147,11 @@ export default function AdminDashboard() {
       setUser(profile); load(profile);
       connection = io(API_URL, { auth: { token: getToken() } });
       setSocket(connection);
-      connection.on("connect", () => { void load(profile); });
+      connection.on("connect", () => {
+        void load(profile);
+        const conversationId = activeConversationRef.current;
+        if (conversationId) connection?.emit("conversation:join", conversationId);
+      });
       connection.on("message:new", (event) => {
         load(profile);
         const conversationId = event.conversationId || event.conversation?.id;
