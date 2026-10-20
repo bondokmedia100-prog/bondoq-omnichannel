@@ -6,12 +6,13 @@ import { Channel, ConversationBotState, ConversationStatus, Department, MessageK
 import QRCode from "qrcode";
 import { prisma } from "./prisma";
 import { config } from "./config";
-import { io } from "./realtime";
+import { emitConversationActivity, io } from "./realtime";
 import { normalizePhoneNumber } from "./egyptianPhoneFormatter";
 import { sendPushNotification } from "./pushNotifications";
 import { repacketizeOggOpusToCode3 } from "./oggOpus";
 import { assignConversation, withInboundConversationLock } from "./routing";
 import { parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
+import { baileysDeliveryStatus, isDeliveryStatusAdvance } from "./baileysReceipt";
 import { channelViewerWhere } from "./messengerAccess";
 import { isWhatsAppGroupJid } from "./whatsappGroup";
 
@@ -39,6 +40,7 @@ let stopRequested = false;
 let reconnectDelay = 2000;
 let callReplyText = defaultCallReply;
 const pendingCalls = new Map<string, { callId: string; callerJid: string; phoneNumber: string; conversationId?: string; assignedAgentId?: string; customerName: string; isVideo: boolean; receivedAt: string }>();
+const presenceTimers = new Map<string, NodeJS.Timeout>();
 const profilePictureCache = new Map<string, { url: string | undefined; expiresAt: number }>();
 const profilePictureRequests = new Map<string, Promise<string | undefined>>();
 const groupSubjectCache = new Map<string, string>();
@@ -209,23 +211,71 @@ export async function markBaileysMessagesRead(externalIds: string[]) {
   if (keys.length) await socket.readMessages(keys as any);
 }
 
+export async function markBaileysMessagePlayed(externalId: string) {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED") return false;
+  const key = parseStoredBaileysMessageKey(externalId, "INBOUND");
+  if (!key) return false;
+  await socket.sendReceipt(key.remoteJid, typeof key.participant === "string" ? key.participant : undefined, [key.id], "played");
+  return true;
+}
+
+export async function sendBaileysPresence(remoteJid: string, activity: "composing" | "recording" | "paused") {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED" || !/@(?:s\.whatsapp\.net|lid)$/i.test(remoteJid) || isWhatsAppGroupJid(remoteJid)) return false;
+  await socket.presenceSubscribe(remoteJid);
+  await socket.sendPresenceUpdate(activity, remoteJid);
+  return true;
+}
+
+export async function subscribeBaileysPresence(remoteJid: string) {
+  if (!socket || state.mode !== "BAILEYS" || state.status !== "CONNECTED" || !/@(?:s\.whatsapp\.net|lid)$/i.test(remoteJid) || isWhatsAppGroupJid(remoteJid)) return;
+  await socket.presenceSubscribe(remoteJid);
+}
+
+async function persistBaileysPresence(update: any) {
+  const remoteJid = String(update?.id || "");
+  if (!remoteJid || isWhatsAppGroupJid(remoteJid)) return;
+  const states = Object.values(update?.presences || {}).map((presence: any) => String(presence?.lastKnownPresence || "").toLowerCase());
+  if (!states.length) return;
+  const activity = states.includes("recording") ? "recording" : states.includes("composing") ? "typing" : null;
+  const conversation = await prisma.conversation.findUnique({
+    where: { channel_externalConversationId: { channel: Channel.WHATSAPP, externalConversationId: remoteJid } },
+    select: { id: true, assignedAgentId: true, branchId: true, channel: true }
+  });
+  if (!conversation) return;
+  const previousTimer = presenceTimers.get(conversation.id);
+  if (previousTimer) clearTimeout(previousTimer);
+  void emitConversationActivity(conversation, "whatsapp:customer-activity", { conversationId: conversation.id, activity }).catch((error) => console.warn("WhatsApp customer activity broadcast failed", error));
+  if (!activity) {
+    presenceTimers.delete(conversation.id);
+    return;
+  }
+  const timer = setTimeout(() => {
+    presenceTimers.delete(conversation.id);
+    void emitConversationActivity(conversation, "whatsapp:customer-activity", { conversationId: conversation.id, activity: null }).catch((error) => console.warn("WhatsApp customer activity broadcast failed", error));
+  }, 10_000);
+  presenceTimers.set(conversation.id, timer);
+}
+
 async function persistBaileysReceipt(update: any) {
   const key = update?.key;
   const id = String(key?.id || "");
   const remoteJid = String(key?.remoteJid || "");
   if (!id || !remoteJid) return;
-  const receipt = update.receipt || update.update || {};
-  const statusValue = update.update?.status ?? update.status;
-  const statusText = String(statusValue || "").toUpperCase();
-  const statusNumber = Number(statusValue);
-  const deliveryStatus = receipt.readTimestamp || statusNumber >= 4 || statusText.includes("READ") ? "READ"
-    : receipt.receiptTimestamp || statusNumber >= 3 || statusText.includes("DELIVERY_ACK") || statusText.includes("DELIVERED") ? "DELIVERED" : null;
+  const deliveryStatus = baileysDeliveryStatus(update);
   if (!deliveryStatus) return;
   const storedKey = serializeBaileysMessageKey({ remoteJid, id, fromMe: true });
   const storedIds = [`WHATSAPP:${id}`, `WHATSAPP:baileys:${remoteJid}:${id}`, ...(storedKey ? [`WHATSAPP:${storedKey}`] : [])];
   const message = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, direction: "OUTBOUND" }, select: { id: true, conversationId: true, deliveryStatus: true } });
-  if (!message || message.deliveryStatus === "READ" || message.deliveryStatus === deliveryStatus) return;
-  const saved = await prisma.message.update({ where: { id: message.id }, data: { deliveryStatus } });
+  if (!message || !isDeliveryStatusAdvance(message.deliveryStatus, deliveryStatus)) return;
+  const atOrAbove = deliveryStatus === "DELIVERED" ? ["DELIVERED", "READ", "PLAYED"]
+    : deliveryStatus === "READ" ? ["READ", "PLAYED"] : ["PLAYED"];
+  const changed = await prisma.message.updateMany({
+    where: { id: message.id, OR: [{ deliveryStatus: null }, { deliveryStatus: { notIn: atOrAbove } }] },
+    data: { deliveryStatus }
+  });
+  if (!changed.count) return;
+  const saved = await prisma.message.findUnique({ where: { id: message.id } });
+  if (!saved) return;
   io?.to(`conversation:${message.conversationId}`).to("admins").emit("message:status", { conversationId: message.conversationId, message: saved });
 }
 
@@ -350,6 +400,31 @@ export async function transcodeVoiceToOgg(buffer: Buffer, contentType: string) {
     });
     child.on("error", (error) => reject(new Error(`Voice-note conversion requires ffmpeg: ${error.message}`)));
     child.on("close", (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error("تعذر تحويل التسجيل الصوتي إلى OGG/Opus")));
+    child.stdin.on("error", () => {});
+    child.stdin.end(buffer);
+  });
+}
+
+export async function transcodeAnimatedWebpToTelegramSticker(buffer: Buffer) {
+  const maxStickerBytes = 256 * 1024;
+  return new Promise<Buffer>((resolve, reject) => {
+    const child = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "webp", "-i", "pipe:0", "-t", "3", "-an", "-vf", "fps=30,scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0", "-crf", "42", "-b:v", "0", "-deadline", "good", "-cpu-used", "2", "-f", "webm", "pipe:1"]);
+    const chunks: Buffer[] = [];
+    let outputSize = 0;
+    let tooLarge = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      outputSize += chunk.length;
+      if (outputSize > maxStickerBytes) {
+        tooLarge = true;
+        child.kill("SIGKILL");
+      } else chunks.push(chunk);
+    });
+    child.on("error", (error) => reject(new Error(`Telegram animated sticker conversion requires ffmpeg: ${error.message}`)));
+    child.on("close", (code) => {
+      if (tooLarge) reject(new Error("حجم الملصق المتحرك بعد التحويل أكبر من الحد الذي يقبله Telegram (256 كيلوبايت)."));
+      else if (code !== 0) reject(new Error("تعذر تحويل ملصق WebP المتحرك إلى صيغة Telegram."));
+      else resolve(Buffer.concat(chunks));
+    });
     child.stdin.on("error", () => {});
     child.stdin.end(buffer);
   });
@@ -663,6 +738,9 @@ async function startSocket() {
   });
   current.ev.on("message-receipt.update", (updates) => {
     for (const update of updates) void persistBaileysReceipt(update).catch((error) => console.warn("Baileys receipt could not be stored", error));
+  });
+  current.ev.on("presence.update", (update) => {
+    void persistBaileysPresence(update).catch((error) => console.warn("Baileys customer presence could not be stored", error));
   });
   current.ev.on("call", (calls) => {
     for (const call of calls) void handleIncomingCall(current, call).catch((error) => console.warn("WhatsApp call notification failed", error));

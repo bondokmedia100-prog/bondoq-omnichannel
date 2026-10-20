@@ -10,12 +10,12 @@ import { Channel, ConversationHandoffStatus, ConversationStatus, Department, Mes
 import { config } from "./config";
 import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canRespondToHandoff, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, loadSessionUser, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
-import { broadcastPresence, connectedUserIds, emitConversationEvent, initRealtime, io, isUserConnected, refreshChannelAccessForDepartments, revokeConversationRoomAccess } from "./realtime";
+import { broadcastPresence, connectedUserIds, emitConversationActivity, emitConversationEvent, initRealtime, io, isUserConnected, refreshChannelAccessForDepartments, revokeConversationRoomAccess } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations, scheduleUnansweredReassignment, withConversationAssignmentLock, withInboundConversationLock } from "./routing";
 import { answerTelegramCallback, channelRecipient, deleteProviderMessage, editProviderMessage, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, reactToProviderMessage, sendCsatPrompt, sendToChannel } from "./providers";
 import { ingestMessage, updateEditedInboundMessage } from "./ingestion";
 import { getKalemlySettings, safeProviderResponse, saveKalemlySettings, sendKalemlyTest, startKalemlyWaWorker, kalemlyExternalMessageId } from "./KalemlyWaService";
-import { defaultCallReply, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, logoutBaileysWhatsApp, markBaileysMessagesRead, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, type WhatsAppMode } from "./BaileysWhatsAppService";
+import { defaultCallReply, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, logoutBaileysWhatsApp, markBaileysMessagePlayed, markBaileysMessagesRead, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, sendBaileysPresence, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, type WhatsAppMode } from "./BaileysWhatsAppService";
 import { startOfCairoDay } from "./cairoTime";
 import { getMessengerSettings, getTelegramSettings, saveMessengerSettings, saveTelegramSettings } from "./ChannelIntegrationService";
 import { allowedMediaTypes, imageSignatureMatches, publicMediaUrl, safeFileName, uploadLimitBytes, verifyPublicMediaUrl } from "./mediaStorage";
@@ -604,7 +604,7 @@ app.patch("/api/conversations/:id/personal-settings", agentGuard, async (req: Au
     : parsed.data.isArchived ? "CONVERSATION_ARCHIVED_FOR_USER"
       : clear ? "CONVERSATION_CLEARED_FOR_USER" : "CONVERSATION_PREFERENCE_UPDATED";
   await audit(req.user!.id, action, conversation.id, { ...parsed.data });
-  res.json({ conversationId: conversation.id, personalState });
+  res.json({ conversationId: conversation.id, personalState, unreadCount: markRead ? 0 : undefined });
 });
 
 app.get("/api/me/muted-conversations", agentGuard, async (req: AuthedRequest, res: express.Response) => {
@@ -777,9 +777,9 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
   const where: Prisma.ConversationWhereInput = {
     AND: [
       ...scope,
+      { NOT: { personalPreferences: { some: { userId: actor.id, isDeleted: true } } } },
       ...(deniedChannels.length ? [{ NOT: { channel: { in: deniedChannels } } }] : []),
       ...(groupFilterWhere ? [groupFilterWhere] : []),
-      { NOT: { personalPreferences: { some: { userId: actor.id, isDeleted: true } } } },
       statusFilter,
       ...(channel ? [{ channel }] : []),
       ...(req.query.favorite === "1" ? [{ favorites: { some: { userId: actor.id } } }] : []),
@@ -793,19 +793,21 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
   const rows = await prisma.conversation.findMany({
     where,
     include: {
-      customer: { select: { id: true, name: true, displayName: true, phone: true, avatarUrl: true, isBlocked: true } },
+      customer: { select: { id: true, name: true, displayName: true, phone: true, avatarUrl: true, isBlocked: true, channelIdentifiers: true } },
       assignedAgent: { select: { id: true, name: true } },
-      personalPreferences: { where: { userId: actor.id } },
+      personalPreferences: { where: { userId: actor.id }, select: { isArchived: true, isMuted: true, isDeleted: true, clearedAt: true, readAt: true } },
       messages: { where: messageMatch, select: { id: true, text: true, transcription: true, kind: true, direction: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 3 }
     },
     orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }], skip: offsetValue, take: 51
   });
   const hasMore = rows.length > 50;
-  const items = rows.slice(0, 50).map((conversation) => {
+  const items = rows.slice(0, 50).flatMap((conversation) => {
     const { personalPreferences, ...item } = conversation;
     const personalState = personalPreferences[0] || null;
     const messages = personalState?.clearedAt ? item.messages.filter((message) => message.createdAt > personalState.clearedAt!) : item.messages;
-    return { ...item, messages, personalState, readOnly: !canWorkOnConversation(actor, item), matchType: messages.length ? "MESSAGE" : "CUSTOMER" };
+    const customerMatch = [conversation.customer.displayName, conversation.customer.name].some((name) => name?.toLocaleLowerCase().includes(query.toLocaleLowerCase())) || matchingCustomerIds.includes(conversation.customer.id);
+    if (!customerMatch && !messages.length) return [];
+    return [{ ...item, messages, personalState, readOnly: !canWorkOnConversation(actor, item), matchType: messages.length ? "MESSAGE" : "CUSTOMER" }];
   });
   res.json({ items, hasMore, nextOffset: offsetValue + items.length });
 });
@@ -843,8 +845,9 @@ app.put("/api/conversations/:id/pin", agentGuard, async (req: AuthedRequest, res
 app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const messageLimit = req.query.messageLimit === undefined ? null : pageLimit(req.query.messageLimit);
   const canViewAllPrivateNotes = canViewAllPrivateConversationNotes(req.user!);
+  const preferenceKey = { userId: req.user!.id, conversationId: req.params.id };
   const existingPersonalState = await prisma.conversationPreference.findUnique({
-    where: { userId_conversationId: { userId: req.user!.id, conversationId: req.params.id } },
+    where: { userId_conversationId: preferenceKey },
     select: { isArchived: true, isMuted: true, isDeleted: true, clearedAt: true, readAt: true }
   });
   if (existingPersonalState?.isDeleted) return res.status(404).json({ error: "المحادثة غير موجودة في قائمتك الشخصية" });
@@ -915,14 +918,15 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
     if (receivedAt) conversation = { ...conversation, lastInboundAt: receivedAt };
   }
   const personalState = !readOnly ? await prisma.conversationPreference.upsert({
-    where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } },
-    create: { userId: req.user!.id, conversationId: conversation.id, readAt: new Date() },
+    where: { userId_conversationId: preferenceKey },
+    create: { ...preferenceKey, readAt: new Date() },
     update: { readAt: new Date() }
   }) : existingPersonalState;
   await audit(req.user!.id, "CONVERSATION_OPENED", conversation.id);
   const hasMoreMessages = Boolean(messageLimit && conversation.messages.length > messageLimit);
   if (hasMoreMessages) conversation.messages.pop();
   conversation.messages.reverse();
+  if (existingPersonalState?.clearedAt) conversation.messages = conversation.messages.map((message) => message.quotedMessage && message.quotedMessage.createdAt <= existingPersonalState.clearedAt! ? { ...message, quotedMessage: null } : message);
   conversation.whisperNotes.reverse();
   conversation.internalNotes.reverse();
   conversation.privateNotes.reverse();
@@ -981,6 +985,32 @@ app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest
   res.json({ messages: page, hasMore, nextBefore: hasMore && page.length ? page[0].id : null });
 });
 
+app.post("/api/conversations/:id/whatsapp-presence", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ activity: z.enum(["composing", "recording", "paused"]) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "حالة الكتابة غير صالحة" });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true, externalConversationId: true } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية العمل على هذه المحادثة" });
+  if (conversation.channel !== Channel.WHATSAPP) return res.status(204).end();
+  const sent = await sendBaileysPresence(conversation.externalConversationId, parsed.data.activity);
+  if (sent) {
+    const activity = parsed.data.activity === "paused" ? null : parsed.data.activity === "recording" ? "recording" : "typing";
+    void emitConversationActivity(conversation, "whatsapp:agent-activity", { conversationId: conversation.id, activity, actorId: req.user!.id, actorName: req.user!.name }).catch((error) => console.warn("WhatsApp agent activity broadcast failed", error));
+  }
+  res.json({ sent });
+});
+
+app.post("/api/conversations/:id/messages/:messageId/played", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true } });
+  if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
+  if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية العمل على هذه المحادثة" });
+  if (conversation.channel !== Channel.WHATSAPP || await getWhatsAppMode() !== "BAILEYS") return res.status(204).end();
+  const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: conversation.id, direction: MessageDirection.INBOUND, kind: MessageKind.AUDIO }, select: { externalId: true } });
+  if (!message) return res.status(404).json({ error: "الرسالة الصوتية غير موجودة" });
+  await markBaileysMessagePlayed(message.externalId || "");
+  res.status(204).end();
+});
+
 app.patch("/api/conversations/:id/customer", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = customerProfileSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات ملف العميل غير صالحة" });
@@ -1015,12 +1045,12 @@ app.get("/api/contacts/phone-search", agentGuard, async (req: AuthedRequest, res
   const customers = await customersMatchingPhone(phone);
   const candidates = await conversationsMatchingPhone(phone, customers.map((customer) => customer.id));
   const personalPreferences = await prisma.conversationPreference.findMany({ where: { userId: req.user!.id, conversationId: { in: candidates.map((conversation) => conversation.id) } } });
-  const preferenceById = new Map(personalPreferences.map((preference) => [preference.conversationId, preference]));
+  const personalPreferenceById = new Map(personalPreferences.map((preference) => [preference.conversationId, preference]));
   const conversations: any[] = [];
   for (const conversation of candidates) {
+    const personalState = personalPreferenceById.get(conversation.id) || null;
+    if (personalState?.isDeleted) continue;
     if (await canReadConversationOrHistory(req.user!, conversation)) {
-      const personalState = preferenceById.get(conversation.id) || null;
-      if (personalState?.isDeleted) continue;
       const messages = personalState?.clearedAt ? conversation.messages.filter((message) => message.createdAt > personalState.clearedAt!) : conversation.messages;
       conversations.push({ ...conversation, messages, personalState, readOnly: !canWorkOnConversation(req.user!, conversation) });
     }
@@ -1380,7 +1410,7 @@ app.post("/api/conversations/:id/reply", agentGuard, async (req: AuthedRequest, 
         }
         return res.status(202).json({ ...(queuedMessage || message), ...(applyTagIds.length ? { quickReplyTagsApplied } : {}) });
     }
-      const result: any = await sendToChannel({ channel: conversation.channel, recipient: channelRecipient(conversation.channel, conversation.externalConversationId, conversation.externalCustomerId), ...replyInput, mediaUrl, mediaContentType: asset?.contentType, mediaBuffer: conversation.channel === Channel.TELEGRAM && parsed.data.kind === MessageKind.AUDIO && asset ? asset.data : undefined });
+       const result: any = await sendToChannel({ channel: conversation.channel, recipient: channelRecipient(conversation.channel, conversation.externalConversationId, conversation.externalCustomerId), ...replyInput, mediaUrl, mediaContentType: asset?.contentType, mediaBuffer: conversation.channel === Channel.TELEGRAM && (parsed.data.kind === MessageKind.AUDIO || parsed.data.kind === MessageKind.STICKER) && asset ? asset.data : undefined });
     const providerId = kalemlyExternalMessageId(result);
     const message = await prisma.message.create({ data: {
       conversationId: conversation.id, authorId: req.user!.id, direction: MessageDirection.OUTBOUND,
@@ -1489,7 +1519,7 @@ app.delete("/api/conversations/:id/messages/:messageId", agentGuard, async (req:
   if (!message) return res.status(404).json({ error: "الرسالة غير موجودة" });
   if (!canWorkOnConversation(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل هذه المحادثة" });
   if (message.direction !== MessageDirection.OUTBOUND || message.authorId !== req.user!.id) return res.status(409).json({ error: "يمكن حذف الرسائل التي أرسلتها أنت فقط" });
-  if (!message.externalId || !["SENT", "DELIVERED", "READ"].includes(message.deliveryStatus || "")) return res.status(409).json({ error: "لا يمكن حذف رسالة لم يؤكد مزود القناة إرسالها" });
+  if (!message.externalId || !["SENT", "DELIVERED", "READ", "PLAYED"].includes(message.deliveryStatus || "")) return res.status(409).json({ error: "لا يمكن حذف رسالة لم يؤكد مزود القناة إرسالها" });
   try {
     await deleteProviderMessage({ channel: message.conversation.channel, recipient: channelRecipient(message.conversation.channel, message.conversation.externalConversationId, message.conversation.externalCustomerId), externalId: message.externalId });
     await prisma.$transaction(async (tx) => {
@@ -1532,13 +1562,13 @@ app.post("/api/conversations/:id/messages/:messageId/forward", agentGuard, async
       const asset = await prisma.mediaAsset.create({ data: { fileName: safeFileName(source.kind === MessageKind.STICKER ? "sticker.webp" : `forwarded-${source.id.slice(0, 8)}.${extension}`), contentType, size: media.body.length, data: Uint8Array.from(media.body), createdById: req.user!.id }, select: { id: true, contentType: true } });
       await prisma.message.update({ where: { id: source.id }, data: { mediaAssetId: asset.id, mediaUrl: null } });
       sourceAsset = asset;
-      if (target.channel === Channel.TELEGRAM && source.kind === MessageKind.AUDIO) sourceMediaBuffer = media.body;
+       if (target.channel === Channel.TELEGRAM && (source.kind === MessageKind.AUDIO || source.kind === MessageKind.STICKER)) sourceMediaBuffer = media.body;
     }
     if (hasMedia && !sourceAsset) return res.status(409).json({ error: "تعذر العثور على ملف المرفق لتحويله" });
-    if (target.channel === Channel.TELEGRAM && source.kind === MessageKind.AUDIO && sourceAsset && !sourceMediaBuffer) {
-      const audioAsset = await prisma.mediaAsset.findUnique({ where: { id: sourceAsset.id }, select: { data: true } });
-      if (!audioAsset) return res.status(409).json({ error: "تعذر العثور على التسجيل الصوتي لتحويله" });
-      sourceMediaBuffer = audioAsset.data;
+    if (target.channel === Channel.TELEGRAM && (source.kind === MessageKind.AUDIO || source.kind === MessageKind.STICKER) && sourceAsset && !sourceMediaBuffer) {
+      const mediaAsset = await prisma.mediaAsset.findUnique({ where: { id: sourceAsset.id }, select: { data: true } });
+      if (!mediaAsset) return res.status(409).json({ error: source.kind === MessageKind.STICKER ? "تعذر العثور على الملصق لتحويله" : "تعذر العثور على التسجيل الصوتي لتحويله" });
+      sourceMediaBuffer = mediaAsset.data;
     }
     if (source.kind === MessageKind.STICKER && sourceAsset?.contentType !== "image/webp") return res.status(409).json({ error: "الملصق غير محفوظ بصيغة WebP صالحة" });
     const mediaUrl = sourceAsset ? target.channel === Channel.WHATSAPP ? undefined : publicMediaUrl(sourceAsset.id) : undefined;
@@ -1876,7 +1906,7 @@ app.post("/api/conversations/:id/handoff-response", agentGuard, async (req: Auth
     const event = { conversationId: request.conversationId, decision: "DECLINED", agentName: req.user!.name };
     io.to(`agent:${request.fromAgentId}`).emit("conversation:handoff-declined", event);
    await emitConversationEvent(request.conversationId, request.conversation.channel, "handoff:updated", event, { audience: "managers" });
-    void sendPushNotification([request.fromAgentId], { title: "رُفض طلب تحويل المحادثة", body: `رفض ${req.user!.name} استلام محادثة ${request.conversation.customer.displayName || request.conversation.customer.name || "العميل"}؛ بقيت لديك ويمكنك تحويلها لزميل آخر.`, url: "/agent/workspace", tag: `handoff-declined-${request.conversationId}` }).catch((error) => console.warn("Handoff decline push notification failed", error));
+     void sendPushNotification([request.fromAgentId], { title: "رُفض طلب تحويل المحادثة", body: `رفض ${req.user!.name} استلام محادثة ${request.conversation.customer.displayName || request.conversation.customer.name || "العميل"}؛ بقيت لديك ويمكنك تحويلها لزميل آخر.`, url: "/agent/workspace", tag: `handoff-declined-${request.conversationId}` }).catch((error) => console.warn("Handoff decline push notification failed", error));
     return res.json({ status: ConversationHandoffStatus.DECLINED, conversationId: request.conversationId });
   }
 
@@ -1962,6 +1992,8 @@ app.get("/api/conversations/:id/messages/:messageId/media", agentGuard, async (r
   const message = await prisma.message.findFirst({ where: { id: req.params.messageId, conversationId: req.params.id }, include: { conversation: true } });
   if (!message) return res.status(404).json({ error: "الملف غير موجود" });
   if (!await canReadConversationOrHistory(req.user!, message.conversation)) return res.status(403).json({ error: "لا تملك صلاحية عرض هذا الملف" });
+  const personalState = await prisma.conversationPreference.findUnique({ where: { userId_conversationId: { userId: req.user!.id, conversationId: message.conversationId } }, select: { isDeleted: true, clearedAt: true } });
+  if (personalState?.isDeleted || personalState?.clearedAt && message.createdAt <= personalState.clearedAt) return res.status(404).json({ error: "الملف غير موجود في سجلّك الشخصي" });
   try {
     if (message.mediaAssetId) {
       const asset = await prisma.mediaAsset.findUnique({ where: { id: message.mediaAssetId }, select: { data: true, contentType: true, fileName: true, size: true } });

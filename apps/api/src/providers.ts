@@ -2,9 +2,10 @@ import { Channel, MessageKind } from "@prisma/client";
 import { enqueueKalemlyMessage, getKalemlySettings } from "./KalemlyWaService";
 import { AUTO_REPLY_MENU_TEXT } from "./autoReplies";
 import { getMessengerSettings, getTelegramSettings } from "./ChannelIntegrationService";
-import { deleteBaileysWhatsAppMessage, editBaileysWhatsAppMessage, getWhatsAppMode, reactToBaileysWhatsAppMessage, transcodeVoiceToOgg } from "./BaileysWhatsAppService";
+import { deleteBaileysWhatsAppMessage, editBaileysWhatsAppMessage, getWhatsAppMode, reactToBaileysWhatsAppMessage, transcodeAnimatedWebpToTelegramSticker, transcodeVoiceToOgg } from "./BaileysWhatsAppService";
 import { routeChoice } from "./kalemlyWebhookParser";
 import type { NormalizedInbound } from "./kalemlyWebhookParser";
+import { isAnimatedWebp } from "./webpSticker";
 export { parseKalemlyWebhook } from "./kalemlyWebhookParser";
 export type { NormalizedInbound } from "./kalemlyWebhookParser";
 
@@ -74,7 +75,15 @@ export async function sendToChannel(input: { channel: Channel; recipient: string
     : kind === MessageKind.FILE ? { chat_id: input.recipient, document: input.mediaUrl, caption: input.text }
     : { chat_id: input.recipient, text: input.text || "" };
   let response: Response;
-  if (convertTelegramVoice) {
+  if (kind === MessageKind.STICKER && input.mediaBuffer) {
+    const animated = isAnimatedWebp(input.mediaBuffer);
+    const sticker = animated ? await transcodeAnimatedWebpToTelegramSticker(Buffer.from(input.mediaBuffer)) : Buffer.from(input.mediaBuffer);
+    const form = new FormData();
+    form.set("chat_id", input.recipient);
+    const contentType = animated ? "video/webm" : "image/webp";
+    form.set("sticker", new Blob([Uint8Array.from(sticker)], { type: contentType }), animated ? "sticker.webm" : "sticker.webp");
+    response = await fetch(`https://api.telegram.org/bot${settings.botToken}/${method}`, { method: "POST", body: form, signal: AbortSignal.timeout(45_000) });
+  } else if (convertTelegramVoice) {
     const audio = await transcodeVoiceToOgg(Buffer.from(input.mediaBuffer!), audioContentType || "audio/webm");
     const form = new FormData();
     form.set("chat_id", input.recipient);
@@ -231,7 +240,7 @@ export function parseTelegramWebhook(body: any): NormalizedInbound[] {
     const chatId = String(callback.message.chat.id);
     const routing = routeChoice(callback.data);
     return [{ channel: Channel.TELEGRAM, externalConversationId: chatId, externalCustomerId: String(callback.from?.id || chatId),
-      customerName: [callback.from?.first_name, callback.from?.last_name].filter(Boolean).join(" "), text: callback.data,
+      customerName: [callback.from?.first_name, callback.from?.last_name].filter(Boolean).join(" "), customerUsername: callback.from?.username, text: callback.data,
       kind: MessageKind.TEXT, externalId: `callback:${callback.id}`, metadata: { callbackId: callback.id, chatId }, ...routing }];
   }
   const message = body.message || body.edited_message;
@@ -245,9 +254,9 @@ export function parseTelegramWebhook(body: any): NormalizedInbound[] {
   const fileId = photo?.file_id || document?.file_id || audio?.file_id || sticker?.file_id;
   return [{
     channel: Channel.TELEGRAM, externalConversationId: String(message.chat.id), externalCustomerId: String(message.from?.id || message.chat.id),
-    customerName: [message.from?.first_name, message.from?.last_name].filter(Boolean).join(" "), text: message.text || message.caption || poll?.question,
+     customerName: [message.from?.first_name, message.from?.last_name].filter(Boolean).join(" "), customerUsername: message.from?.username, text: message.text || message.caption || poll?.question,
      kind: location ? MessageKind.LOCATION : poll ? MessageKind.POLL : sticker ? MessageKind.STICKER : photo ? MessageKind.IMAGE : audio ? MessageKind.AUDIO : document ? MessageKind.FILE : MessageKind.TEXT,
-     latitude: location?.latitude, longitude: location?.longitude, externalId: `${message.chat.id}:${message.message_id}`, isEdit: Boolean(body.edited_message), metadata: { fileId, chatId: message.chat.id, pollId: poll?.id, pollOptions: poll?.options?.map((option: any) => option.text) }
+      latitude: location?.latitude, longitude: location?.longitude, externalId: `${message.chat.id}:${message.message_id}`, isEdit: Boolean(body.edited_message), metadata: { fileId, chatId: message.chat.id, pollId: poll?.id, pollOptions: poll?.options?.map((option: any) => option.text), telegramStickerIsVideo: sticker?.is_video === true }
   }];
 }
 
@@ -276,11 +285,13 @@ export async function fetchInboundMedia(channel: Channel, metadata: Record<strin
 
   let url = mediaUrl || String(metadata.attachmentUrl || "");
   const telegramSettings = channel === Channel.TELEGRAM ? await getTelegramSettings() : null;
+  let telegramStickerPath = "";
   if (channel === Channel.TELEGRAM && metadata.fileId && telegramSettings?.botToken) {
     const infoResponse = await fetch(`https://api.telegram.org/bot${telegramSettings.botToken}/getFile?file_id=${encodeURIComponent(String(metadata.fileId))}`, { signal: AbortSignal.timeout(45_000) });
     if (!infoResponse.ok) throw new Error(`Telegram file lookup failed (${infoResponse.status})`);
     const info = await infoResponse.json() as { result?: { file_path?: string } };
     if (!info.result?.file_path) throw new Error("Telegram file path is unavailable");
+    telegramStickerPath = info.result.file_path;
     url = `https://api.telegram.org/file/bot${telegramSettings.botToken}/${info.result.file_path}`;
   }
   if (!url) throw new Error("Media URL is unavailable for this message");
@@ -314,7 +325,9 @@ export async function fetchInboundMedia(channel: Channel, metadata: Record<strin
         }
         chunks.push(bytes);
       }
-      return { body: Buffer.concat(chunks, size), contentType: response.headers.get("content-type") || "application/octet-stream" };
+      const headerType = response.headers.get("content-type") || "application/octet-stream";
+      const contentType = metadata.telegramStickerIsVideo === true && /\.webm$/i.test(telegramStickerPath) ? "video/webm" : headerType;
+      return { body: Buffer.concat(chunks, size), contentType };
     }
     throw new Error("Media redirect limit exceeded");
   } finally {

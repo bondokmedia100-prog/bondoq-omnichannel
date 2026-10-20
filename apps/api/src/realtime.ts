@@ -52,6 +52,20 @@ export function broadcastPresence(userId: string, presence: Presence, department
   recipients.emit("presence:updated", { userId, presence });
 }
 
+export async function emitConversationActivity(
+  conversation: { id: string; assignedAgentId: string | null; branchId: string | null; channel: Channel },
+  event: string,
+  payload: unknown
+) {
+  if (!io) return;
+  const rooms = new Set([`conversation:${conversation.id}`]);
+  for (const socket of io.sockets.sockets.values()) {
+    const user = socket.data.user as SessionUser | undefined;
+    if (user && (canReadConversation(user, conversation) || canReadTeamConversations(user, conversation))) rooms.add(`user:${user.id}`);
+  }
+  for (const room of rooms) io.to(room).emit(event, payload);
+}
+
 export async function connectedUserIds(userIds: string[]) {
   if (!io || !userIds.length) return new Set<string>();
   const sockets = await io.in(userIds.map((userId) => `user:${userId}`)).fetchSockets();
@@ -133,9 +147,12 @@ export function initRealtime(server: HttpServer) {
     if (user.department) socket.join(`department:${user.department}`);
     socket.on("conversation:join", async (conversationId: string) => {
       const currentUser = socket.data.user as SessionUser;
-      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, status: true, channel: true } });
+      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, status: true, channel: true, externalConversationId: true } });
       if (!conversation || !canReadConversation(currentUser, conversation) && !canReadTeamConversations(currentUser, conversation)) return;
       socket.join(`conversation:${conversationId}`);
+      if (conversation.channel === Channel.WHATSAPP) {
+        void import("./BaileysWhatsAppService").then(({ subscribeBaileysPresence }) => subscribeBaileysPresence(conversation.externalConversationId)).catch(() => {});
+      }
       if (canObserveAllConversations) {
         io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: true, userId: currentUser.id });
       }
