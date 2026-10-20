@@ -175,3 +175,4 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
 .admin-conversation-preview > div:has(> select) { display: none !important; }
 .agent-message-time > svg.lucide-check-check.text-stone-400 { color: #8B6F47; }
 .agent-message-time > svg.lucide-check-check.text-sky-600 { color: #34B7F1; }
+html[data-crm-theme="dark"] .agent-message-time > svg.lucide-check-check.text-stone-400 { color: #8B6F47 !important; }
