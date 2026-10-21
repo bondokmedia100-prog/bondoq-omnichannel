@@ -880,7 +880,11 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   const readOnly = !canWorkOnConversation(req.user!, conversation);
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
-  if (conversation.channel === Channel.WHATSAPP) await subscribeWhatsAppPresenceForUser(conversation.id, req.user!.id, conversation.externalConversationId).catch((error) => console.warn("WhatsApp customer presence subscription from conversation API failed", { conversationId: conversation.id, error }));
+  if (conversation.channel === Channel.WHATSAPP) {
+    const conversationId = conversation.id;
+    const externalConversationId = conversation.externalConversationId;
+    await subscribeWhatsAppPresenceForUser(conversationId, req.user!.id, externalConversationId).catch((error) => console.warn("WhatsApp customer presence subscription from conversation API failed", { conversationId, error }));
+  }
   conversation.privateNotes = conversation.privateNotes.filter((note) => canViewPrivateConversationNote(req.user!, note));
   if (!canReadConversation(req.user!, conversation)) conversation.whisperNotes = [];
   if (readOnly) conversation.customer.orders = conversation.customer.orders.filter((order) => order.conversationId === conversation!.id);

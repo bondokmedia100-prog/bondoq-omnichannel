@@ -39,6 +39,12 @@ button { cursor: pointer; }
 .workspace-chat { background-color: #efeae2 !important; }
 .workspace-chat > .flex-1 { background-color: #efeae2; }
 .agent-app .message-body { font-size: var(--chat-font-size, 15px); font-weight: 400; line-height: 1.55; }
+.group-message-bubble { border-inline-start: 3px solid hsl(var(--group-sender-hue) 62% 48%); }
+.group-sender-label { background: hsl(var(--group-sender-hue, 155) 70% 94%); color: hsl(var(--group-sender-hue, 155) 54% 32%); }
+.group-sender-dot { background: hsl(var(--group-sender-hue, 155) 62% 45%); }
+.group-sender-phone { color: hsl(var(--group-sender-hue, 155) 34% 43%); }
+.audio-recording-dock { position: fixed; z-index: 80; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); left: 12px; width: min(36rem, calc(100vw - 24px)); margin-inline: auto; }
+.agent-app.has-audio-recording .workspace-grid { padding-bottom: calc(84px + env(safe-area-inset-bottom)) !important; }
 .agent-message-bubble { min-width: 0; max-width: min(88%, 44rem); overflow-wrap: anywhere; padding: 8px 12px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .chat-message-list > .agent-message-row + .agent-message-row { margin-top: -3px; }
 .search-message-highlight { outline: 2px solid #d6a43a; outline-offset: 3px; border-radius: 14px; }
@@ -71,6 +77,9 @@ html[data-crm-theme="dark"] .agent-message-bubble .message-body a { color: #f2cf
 html[data-crm-theme="dark"] .agent-app [class*="b71c1c"] { color: #f2cf69 !important; }
 html[data-crm-theme="dark"] .agent-app .workspace-chat,
 html[data-crm-theme="dark"] .agent-app .workspace-chat > .flex-1 { background-color: #0e120f !important; }
+html[data-crm-theme="dark"] .group-sender-label { background: hsl(var(--group-sender-hue, 155) 28% 20%); color: hsl(var(--group-sender-hue, 155) 58% 78%); }
+html[data-crm-theme="dark"] .group-sender-phone { color: hsl(var(--group-sender-hue, 155) 36% 70%); }
+html[data-crm-theme="dark"] .audio-recording-dock { border-color: #713b37; background-color: #171d19; }
 html[data-crm-theme="dark"] [class*="border-stone-100"],
 html[data-crm-theme="dark"] [class*="border-stone-200"],
 html[data-crm-theme="dark"] [class*="border-stone-300"],
@@ -156,6 +165,9 @@ html[data-crm-theme="dark"] .crm-theme-toggle:hover { background: #292e29 !impor
 }
 .plus-menu { overscroll-behavior: contain; }
 @media (hover: hover) and (min-width: 851px) {
+  .message-actions { opacity: 0; pointer-events: none; transition: opacity .15s ease; }
+  .agent-message-row:hover .message-actions,
+  .agent-message-row:focus-within .message-actions { opacity: 1; pointer-events: auto; }
   .message-quote-button { opacity: 0; pointer-events: none; }
   .agent-message-row:hover .message-quote-button,
   .agent-message-row:focus-within .message-quote-button { opacity: 1; pointer-events: auto; }

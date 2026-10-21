@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, rm, chmod, readdir } from "node:fs/promises";
 import path from "node:path";
 import makeWASocket, { DisconnectReason, downloadMediaMessage, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
-import { Channel, ConversationBotState, ConversationStatus, Department, MessageKind, Role } from "@prisma/client";
+import { Channel, ConversationBotState, ConversationStatus, Department, MessageKind, Prisma, Role } from "@prisma/client";
 import QRCode from "qrcode";
 import { prisma } from "./prisma";
 import { config } from "./config";
@@ -453,20 +453,28 @@ async function syncWhatsAppContacts(currentSocket: WASocket, contacts: any[]) {
     const results = await Promise.allSettled(batch.map(async (contact) => {
       const jid = String(contact?.id || contact?.jid || "").trim();
       if (!jid || jid === "status@broadcast" || /@(?:g\.us|newsletter)$/i.test(jid)) return false;
+      const lid = [contact?.lid, contact?.lidJid, jid].find((value) => typeof value === "string" && /@lid$/i.test(value.trim()))?.trim() || "";
       const phoneValue = [contact?.phoneNumber, contact?.phone, jid].find((value) => typeof value === "string" && value.trim());
       let phone = "";
       if (phoneValue) {
         try { phone = normalizePhoneNumber(String(phoneValue)); }
         catch { phone = phoneFromJid(jid); }
       }
-      const externalCustomerId = phone || (/@lid$/i.test(jid) ? jid : "");
+      const externalCustomerId = phone || lid;
       if (!externalCustomerId) return false;
       const name = [contact?.name, contact?.verifiedName, contact?.notify].find((value) => typeof value === "string" && value.trim())?.trim();
-      const id = `external_whatsapp_${externalCustomerId}`;
+      const mappedCustomer = lid ? await prisma.customer.findFirst({
+        where: { channelIdentifiers: { path: ["whatsappLid"], equals: lid } }, select: { id: true }
+      }) : null;
+      const id = mappedCustomer?.id || `external_whatsapp_${externalCustomerId}`;
+      const existing = await prisma.customer.findUnique({ where: { id }, select: { channelIdentifiers: true } });
+      const previousIdentifiers = existing?.channelIdentifiers && typeof existing.channelIdentifiers === "object" && !Array.isArray(existing.channelIdentifiers)
+        ? existing.channelIdentifiers as Record<string, unknown> : {};
+      const channelIdentifiers = { ...previousIdentifiers, whatsapp: phone || externalCustomerId, ...(lid ? { whatsappLid: lid } : {}) } as Prisma.InputJsonObject;
       await prisma.customer.upsert({
         where: { id },
-        create: { id, name: name || null, phone: phone || null, channelIdentifiers: { whatsapp: externalCustomerId } },
-        update: { ...(name ? { name } : {}), ...(phone ? { phone } : {}), channelIdentifiers: { whatsapp: externalCustomerId } },
+        create: { id, name: name || null, phone: phone || null, channelIdentifiers },
+        update: { ...(name ? { name } : {}), ...(phone ? { phone } : {}), channelIdentifiers },
         select: { id: true }
       });
       return true;
@@ -645,6 +653,11 @@ async function handleIncomingMessage(message: any, historySync = false) {
   const currentSocket = socket;
   const groupSubject = isWhatsAppGroup && currentSocket ? await getWhatsAppGroupSubject(currentSocket, remoteJid) : undefined;
   const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
+  const whatsappLid = !isWhatsAppGroup ? [remoteJid, alternateJid].find((value) => /@lid$/i.test(value)) || "" : "";
+  const lidCustomer = !isWhatsAppGroup && whatsappLid ? await prisma.customer.findFirst({
+    where: { channelIdentifiers: { path: ["whatsappLid"], equals: whatsappLid } },
+    select: { phone: true, name: true, displayName: true }
+  }) : null;
   if (!historySync && !message.key?.fromMe && !isWhatsAppGroup && currentSocket && state.status === "CONNECTED") {
     const subscribeJids = [...new Set([remoteJid, alternateJid].map((value) => baileysPresenceIdentity(value)?.jid).filter((value): value is string => Boolean(value)))];
     for (const jid of subscribeJids) {
@@ -652,7 +665,11 @@ async function handleIncomingMessage(message: any, historySync = false) {
       catch (error) { console.warn("WhatsApp customer presence subscription after inbound message failed", { jid, error }); }
     }
   }
-  const phoneNumber = isWhatsAppGroup ? "" : phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
+  let mappedPhone = "";
+  if (lidCustomer?.phone) {
+    try { mappedPhone = normalizePhoneNumber(lidCustomer.phone); } catch {}
+  }
+  const phoneNumber = isWhatsAppGroup ? "" : phoneFromJid(alternateJid) || phoneFromJid(remoteJid) || mappedPhone;
   const externalCustomerId = isWhatsAppGroup ? remoteJid : phoneNumber || remoteJid;
   const profilePictureUrl = !isWhatsAppGroup && currentSocket && state.status === "CONNECTED"
     ? await customerProfilePicture(currentSocket, remoteJid, phoneNumber)
@@ -703,7 +720,7 @@ async function handleIncomingMessage(message: any, historySync = false) {
     externalConversationId: remoteJid,
     externalCustomerId,
     ...(phoneNumber ? { customerPhone: phoneNumber } : {}),
-    customerName: groupSubject || message.pushName || undefined,
+     customerName: groupSubject || message.pushName || lidCustomer?.displayName || lidCustomer?.name || undefined,
     profilePictureUrl,
     text: String(text || ""),
     kind,
@@ -714,8 +731,9 @@ async function handleIncomingMessage(message: any, historySync = false) {
     ...(mediaBuffer ? { mediaBuffer, mediaContentType, mediaFileName: String(mediaMessage?.fileName || "") || undefined } : {}),
     metadata: {
       provider: "baileys",
-      remoteJid,
-      ...(alternateJid ? { alternateJid } : {}),
+       remoteJid,
+       ...(alternateJid ? { alternateJid } : {}),
+       ...(whatsappLid ? { whatsappLid } : {}),
       ...(isWhatsAppGroup ? {
         isWhatsAppGroup: true,
         groupSubject,

@@ -8,6 +8,7 @@ import { connectedUserIds, emitConversationEvent, io, setAgentDisconnectHandler 
 import { canViewChannel, channelAssignmentWhere, effectiveChannelAccess, getDepartmentChannelModes } from "./messengerAccess";
 import { chooseLeastLoadedAgent, isEligibleForAutomaticAssignment, shouldReassignUnansweredConversation } from "./routingSelection";
 import { withRedisLock } from "./redisLock";
+import { shouldAutoAssignConversation } from "./whatsappGroup";
 
 const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
 export const slaQueue = new Queue("conversation-sla", { connection });
@@ -44,6 +45,17 @@ export function recordConversationAssignment(conversationId: string, agentId: st
 export async function assignConversation(conversationId: string, department?: Department | null, options: AssignmentOptions = {}) {
   return withConversationAssignmentLock(conversationId, async () => {
     const currentConversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
+    if (!shouldAutoAssignConversation(currentConversation.channel, currentConversation.externalConversationId)) {
+      if (!currentConversation.assignedAgentId && currentConversation.status !== ConversationStatus.QUEUED && !currentConversation.awaitingRouting) return currentConversation;
+      const sharedGroup = await prisma.conversation.update({ where: { id: conversationId }, data: {
+        assignedAgentId: null,
+        status: currentConversation.status === ConversationStatus.QUEUED ? ConversationStatus.OPEN : currentConversation.status,
+        awaitingRouting: false
+      } });
+      if (currentConversation.assignedAgentId) io?.to(`agent:${currentConversation.assignedAgentId}`).emit("conversation:unassigned", sharedGroup);
+      await emitConversationEvent(sharedGroup.id, sharedGroup.channel, "conversation:updated", sharedGroup);
+      return sharedGroup;
+    }
     if (currentConversation.awaitingRouting && !options.allowAwaitingRouting) return currentConversation;
     let expectedInboundAt: Date | undefined;
     if (options.expectedUnanswered) {

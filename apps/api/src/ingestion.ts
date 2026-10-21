@@ -66,6 +66,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const channelIdentifiers: Prisma.InputJsonObject = {
     ...previousIdentifiers,
     ...(isWhatsAppGroup ? { whatsapp: inbound.externalCustomerId, whatsappGroup: true } : { [inbound.channel.toLowerCase()]: inbound.externalCustomerId }),
+    ...(inbound.channel === "WHATSAPP" && typeof metadata.whatsappLid === "string" ? { whatsappLid: metadata.whatsappLid } : {}),
     ...(inbound.customerUsername ? { telegramUsername: inbound.customerUsername.replace(/^@/, "") } : {})
   };
   const customerUpdate = {
@@ -98,7 +99,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
       conversation = await prisma.conversation.create({ data: {
         customerId: customer.id, channel: inbound.channel, externalConversationId: inbound.externalConversationId,
         externalCustomerId: inbound.externalCustomerId, ...(groupSubject ? { subject: groupSubject } : {}),
-        status: historySync ? ConversationStatus.CLOSED : ConversationStatus.QUEUED,
+        status: historySync ? ConversationStatus.CLOSED : isWhatsAppGroup ? ConversationStatus.OPEN : ConversationStatus.QUEUED,
         awaitingRouting: !historySync && !isWhatsAppGroup,
         ...(historySync ? { createdAt, lastMessageAt: createdAt } : {})
       } });
@@ -234,20 +235,20 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     where: { id: conversation.id },
     data: {
       lastMessageAt: message.createdAt, lastInboundAt: message.createdAt, unreadCount: { increment: 1 },
-      status: awaitingMenu || needsAssignment ? ConversationStatus.QUEUED : shouldPreserveResolved ? conversation.status : isTerminal ? ConversationStatus.OPEN : conversation.status,
+      status: isWhatsAppGroup ? ConversationStatus.OPEN : awaitingMenu || needsAssignment ? ConversationStatus.QUEUED : shouldPreserveResolved ? conversation.status : isTerminal ? ConversationStatus.OPEN : conversation.status,
       closedAt: awaitingMenu || needsAssignment ? null : shouldPreserveResolved ? conversation.closedAt : isTerminal ? null : conversation.closedAt,
-      assignedAgentId: awaitingMenu || needsAssignment ? null : undefined,
+      assignedAgentId: isWhatsAppGroup || awaitingMenu || needsAssignment ? null : undefined,
       awaitingRouting: awaitingMenu,
       botState: decision.nextState === "BOT_MENU" ? ConversationBotState.BOT_MENU : ConversationBotState.ASSIGNED_TO_AGENT,
       ...(groupSubject ? { subject: groupSubject } : {}),
-      routingDepartment: awaitingMenu || decision.action === "BYPASS" ? null : routeDepartment || conversation.routingDepartment,
+      routingDepartment: isWhatsAppGroup || awaitingMenu || decision.action === "BYPASS" ? null : routeDepartment || conversation.routingDepartment,
       serviceTag: decision.action === "HANDOFF" ? serviceChoice?.label : decision.action === "BYPASS" ? "تواصل مباشر" : awaitingMenu ? null : conversation.serviceTag,
       isComplaint: decision.action === "HANDOFF" ? Boolean(serviceChoice?.isComplaint) : awaitingMenu || decision.action === "BYPASS" ? false : inbound.isComplaint ?? conversation.isComplaint,
       ...(decision.action === "MENU" || decision.action === "BYPASS" ? { firstResponseAt: null, lastAgentResponseAt: null, slaBreachedAt: null } : {})
     }
   });
   await prisma.conversationPreference.updateMany({ where: { conversationId: conversation.id, isDeleted: true }, data: { isDeleted: false } });
-  if (awaitingMenu && previousAssignedAgentId) {
+  if ((awaitingMenu || isWhatsAppGroup) && previousAssignedAgentId) {
     io?.to(`agent:${previousAssignedAgentId}`).emit("conversation:unassigned", conversation);
   }
 
@@ -280,7 +281,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     });
   }
 
-  if (outsideBusinessHours) {
+   if (!isWhatsAppGroup && outsideBusinessHours) {
     if (shouldSendOffHoursReply) {
       try { await sendBotReply(chatbotSettings.offHoursReplyText, "off-hours-reply"); }
       catch (error) { console.error("Out-of-hours reply failed", error); }
@@ -340,7 +341,7 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
     catch (error) { console.error("Automatic reply delivery failed", error); }
   }
 
-  if (decision.action === "NONE" && !autoReply && !conversation.awaitingRouting) {
+   if (!isWhatsAppGroup && decision.action === "NONE" && !autoReply && !conversation.awaitingRouting) {
     conversation = await assignConversation(conversation.id, routeDepartment, { reassignIfIneligible: true });
   }
 
