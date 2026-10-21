@@ -39,6 +39,19 @@ test("agents can read and work only assigned conversations even with the view-al
   assert.equal(canWorkOnConversation(user({ id: "assigned-agent" }), { assignedAgentId: "assigned-agent" }), true);
 });
 
+test("WhatsApp groups are shared across branch and channel access boundaries", () => {
+  const group = { assignedAgentId: "another-agent", branchId: "branch-b", channel: Channel.WHATSAPP, externalConversationId: "120@g.us" };
+  const branchUser = user({ role: Role.BRANCH_USER, branchId: "branch-a", whatsappAccess: MessengerAccessMode.DISABLED });
+  assert.equal(canReadConversation(branchUser, group), true);
+  assert.equal(canWorkOnConversation(branchUser, group), true);
+  assert.equal(canReadTeamConversations(branchUser, group), true);
+
+  const individual = { ...group, externalConversationId: "201018040600@s.whatsapp.net" };
+  assert.equal(canReadConversation(branchUser, individual), false);
+  assert.equal(canWorkOnConversation(branchUser, individual), false);
+  assert.equal(canReadTeamConversations(branchUser, individual), false);
+});
+
 test("handoff recipient can respond before the conversation is assigned to them", () => {
   const sender = user({ id: "sender", department: Department.CUSTOMER_CARE });
   const recipient = user({ id: "recipient", department: Department.CUSTOMER_CARE, departmentWhatsAppAccess: MessengerAccessMode.FULL });

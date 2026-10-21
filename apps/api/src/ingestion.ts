@@ -49,6 +49,13 @@ async function ingestMessageLocked(inbound: NormalizedInbound) {
   const isWhatsAppGroup = metadata.isWhatsAppGroup === true && inbound.channel === "WHATSAPP";
   const groupSubject = isWhatsAppGroup ? String(metadata.groupSubject || inbound.customerName || "مجموعة WhatsApp") : undefined;
   let conversation = await prisma.conversation.findUnique({ where: { channel_externalConversationId: { channel: inbound.channel, externalConversationId: inbound.externalConversationId } } });
+  if (!conversation && inbound.channel === "WHATSAPP") {
+    const identityJids = [...new Set([metadata.remoteJid, metadata.alternateJid].filter((value): value is string => typeof value === "string" && value.length > 0))];
+    if (identityJids.length) conversation = await prisma.conversation.findFirst({
+      where: { channel: "WHATSAPP", OR: [{ externalConversationId: { in: identityJids } }, { externalCustomerId: { in: identityJids } }] },
+      orderBy: { lastMessageAt: "desc" }
+    });
+  }
   if (!conversation && inbound.channel === "WHATSAPP" && inbound.customerPhone) {
     try { conversation = await findWhatsAppConversationByPhone(normalizePhoneNumber(inbound.customerPhone)); } catch {}
   }

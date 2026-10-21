@@ -53,7 +53,7 @@ export function broadcastPresence(userId: string, presence: Presence, department
 }
 
 export async function emitConversationActivity(
-  conversation: { id: string; assignedAgentId: string | null; branchId: string | null; channel: Channel },
+  conversation: { id: string; assignedAgentId: string | null; branchId: string | null; channel: Channel; externalConversationId?: string },
   event: string,
   payload: unknown
 ) {
@@ -64,6 +64,16 @@ export async function emitConversationActivity(
     if (user && (canReadConversation(user, conversation) || canReadTeamConversations(user, conversation))) rooms.add(`user:${user.id}`);
   }
   for (const room of rooms) io.to(room).emit(event, payload);
+}
+
+export async function subscribeWhatsAppPresenceForUser(conversationId: string, userId: string, remoteJid: string) {
+  if (!io) return;
+  const sockets = [...io.sockets.sockets.values()].filter((socket) => (socket.data.user as SessionUser | undefined)?.id === userId);
+  if (!sockets.length) return;
+  const { subscribeBaileysPresence } = await import("./BaileysWhatsAppService");
+  await Promise.all(sockets.map((socket) => subscribeBaileysPresence(remoteJid, socket.id).catch((error) => {
+    console.warn("WhatsApp customer presence API subscription failed", { conversationId, socketId: socket.id, error });
+  })));
 }
 
 export async function connectedUserIds(userIds: string[]) {
@@ -79,7 +89,7 @@ export async function isUserConnected(userId: string) {
   return (await connectedUserIds([userId])).has(userId);
 }
 
-export async function revokeConversationRoomAccess(conversationId: string, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
+export async function revokeConversationRoomAccess(conversationId: string, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel; externalConversationId?: string }) {
   if (!io) return;
   const room = `conversation:${conversationId}`;
   const sockets = await io.in(room).fetchSockets();
@@ -100,7 +110,7 @@ export async function refreshChannelAccessForDepartments(channel: Channel, depar
     const user = await loadSessionUser(id);
     if (user) refreshed.set(id, user);
   }
-  const channelConversations = new Map<string, { assignedAgentId: string | null; branchId: string | null; channel: Channel }>();
+  const channelConversations = new Map<string, { assignedAgentId: string | null; branchId: string | null; channel: Channel; externalConversationId: string }>();
   for (const socket of io.sockets.sockets.values()) {
     const previous = socket.data.user as SessionUser | undefined;
     const user = previous && refreshed.get(previous.id);
@@ -111,7 +121,7 @@ export async function refreshChannelAccessForDepartments(channel: Channel, depar
       const conversationId = room.slice("conversation:".length);
        let conversation = channelConversations.get(conversationId);
        if (!conversation) {
-         const found = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, channel: true } });
+          const found = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedAgentId: true, branchId: true, channel: true, externalConversationId: true } });
          if (!found || found.channel !== channel) continue;
          conversation = found;
          channelConversations.set(conversationId, conversation);
@@ -153,7 +163,10 @@ export function initRealtime(server: HttpServer) {
       socket.join(`conversation:${conversationId}`);
       if (conversation.channel === Channel.WHATSAPP) {
         whatsappPresenceJids.set(conversationId, conversation.externalConversationId);
-        void import("./BaileysWhatsAppService").then(({ subscribeBaileysPresence }) => subscribeBaileysPresence(conversation.externalConversationId, socket.id)).catch((error) => console.warn("WhatsApp customer presence subscription failed", { conversationId, error }));
+        try {
+          const { subscribeBaileysPresence } = await import("./BaileysWhatsAppService");
+          await subscribeBaileysPresence(conversation.externalConversationId, socket.id);
+        } catch (error) { console.warn("WhatsApp customer presence subscription failed", { conversationId, error }); }
       }
       if (canObserveAllConversations) {
         io.to(`conversation:${conversationId}`).emit("admin:viewing", { viewing: true, userId: currentUser.id });

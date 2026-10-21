@@ -10,12 +10,12 @@ import { Channel, ConversationHandoffStatus, ConversationStatus, Department, Mes
 import { config } from "./config";
 import { adminGuard, agentGuard, authenticate, AuthedRequest, canReadConversation, canReadTeamConversations, canReceivePrivateConversationNote, canRespondToHandoff, canViewAllPrivateConversationNotes, canViewPrivateConversationNote, canWorkOnConversation, hasPermission, loadSessionUser, permissionGuard, signToken } from "./auth";
 import { prisma } from "./prisma";
-import { broadcastPresence, connectedUserIds, emitConversationActivity, emitConversationEvent, initRealtime, io, isUserConnected, refreshChannelAccessForDepartments, revokeConversationRoomAccess } from "./realtime";
+import { broadcastPresence, connectedUserIds, emitConversationActivity, emitConversationEvent, initRealtime, io, isUserConnected, refreshChannelAccessForDepartments, revokeConversationRoomAccess, subscribeWhatsAppPresenceForUser } from "./realtime";
 import { assignConversation, dispatchQueued, releaseAgentConversations, scheduleUnansweredReassignment, withConversationAssignmentLock, withInboundConversationLock } from "./routing";
 import { answerTelegramCallback, channelRecipient, deleteProviderMessage, editProviderMessage, fetchInboundMedia, parseKalemlyWebhook, parseMetaWebhook, parseTelegramWebhook, reactToProviderMessage, sendCsatPrompt, sendToChannel } from "./providers";
 import { ingestMessage, updateEditedInboundMessage } from "./ingestion";
 import { getKalemlySettings, safeProviderResponse, saveKalemlySettings, sendKalemlyTest, startKalemlyWaWorker, kalemlyExternalMessageId } from "./KalemlyWaService";
-import { defaultCallReply, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, logoutBaileysWhatsApp, markBaileysMessagePlayed, markBaileysMessagesRead, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, sendBaileysPresence, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, type WhatsAppMode } from "./BaileysWhatsAppService";
+import { defaultCallReply, getBaileysWhatsAppState, getPendingBaileysCall, getWhatsAppCallReply, getWhatsAppMode, initializeWhatsAppEngine, logoutBaileysWhatsApp, markBaileysMessagePlayed, markBaileysMessagesRead, publishWhatsAppCustomerPresence, rejectBaileysCall, restartBaileysWhatsApp, saveWhatsAppCallReply, sendBaileysPresence, setWhatsAppMode, startBaileysWhatsApp, stopBaileysWhatsApp, type WhatsAppMode } from "./BaileysWhatsAppService";
 import { startOfCairoDay } from "./cairoTime";
 import { getMessengerSettings, getTelegramSettings, saveMessengerSettings, saveTelegramSettings } from "./ChannelIntegrationService";
 import { allowedMediaTypes, imageSignatureMatches, publicMediaUrl, safeFileName, uploadLimitBytes, verifyPublicMediaUrl } from "./mediaStorage";
@@ -31,7 +31,8 @@ import { canReplyChannel, canViewChannel, channelAssignmentWhere, channelDepartm
 import { formatAgentHandoffGreeting } from "./autoReplies";
 import { normalizePhoneNumber, phoneNumberLookupVariants } from "./egyptianPhoneFormatter";
 import { accessibleConversationSearchScope, messageContentSearchWhere, normalizeSearchDigits } from "./search";
-import { WHATSAPP_GROUP_JID_SUFFIX } from "./whatsappGroup";
+import { isWhatsAppGroupJid, WHATSAPP_GROUP_JID_SUFFIX } from "./whatsappGroup";
+import { parseKalemlyPresenceUpdates } from "./whatsappPresence";
 
 const app = express();
 const server = http.createServer(app);
@@ -112,7 +113,12 @@ async function lastInboundAt(conversationId: string, stored?: Date | null) {
   const latest = await prisma.message.findFirst({ where: { conversationId, direction: MessageDirection.INBOUND }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
   return latest?.createdAt || null;
 }
-async function canReadConversationOrHistory(user: NonNullable<AuthedRequest["user"]>, conversation: { id: string; assignedAgentId: string | null; branchId?: string | null; status: ConversationStatus; channel?: Channel }) {
+async function canReadConversationOrHistory(user: NonNullable<AuthedRequest["user"]>, conversation: { id: string; assignedAgentId: string | null; branchId?: string | null; status: ConversationStatus; channel?: Channel; externalConversationId?: string }) {
+  if (conversation.channel === Channel.WHATSAPP && !conversation.externalConversationId) {
+    const identity = await prisma.conversation.findUnique({ where: { id: conversation.id }, select: { externalConversationId: true } });
+    conversation = { ...conversation, externalConversationId: identity?.externalConversationId };
+  }
+  if (conversation.channel === Channel.WHATSAPP && isWhatsAppGroupJid(conversation.externalConversationId)) return true;
   if (conversation.channel && !canViewChannel(user, conversation.channel)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (canReadConversation(user, conversation) || canReadTeamConversations(user, conversation)) return true;
@@ -503,6 +509,7 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
   const teamView = req.query.team === "1" && canReadTeamConversations(actor);
   const historyOnly = req.query.history === "1" && !canSeeAll && !teamView;
   const deniedChannels = inaccessibleChannels(actor);
+  const deniedChannelsForIndividualChats = deniedChannels.filter((channel) => channel !== Channel.WHATSAPP);
   const viewOnlyChannels = readOnlyChannels(actor);
   const scope: Prisma.ConversationWhereInput[] = canSeeAll ? [] : teamView
     ? actor.role === Role.BRANCH_USER ? [{ branchId: actor.branchId! }] : []
@@ -535,14 +542,17 @@ app.get("/api/conversations", agentGuard, async (req: AuthedRequest, res: expres
   const conversations = await prisma.conversation.findMany({
     where: {
       AND: [
-        ...scope,
+        ...(canSeeAll ? scope : [{ OR: [
+          { AND: [...scope, ...(deniedChannels.includes(Channel.WHATSAPP) ? [{ channel: { not: Channel.WHATSAPP } }] : [])] },
+          { channel: Channel.WHATSAPP, externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } }
+        ] }]),
         ...(groupFilterWhere ? [groupFilterWhere] : []),
         ...(cursor ? [{ OR: [{ lastMessageAt: { lt: cursor.date } }, { lastMessageAt: cursor.date, id: { lt: cursor.id } }] }] : []),
         archivedView
           ? { personalPreferences: { some: { userId: actor.id, isArchived: true, isDeleted: false } } }
           : { NOT: { personalPreferences: { some: { userId: actor.id, OR: [{ isDeleted: true }, { isArchived: true }] } } } }
       ],
-      ...(deniedChannels.length ? { NOT: deniedChannels.map((deniedChannel) => ({ channel: deniedChannel })) } : {}),
+      ...(deniedChannelsForIndividualChats.length ? { NOT: deniedChannelsForIndividualChats.map((deniedChannel) => ({ channel: deniedChannel })) } : {}),
       ...(channel && channel !== "ALL" ? { channel: channel as Channel } : {}),
       ...(status && status !== "ALL" ? { status: status as ConversationStatus } : {}),
     },
@@ -586,7 +596,7 @@ app.patch("/api/conversations/:id/personal-settings", agentGuard, async (req: Au
     clear: z.boolean().optional()
   }).strict().refine((value) => Object.keys(value).length > 0).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "إعدادات المحادثة غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, externalConversationId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   const { markRead, clear, ...values } = parsed.data;
@@ -639,7 +649,7 @@ app.put("/api/conversation-lists/:id/conversations", agentGuard, async (req: Aut
   if (!parsed.success) return res.status(400).json({ error: "المحادثة غير صالحة" });
   const [list, conversation] = await Promise.all([
     prisma.conversationList.findFirst({ where: { id: req.params.id, userId: req.user!.id }, select: { id: true, name: true } }),
-    prisma.conversation.findUnique({ where: { id: parsed.data.conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } })
+    prisma.conversation.findUnique({ where: { id: parsed.data.conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, externalConversationId: true } })
   ]);
   if (!list) return res.status(404).json({ error: "القائمة غير موجودة" });
   if (!conversation || !await canReadConversationOrHistory(req.user!, conversation)) return res.status(404).json({ error: "المحادثة غير موجودة أو ليست ضمن صلاحياتك" });
@@ -656,9 +666,12 @@ app.get("/api/conversations/favorites", agentGuard, async (req: AuthedRequest, r
   const deniedChannels = inaccessibleChannels(req.user!);
   const favorites = await prisma.conversationFavorite.findMany({
     where: { userId: req.user!.id, AND: [
-      ...(!canSeeAll ? [{ conversation: { is: { assignedAgentId: req.user!.id } } }] : []),
+      ...(!canSeeAll ? [{ conversation: { is: { OR: [
+        { assignedAgentId: req.user!.id, ...(deniedChannels.includes(Channel.WHATSAPP) ? { channel: { not: Channel.WHATSAPP } } : {}) },
+        { channel: Channel.WHATSAPP, externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } }
+      ] } } }] : []),
       { conversation: { is: { personalPreferences: { none: { userId: req.user!.id, isDeleted: true } } } } },
-      ...(deniedChannels.length ? [{ conversation: { is: { channel: { notIn: deniedChannels } } } }] : [])
+      ...(deniedChannels.filter((channel) => channel !== Channel.WHATSAPP).length ? [{ conversation: { is: { channel: { notIn: deniedChannels.filter((channel) => channel !== Channel.WHATSAPP) } } } }] : [])
     ] },
     include: { conversation: { include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: { createdAt: "desc" }, take: 1 } } } },
     orderBy: { createdAt: "desc" }, take: 100
@@ -671,9 +684,12 @@ app.get("/api/conversations/pins", agentGuard, async (req: AuthedRequest, res: e
   const deniedChannels = inaccessibleChannels(req.user!);
   const pins = await prisma.conversationPin.findMany({
     where: { userId: req.user!.id, AND: [
-      ...(!canSeeAll ? [{ conversation: { is: { assignedAgentId: req.user!.id } } }] : []),
+      ...(!canSeeAll ? [{ conversation: { is: { OR: [
+        { assignedAgentId: req.user!.id, ...(deniedChannels.includes(Channel.WHATSAPP) ? { channel: { not: Channel.WHATSAPP } } : {}) },
+        { channel: Channel.WHATSAPP, externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } }
+      ] } } }] : []),
       { conversation: { is: { personalPreferences: { none: { userId: req.user!.id, isDeleted: true } } } } },
-      ...(deniedChannels.length ? [{ conversation: { is: { channel: { notIn: deniedChannels } } } }] : [])
+      ...(deniedChannels.filter((channel) => channel !== Channel.WHATSAPP).length ? [{ conversation: { is: { channel: { notIn: deniedChannels.filter((channel) => channel !== Channel.WHATSAPP) } } } }] : [])
     ] },
     include: { conversation: { include: { customer: true, assignedAgent: { select: { id: true, name: true, presence: true } }, messages: { orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1 } } } },
     orderBy: { createdAt: "desc" }, take: 100
@@ -694,6 +710,7 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
   const teamView = req.query.team === "1" && canReadTeamConversations(actor);
   const historyOnly = req.query.history === "1" && !canSeeAll && !teamView;
   const deniedChannels = inaccessibleChannels(actor);
+  const deniedChannelsForIndividualChats = deniedChannels.filter((channel) => channel !== Channel.WHATSAPP);
   const viewOnlyChannels = readOnlyChannels(actor);
   const scope: Prisma.ConversationWhereInput[] = canSeeAll ? [] : teamView
     ? actor.role === Role.BRANCH_USER ? [{ branchId: actor.branchId! }] : []
@@ -713,9 +730,9 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
   const conversationId = typeof req.query.conversationId === "string" ? req.query.conversationId : "";
   const messageMatch = messageContentSearchWhere(query);
   if (conversationId) {
-    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
+    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, externalConversationId: true } });
     if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
-    if (deniedChannels.includes(conversation.channel)) return res.status(403).json({ error: "لا تملك صلاحية البحث في قناة هذه المحادثة" });
+    if (deniedChannels.includes(conversation.channel) && !isWhatsAppGroupJid(conversation.externalConversationId)) return res.status(403).json({ error: "لا تملك صلاحية البحث في قناة هذه المحادثة" });
     if (!await canReadConversationOrHistory(actor, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
     const personalState = await prisma.conversationPreference.findUnique({ where: { userId_conversationId: { userId: actor.id, conversationId } }, select: { isDeleted: true, clearedAt: true } });
     if (personalState?.isDeleted) return res.status(404).json({ error: "المحادثة غير موجودة في قائمتك الشخصية" });
@@ -776,9 +793,12 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
   ] };
   const where: Prisma.ConversationWhereInput = {
     AND: [
-      ...scope,
+      ...(canSeeAll ? scope : [{ OR: [
+        { AND: [...scope, ...(deniedChannels.includes(Channel.WHATSAPP) ? [{ channel: { not: Channel.WHATSAPP } }] : [])] },
+        { channel: Channel.WHATSAPP, externalConversationId: { endsWith: WHATSAPP_GROUP_JID_SUFFIX } }
+      ] }]),
       { NOT: { personalPreferences: { some: { userId: actor.id, isDeleted: true } } } },
-      ...(deniedChannels.length ? [{ NOT: { channel: { in: deniedChannels } } }] : []),
+      ...(deniedChannelsForIndividualChats.length ? [{ NOT: { channel: { in: deniedChannelsForIndividualChats } } }] : []),
       ...(groupFilterWhere ? [groupFilterWhere] : []),
       statusFilter,
       ...(channel ? [{ channel }] : []),
@@ -815,7 +835,7 @@ app.get("/api/conversations/search", agentGuard, async (req: AuthedRequest, res:
 app.put("/api/conversations/:id/favorite", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ favorite: z.boolean() }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة المفضلة غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, channel: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true, externalConversationId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   if (parsed.data.favorite) await prisma.conversationFavorite.upsert({ where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } }, create: { userId: req.user!.id, conversationId: conversation.id }, update: {} });
@@ -827,7 +847,7 @@ app.put("/api/conversations/:id/favorite", agentGuard, async (req: AuthedRequest
 app.put("/api/conversations/:id/pin", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ pinned: z.boolean() }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة التثبيت غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true, externalConversationId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canReadConversation(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
   if (parsed.data.pinned) {
@@ -860,6 +880,7 @@ app.get("/api/conversations/:id", agentGuard, async (req: AuthedRequest, res: ex
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   const readOnly = !canWorkOnConversation(req.user!, conversation);
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  if (conversation.channel === Channel.WHATSAPP) await subscribeWhatsAppPresenceForUser(conversation.id, req.user!.id, conversation.externalConversationId).catch((error) => console.warn("WhatsApp customer presence subscription from conversation API failed", { conversationId: conversation.id, error }));
   conversation.privateNotes = conversation.privateNotes.filter((note) => canViewPrivateConversationNote(req.user!, note));
   if (!canReadConversation(req.user!, conversation)) conversation.whisperNotes = [];
   if (readOnly) conversation.customer.orders = conversation.customer.orders.filter((order) => order.conversationId === conversation!.id);
@@ -958,9 +979,10 @@ app.delete("/api/conversations/:id", systemAdminGuard, async (req: AuthedRequest
 });
 
 app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, externalConversationId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "هذه المحادثة ليست ضمن محادثاتك" });
+  if (conversation.channel === Channel.WHATSAPP) await subscribeWhatsAppPresenceForUser(conversation.id, req.user!.id, conversation.externalConversationId).catch((error) => console.warn("WhatsApp customer presence subscription from messages API failed", { conversationId: conversation.id, error }));
   const personalState = await prisma.conversationPreference.findUnique({ where: { userId_conversationId: { userId: req.user!.id, conversationId: conversation.id } }, select: { isDeleted: true, clearedAt: true } });
   if (personalState?.isDeleted) return res.status(404).json({ error: "المحادثة غير موجودة في قائمتك الشخصية" });
   const limit = pageLimit(req.query.limit);
@@ -985,6 +1007,53 @@ app.get("/api/conversations/:id/messages", agentGuard, async (req: AuthedRequest
   res.json({ messages: page, hasMore, nextBefore: hasMore && page.length ? page[0].id : null });
 });
 
+app.get("/api/me/starred-messages", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const stars = await prisma.messageStar.findMany({
+    where: { userId: req.user!.id },
+    include: { message: { include: {
+      author: { select: { id: true, name: true } },
+      mediaAsset: { select: { fileName: true, contentType: true, size: true } },
+      conversation: { include: {
+        customer: { select: { id: true, name: true, displayName: true, phone: true, avatarUrl: true, isBlocked: true, channelIdentifiers: true } },
+        personalPreferences: { where: { userId: req.user!.id }, select: { isDeleted: true, clearedAt: true } }
+      } }
+    } } },
+    orderBy: { createdAt: "desc" }, take: 200
+  });
+  const visible = [];
+  for (const star of stars) {
+    const { conversation, ...message } = star.message;
+    const personalState = conversation.personalPreferences[0];
+    if (personalState?.isDeleted || personalState?.clearedAt && message.createdAt <= personalState.clearedAt) continue;
+    if (!await canReadConversationOrHistory(req.user!, conversation)) continue;
+    const { personalPreferences: _personalPreferences, ...conversationData } = conversation;
+    visible.push({ id: message.id, starredAt: star.createdAt, conversationId: conversation.id, conversation: conversationData, message });
+  }
+  res.json(visible);
+});
+
+app.put("/api/conversations/:id/messages/:messageId/star", agentGuard, async (req: AuthedRequest, res: express.Response) => {
+  const parsed = z.object({ starred: z.boolean() }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "حالة تمييز الرسالة غير صالحة" });
+  const message = await prisma.message.findFirst({
+    where: { id: req.params.messageId, conversationId: req.params.id },
+    include: { conversation: true }
+  });
+  if (!message || !await canReadConversationOrHistory(req.user!, message.conversation)) return res.status(404).json({ error: "الرسالة غير موجودة أو ليست ضمن صلاحياتك" });
+  const personalState = await prisma.conversationPreference.findUnique({ where: { userId_conversationId: { userId: req.user!.id, conversationId: message.conversationId } }, select: { isDeleted: true, clearedAt: true } });
+  if (personalState?.isDeleted || personalState?.clearedAt && message.createdAt <= personalState.clearedAt) return res.status(404).json({ error: "الرسالة غير موجودة في قائمتك الشخصية" });
+  if (parsed.data.starred) {
+    await prisma.messageStar.upsert({
+      where: { userId_messageId: { userId: req.user!.id, messageId: message.id } },
+      create: { userId: req.user!.id, messageId: message.id }, update: {}
+    });
+  } else {
+    await prisma.messageStar.deleteMany({ where: { userId: req.user!.id, messageId: message.id } });
+  }
+  await audit(req.user!.id, parsed.data.starred ? "MESSAGE_STARRED" : "MESSAGE_UNSTARRED", message.conversationId, { messageId: message.id });
+  res.json({ messageId: message.id, starred: parsed.data.starred });
+});
+
 app.post("/api/conversations/:id/whatsapp-presence", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ activity: z.enum(["composing", "recording", "paused"]) }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "حالة الكتابة غير صالحة" });
@@ -1001,7 +1070,7 @@ app.post("/api/conversations/:id/whatsapp-presence", agentGuard, async (req: Aut
 });
 
 app.post("/api/conversations/:id/messages/:messageId/played", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, channel: true, externalConversationId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "ليس لديك صلاحية العمل على هذه المحادثة" });
   if (conversation.channel !== Channel.WHATSAPP || await getWhatsAppMode() !== "BAILEYS") return res.status(204).end();
@@ -1014,7 +1083,7 @@ app.post("/api/conversations/:id/messages/:messageId/played", agentGuard, async 
 app.patch("/api/conversations/:id/customer", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = customerProfileSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "بيانات ملف العميل غير صالحة" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, customerId: true, assignedAgentId: true, branchId: true, channel: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, customerId: true, assignedAgentId: true, branchId: true, channel: true, externalConversationId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية تعديل بيانات هذا العميل" });
   const customer = await prisma.customer.update({ where: { id: conversation.customerId }, data: parsed.data });
@@ -1707,7 +1776,7 @@ app.post("/api/conversations/:id/whisper", adminGuard, async (req: AuthedRequest
 });
 
 app.get("/api/conversations/:id/private-note-recipients", agentGuard, async (req: AuthedRequest, res: express.Response) => {
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, externalConversationId: true } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
   const recipientFilters: Prisma.UserWhereInput[] = [{ role: Role.AGENT }];
@@ -1723,7 +1792,7 @@ app.get("/api/conversations/:id/private-note-recipients", agentGuard, async (req
 app.post("/api/conversations/:id/private-notes", agentGuard, async (req: AuthedRequest, res: express.Response) => {
   const parsed = z.object({ recipientId: z.string().min(1).max(100), text: z.string().trim().min(1).max(4000) }).strict().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "اختر زميلًا واكتب رسالة سرية لا تتجاوز 4000 حرف" });
-  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, customer: { select: { name: true, displayName: true } } } });
+  const conversation = await prisma.conversation.findUnique({ where: { id: req.params.id }, select: { id: true, assignedAgentId: true, branchId: true, status: true, channel: true, externalConversationId: true, customer: { select: { name: true, displayName: true } } } });
   if (!conversation) return res.status(404).json({ error: "المحادثة غير موجودة" });
   if (!await canReadConversationOrHistory(req.user!, conversation) || !canWorkOnConversation(req.user!, conversation)) return res.status(403).json({ error: "لا تملك صلاحية مراسلة زميل في هذه المحادثة" });
   const recipient = await prisma.user.findUnique({ where: { id: parsed.data.recipientId }, select: { id: true, name: true, role: true, branchId: true, isActive: true } });
@@ -3099,6 +3168,7 @@ app.post("/webhooks/kalemlywa", async (req, res) => {
   if (await getWhatsAppMode() !== "API") return res.status(202).json({ ignored: true, reason: "BAILEYS mode is active" });
   try {
     for (const message of parseKalemlyWebhook(req.body)) await ingestMessage(message);
+    for (const update of parseKalemlyPresenceUpdates(req.body)) await publishWhatsAppCustomerPresence(update);
     res.sendStatus(200);
   } catch (error) {
     console.error("KalemlyWA webhook ingestion failed", error);

@@ -4,6 +4,7 @@ import { Channel, Department, MessengerAccessMode, Role } from "@prisma/client";
 import { config } from "./config";
 import { prisma } from "./prisma";
 import { canReplyChannel, canViewChannel, getDepartmentChannelModes, getDepartmentMessengerMode } from "./messengerAccess";
+import { isWhatsAppGroupJid } from "./whatsappGroup";
 
 export type PermissionName = "canViewAllConversations" | "canTransferConversations" | "canManageCatalog" | "canViewReports" | "canManageTeam";
 export type SessionUser = {
@@ -91,7 +92,14 @@ export function permissionGuard(permission: PermissionName): RequestHandler[] {
   }) as RequestHandler];
 }
 
-export function canReadConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
+type ConversationAccess = { assignedAgentId: string | null; branchId?: string | null; channel?: Channel; externalConversationId?: string };
+
+function isSharedWhatsAppGroup(conversation: ConversationAccess) {
+  return conversation.channel === Channel.WHATSAPP && isWhatsAppGroupJid(conversation.externalConversationId);
+}
+
+export function canReadConversation(user: SessionUser, conversation: ConversationAccess) {
+  if (isSharedWhatsAppGroup(conversation)) return true;
   if (conversation.channel && !canViewChannel(user, conversation.channel)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;
@@ -99,14 +107,16 @@ export function canReadConversation(user: SessionUser, conversation: { assignedA
   return conversation.assignedAgentId === user.id;
 }
 
-export function canReadTeamConversations(user: SessionUser, conversation?: { branchId?: string | null; channel?: Channel }) {
+export function canReadTeamConversations(user: SessionUser, conversation?: { branchId?: string | null; channel?: Channel; externalConversationId?: string }) {
+  if (conversation && isSharedWhatsAppGroup({ assignedAgentId: null, ...conversation })) return true;
   if (conversation?.channel && !canViewChannel(user, conversation.channel)) return false;
   if (user.role === Role.AGENT) return true;
   return user.role === Role.BRANCH_USER && Boolean(user.branchId)
     && (!conversation || conversation.branchId === user.branchId);
 }
 
-export function canWorkOnConversation(user: SessionUser, conversation: { assignedAgentId: string | null; branchId?: string | null; channel?: Channel }) {
+export function canWorkOnConversation(user: SessionUser, conversation: ConversationAccess) {
+  if (isSharedWhatsAppGroup(conversation)) return true;
   if (conversation.channel && !canReplyChannel(user, conversation.channel)) return false;
   if (user.role === Role.BRANCH_USER && (!user.branchId || user.branchId !== conversation.branchId)) return false;
   if (user.role === Role.ADMIN) return true;

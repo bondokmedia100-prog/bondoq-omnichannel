@@ -17,3 +17,12 @@ export function isDeliveryStatusAdvance(current: string | null, next: Exclude<De
   const currentRank = current && Object.prototype.hasOwnProperty.call(deliveryRank, current) ? deliveryRank[current as DeliveryStatus] : 0;
   return deliveryRank[next] > currentRank;
 }
+
+export function baileysReceiptDate(update: any, status: Exclude<DeliveryStatus, "SENT">, fallback = new Date()) {
+  const receipt = update?.receipt || update?.update || {};
+  const field = status === "PLAYED" ? receipt.playedTimestamp : status === "READ" ? receipt.readTimestamp : receipt.receiptTimestamp;
+  const seconds = typeof field === "object" && field !== null && "toNumber" in field ? Number(field.toNumber()) : Number(field);
+  if (!Number.isFinite(seconds) || seconds <= 0) return fallback;
+  const at = new Date(seconds * 1000);
+  return Number.isNaN(at.getTime()) || at.getTime() > Date.now() + 5 * 60_000 ? fallback : at;
+}

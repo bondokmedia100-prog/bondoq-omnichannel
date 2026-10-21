@@ -18,6 +18,7 @@ import WhatsAppCallModal from "./WhatsAppCallModal";
 import ProtectedMedia from "./ProtectedMedia";
 import CopyableCustomerIdentities, { customerIdentityPreview } from "./CopyableCustomerIdentities";
 import { isNotificationSoundEnabled, mergeMessages, messageNotificationPreview, playIncomingMessageTone, setNotificationSoundEnabled } from "@/lib/messageHelpers";
+import { matchesCustomerPresence } from "@/lib/whatsappPresence";
 
 type AnyRecord = Record<string, any>;
 const channelLabel: Record<string, string> = { WHATSAPP: "واتساب", MESSENGER: "ماسنجر", TELEGRAM: "تليجرام" };
@@ -73,6 +74,12 @@ export default function AdminDashboard() {
   const detailRequest = useRef(0);
   const detailLoadingIdRef = useRef("");
   const activeConversationRef = useRef("");
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
   const loadingMessagesRef = useRef(new Map<string, AnyRecord[]>());
   const loadRequest = useRef(0);
   const searchRequest = useRef(0);
@@ -172,13 +179,31 @@ export default function AdminDashboard() {
         if (event.message && conversationId) setDetail((old: AnyRecord) => old?.id === conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message), customer: withDisplayName(event.customer || old.customer) } : old);
       });
        connection.on("message:transcribed", (event) => setDetail((old: AnyRecord) => old?.id === event.conversationId ? { ...old, messages: mergeMessages(old.messages || [], event.message) } : old));
-        connection.on("whatsapp:customer-activity", (event) => {
-          const conversationId = String(event?.conversationId || "");
-          if (!conversationId) return;
-          const active = event.activity === "typing" || event.activity === "recording";
-          const previousTimer = customerActivityTimersRef.current.get(conversationId);
-          if (previousTimer) window.clearTimeout(previousTimer);
-          if (active) {
+        connection.on("customer_presence", (event) => {
+          console.log("[PRESENCE RECEIVED]:", event);
+          const activity = event?.activity === "recording" || event?.state === "recording" ? "recording"
+            : event?.activity === "typing" || event?.state === "typing" || event?.state === "composing" ? "typing" : "";
+          const conversationIds = new Set<string>();
+          const directId = String(event?.chatId || event?.conversationId || "");
+          if (directId) conversationIds.add(directId);
+          for (const chat of conversationsRef.current) {
+            if (matchesCustomerPresence(chat, event)) conversationIds.add(chat.id);
+          }
+          const activeId = activeConversationRef.current;
+          const activeChat = detailRef.current?.id === activeId
+            ? detailRef.current
+            : selectedRef.current?.id === activeId ? selectedRef.current : conversationsRef.current.find((chat) => chat.id === activeId);
+          const activeMatches = conversationIds.has(activeId) || matchesCustomerPresence(activeChat, event);
+          if (activeMatches && activeId) conversationIds.add(activeId);
+          if (!conversationIds.size) return;
+
+          for (const conversationId of conversationIds) {
+            const previousTimer = customerActivityTimersRef.current.get(conversationId);
+            if (previousTimer) window.clearTimeout(previousTimer);
+            if (!activity) {
+              customerActivityTimersRef.current.delete(conversationId);
+              continue;
+            }
             const timer = window.setTimeout(() => {
               if (customerActivityTimersRef.current.get(conversationId) !== timer) return;
               customerActivityTimersRef.current.delete(conversationId);
@@ -189,16 +214,18 @@ export default function AdminDashboard() {
                 return next;
               });
               if (conversationId === activeConversationRef.current) setCustomerActivity("");
-            }, 11_000);
+            }, 8_000);
             customerActivityTimersRef.current.set(conversationId, timer);
-          } else customerActivityTimersRef.current.delete(conversationId);
+          }
           setConversationActivities((current) => {
             const next = { ...current };
-            if (active) next[conversationId] = { activity: event.activity, actor: "customer" };
-            else if (next[conversationId]?.actor === "customer") delete next[conversationId];
+            for (const conversationId of conversationIds) {
+              if (activity) next[conversationId] = { activity, actor: "customer" };
+              else if (next[conversationId]?.actor === "customer") delete next[conversationId];
+            }
             return next;
           });
-          if (conversationId === activeConversationRef.current) setCustomerActivity(active ? event.activity : "");
+          if (activeMatches) setCustomerActivity(activity);
         });
         connection.on("whatsapp:agent-activity", (event) => {
           setConversationActivities((current) => {
@@ -487,14 +514,14 @@ export default function AdminDashboard() {
              </article>)}
              {!globalSearchLoading && !globalSearchError && !globalSearchResults.length && <Empty text="لا توجد محادثات مطابقة" />}
              {globalSearchHasMore && <button type="button" onClick={() => void loadMoreGlobalSearch()} disabled={globalSearchLoading} className="m-4 rounded-xl border border-stone-200 bg-white px-4 py-2 text-xs font-bold text-stone-600 disabled:opacity-50">{globalSearchLoading ? "جارٍ التحميل..." : "عرض نتائج إضافية"}</button>}
-            </div> : <div className="grid divide-y divide-stone-100 lg:grid-cols-2 lg:divide-x lg:divide-y-0 lg:divide-x-reverse">{visibleConversations.slice(0, 12).map((chat) => <button key={chat.id} onClick={() => openConversation(chat)} className="flex min-w-0 items-center gap-3 px-5 py-4 text-right transition hover:bg-[#fffaf3]"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} size="h-12 w-12" /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><b className="truncate text-sm text-stone-700">{customerDisplayName(chat.customer)}</b><ChannelBadge channel={chat.channel} />{chat.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">شكوى</span>}</div><p dir="ltr" className="mt-0.5 truncate text-left text-[10px] font-semibold text-stone-500">{customerIdentityPreview(chat.customer, chat.channel, chat.externalCustomerId)}</p><p className="mt-1 truncate text-xs text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة جديدة"}</p>{conversationActivities[chat.id] && <span role="status" className="mt-1 inline-block text-[9px] font-semibold text-emerald-700">{conversationActivities[chat.id].actor === "customer" ? "العميل" : conversationActivities[chat.id].actorName || "الموظف"} {conversationActivities[chat.id].activity === "recording" ? "يسجل صوتًا..." : "يكتب..."}</span>}</div><div className="flex shrink-0 flex-col items-end gap-1"><span className="text-[10px] text-stone-400">{timeAgo(chat.lastMessageAt)}</span>{chat.slaBreachedAt ? <span className="sla-pulse rounded-md bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">متأخرة</span> : <span className="text-[10px] text-stone-400">{chat.assignedAgent?.name || "بانتظار إسناد"}</span>}</div></button>)}{!visibleConversations.length && <Empty text="لا توجد محادثات مطابقة" />}</div>}
+             </div> : <div className="grid divide-y divide-stone-100 lg:grid-cols-2 lg:divide-x lg:divide-y-0 lg:divide-x-reverse">{visibleConversations.slice(0, 12).map((chat) => <button key={chat.id} onClick={() => openConversation(chat)} className="flex min-w-0 items-center gap-3 px-5 py-4 text-right transition hover:bg-[#fffaf3]"><Avatar name={customerDisplayName(chat.customer)} src={chat.customer?.avatarUrl} size="h-12 w-12" /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><b className="truncate text-sm text-stone-700">{customerDisplayName(chat.customer)}</b><ChannelBadge channel={chat.channel} />{chat.isComplaint && <span className="rounded-md bg-red-50 px-1.5 py-0.5 text-[9px] font-bold text-red-600">شكوى</span>}</div><p dir="ltr" className="mt-0.5 truncate text-left text-[10px] font-semibold text-stone-500">{customerIdentityPreview(chat.customer, chat.channel, chat.externalCustomerId)}</p><p className="mt-1 truncate text-xs text-stone-400">{chat.messages?.[0]?.text || "مرفق أو رسالة جديدة"}</p>{conversationActivities[chat.id] && <span role="status" className="mt-1 inline-block text-[9px] font-semibold text-emerald-700">{conversationActivities[chat.id].actor === "customer" ? `العميل ${conversationActivities[chat.id].activity === "recording" ? "🎙️ جاري تسجيل مقطع صوتي..." : "جاري الكتابة..."}` : `${conversationActivities[chat.id].actorName || "الموظف"} ${conversationActivities[chat.id].activity === "recording" ? "يسجل صوتًا..." : "يكتب..."}`}</span>}</div><div className="flex shrink-0 flex-col items-end gap-1"><span className="text-[10px] text-stone-400">{timeAgo(chat.lastMessageAt)}</span>{chat.slaBreachedAt ? <span className="sla-pulse rounded-md bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">متأخرة</span> : <span className="text-[10px] text-stone-400">{chat.assignedAgent?.name || "بانتظار إسناد"}</span>}</div></button>)}{!visibleConversations.length && <Empty text="لا توجد محادثات مطابقة" />}</div>}
       </section>
     </div>
 
      {selected && <div className="fixed inset-0 z-40 grid place-items-center bg-stone-900/40 p-3 backdrop-blur-sm" onClick={closeConversationPreview}><div className="admin-conversation-preview panel flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
        {detail ? <>
           <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4"><div className="flex items-center gap-3"><Avatar name={customerDisplayName(detail.customer)} src={detail.customer?.avatarUrl} size="h-12 w-12" /><div><h3 className="font-extrabold">{customerDisplayName(detail.customer)}</h3><p className="text-xs text-stone-400">{channelLabel[detail.channel]} · {detail.assignedAgent?.name || "غير مسندة"}</p></div></div><button onClick={closeConversationPreview} className="rounded-lg p-2 text-stone-400 hover:bg-stone-100"><X size={19} /></button></div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 bg-[#fffdf7] px-5 py-2"><CopyableCustomerIdentities customer={detail.customer} channel={detail.channel} externalCustomerId={detail.externalCustomerId} />{customerActivity && <span role="status" aria-live="polite" className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-[10px] font-semibold text-emerald-800"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-600" />{customerActivity === "recording" ? "العميل يسجل رسالة صوتية..." : "العميل يكتب..."}</span>}</div>
+           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 bg-[#fffdf7] px-5 py-2"><CopyableCustomerIdentities customer={detail.customer} channel={detail.channel} externalCustomerId={detail.externalCustomerId} />{customerActivity && <span role="status" aria-live="polite" className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-[10px] font-semibold text-emerald-800"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-600" />{customerActivity === "recording" ? "🎙️ جاري تسجيل مقطع صوتي..." : "جاري الكتابة..."}</span>}</div>
         <div className="border-b border-stone-100 bg-white px-5 py-2">
           <button type="button" onClick={() => setShowInternalNotes((open) => !open)} className="flex items-center gap-2 text-xs font-bold text-stone-600 hover:text-[#b88718]"><FileText size={15} /> ملاحظات الفريق <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px]">{detail.internalNotes?.length || 0}</span><span className="mr-auto text-[10px] text-stone-400">{showInternalNotes ? "إخفاء" : "عرض"}</span></button>
           {showInternalNotes && <div className="space-y-2 pb-2 pt-3">

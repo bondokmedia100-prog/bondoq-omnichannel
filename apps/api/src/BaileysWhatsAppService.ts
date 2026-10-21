@@ -12,10 +12,10 @@ import { sendPushNotification } from "./pushNotifications";
 import { repacketizeOggOpusToCode3 } from "./oggOpus";
 import { assignConversation, withInboundConversationLock } from "./routing";
 import { matchesStoredBaileysMessageKey, parseStoredBaileysMessageKey, serializeBaileysMessageKey } from "./baileysMessageKey";
-import { baileysDeliveryStatus, isDeliveryStatusAdvance } from "./baileysReceipt";
+import { baileysDeliveryStatus, baileysReceiptDate, isDeliveryStatusAdvance } from "./baileysReceipt";
 import { channelViewerWhere } from "./messengerAccess";
 import { isWhatsAppGroupJid } from "./whatsappGroup";
-import { baileysPresenceIdentity } from "./whatsappPresence";
+import { baileysPresenceIdentity, normalizeCustomerPresenceState, type CustomerPresenceState } from "./whatsappPresence";
 
 process.umask(0o077);
 
@@ -297,52 +297,99 @@ async function resubscribeActiveBaileysPresence(current: WASocket) {
   }
 }
 
-async function persistBaileysPresence(update: any) {
-  const identity = baileysPresenceIdentity(String(update?.id || ""));
-  if (!identity) return;
-  const states = Object.values(update?.presences || {}).map((presence: any) => String(presence?.lastKnownPresence || "").toLowerCase());
-  if (!states.length) return;
-  const activity = states.includes("recording") ? "recording" : states.includes("composing") ? "typing" : null;
-  const conversationSelect = {
-    id: true, assignedAgentId: true, branchId: true, channel: true
+export async function publishWhatsAppCustomerPresence(input: {
+  rawJid: string;
+  state: CustomerPresenceState;
+  cleanPhone?: string;
+  conversationId?: string;
+}) {
+  const rawJid = input.rawJid.trim();
+  const identity = baileysPresenceIdentity(rawJid);
+  const phoneIdentity = input.cleanPhone ? baileysPresenceIdentity(input.cleanPhone) : null;
+  const jidAliases = [...new Set([...(identity?.jidAliases || []), ...(phoneIdentity?.jidAliases || [])])];
+  const phoneAliases = [...new Set([...(identity?.phoneAliases || []), ...(phoneIdentity?.phoneAliases || [])])];
+  const select = {
+    id: true, assignedAgentId: true, branchId: true, channel: true,
+    externalConversationId: true, externalCustomerId: true,
+    customer: { select: { phone: true } }
   } as const;
-  let conversation = await prisma.conversation.findFirst({
-    where: {
-      channel: Channel.WHATSAPP,
-      OR: [
-        { externalConversationId: { in: identity.jidAliases } },
-        { externalCustomerId: { in: identity.jidAliases } }
-      ]
-    },
-    orderBy: { lastMessageAt: "desc" },
-    select: conversationSelect
-  });
-  if (!conversation && identity.phoneAliases.length) {
+  let conversation = input.conversationId
+    ? await prisma.conversation.findFirst({ where: { id: input.conversationId, channel: Channel.WHATSAPP }, select })
+    : null;
+  if (!conversation && jidAliases.length) {
     conversation = await prisma.conversation.findFirst({
-      where: {
-        channel: Channel.WHATSAPP,
-        OR: [
-          { externalConversationId: { in: identity.phoneAliases } },
-          { externalCustomerId: { in: identity.phoneAliases } }
-        ]
-      },
-      orderBy: { lastMessageAt: "desc" },
-      select: conversationSelect
+      where: { channel: Channel.WHATSAPP, OR: [
+        { externalConversationId: { in: jidAliases } },
+        { externalCustomerId: { in: jidAliases } }
+      ] },
+      orderBy: { lastMessageAt: "desc" }, select
     });
   }
+  if (!conversation && phoneAliases.length) {
+    conversation = await prisma.conversation.findFirst({
+      where: { channel: Channel.WHATSAPP, OR: [
+        { externalConversationId: { in: phoneAliases } },
+        { externalCustomerId: { in: phoneAliases } },
+        { customer: { is: { phone: { in: phoneAliases } } } }
+      ] },
+      orderBy: { lastMessageAt: "desc" }, select
+    });
+  }
+  if (!conversation && phoneAliases.length) {
+    const suffix = phoneAliases[0].slice(-10);
+    const candidates = await prisma.conversation.findMany({
+      where: { channel: Channel.WHATSAPP, OR: [
+        { externalConversationId: { contains: suffix } },
+        { externalCustomerId: { contains: suffix } },
+        { customer: { is: { phone: { contains: suffix } } } }
+      ] },
+      orderBy: { lastMessageAt: "desc" }, take: 50, select
+    });
+    conversation = candidates.find((candidate) => [candidate.externalConversationId, candidate.externalCustomerId, candidate.customer.phone]
+      .some((value) => String(value || "").replace(/\D/g, "").slice(-10) === suffix)) || null;
+  }
+
+  const conversationPhone = conversation && [conversation.customer.phone, conversation.externalCustomerId, conversation.externalConversationId]
+    .map((value) => value ? baileysPresenceIdentity(value)?.phoneAliases[0] || "" : "").find(Boolean) || "";
+  const cleanPhone = phoneAliases[0] || conversationPhone;
+  const activity = input.state === "paused" ? null : input.state;
+  const payload = {
+    chatId: conversation?.id || input.conversationId || "",
+    conversationId: conversation?.id || input.conversationId || "",
+    cleanPhone,
+    rawJid,
+    state: input.state,
+    activity
+  };
+  console.log("[PRESENCE RECEIVED]:", payload);
   if (!conversation) return;
+
   const previousTimer = presenceTimers.get(conversation.id);
   if (previousTimer) clearTimeout(previousTimer);
-  void emitConversationActivity(conversation, "whatsapp:customer-activity", { conversationId: conversation.id, activity }).catch((error) => console.warn("WhatsApp customer activity broadcast failed", error));
+  const broadcast = async (nextPayload: typeof payload) => {
+    await Promise.all([
+      emitConversationActivity(conversation!, "customer_presence", nextPayload),
+      emitConversationActivity(conversation!, "whatsapp:customer-activity", nextPayload)
+    ]);
+  };
+  void broadcast(payload).catch((error) => console.warn("WhatsApp customer presence broadcast failed", error));
   if (!activity) {
     presenceTimers.delete(conversation.id);
     return;
   }
   const timer = setTimeout(() => {
-    presenceTimers.delete(conversation.id);
-    void emitConversationActivity(conversation, "whatsapp:customer-activity", { conversationId: conversation.id, activity: null }).catch((error) => console.warn("WhatsApp customer activity broadcast failed", error));
-  }, 10_000);
+    presenceTimers.delete(conversation!.id);
+    void broadcast({ ...payload, state: "paused", activity: null }).catch((error) => console.warn("WhatsApp customer presence expiry broadcast failed", error));
+  }, 8_000);
   presenceTimers.set(conversation.id, timer);
+}
+
+async function persistBaileysPresence(update: any) {
+  const rawJid = String(update?.id || update?.jid || update?.remoteJid || update?.chatId || "");
+  const states = Object.values(update?.presences || {}).map((presence: any) => normalizeCustomerPresenceState(presence?.lastKnownPresence || presence?.state));
+  const state = states.includes("recording") ? "recording" : states.includes("typing") ? "typing" : states.includes("paused") ? "paused" : null;
+  if (!rawJid || !state) return;
+  await publishWhatsAppCustomerPresence({ rawJid, state, cleanPhone: String(update?.phone || update?.phoneNumber || "") });
 }
 
 async function persistBaileysReceipt(update: any) {
@@ -355,7 +402,7 @@ async function persistBaileysReceipt(update: any) {
   const storedKey = serializeBaileysMessageKey(key);
   const alternateRemoteJid = String(key.remoteJidAlt || "");
   const storedIds = [`WHATSAPP:${id}`, `WHATSAPP:baileys:${remoteJid}:${id}`, ...(alternateRemoteJid ? [`WHATSAPP:baileys:${alternateRemoteJid}:${id}`] : []), ...(storedKey ? [`WHATSAPP:${storedKey}`] : [])];
-  let message = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, direction: "OUTBOUND" }, select: { id: true, conversationId: true, deliveryStatus: true } });
+  let message = await prisma.message.findFirst({ where: { externalId: { in: storedIds }, direction: "OUTBOUND" }, select: { id: true, conversationId: true, deliveryStatus: true, deliveredAt: true, readAt: true, playedAt: true } });
   if (!message) {
     const remoteJids = [...new Set([remoteJid, alternateRemoteJid, phoneFromJid(remoteJid), phoneFromJid(alternateRemoteJid)].filter(Boolean))];
     const conversations = await prisma.conversation.findMany({
@@ -368,16 +415,22 @@ async function persistBaileysReceipt(update: any) {
         conversationId: { in: conversations.map((conversation) => conversation.id) }, direction: "OUTBOUND",
         OR: [{ externalId: { startsWith: "WHATSAPP:baileys-key:" } }, { externalId: { startsWith: "WHATSAPP:baileys:" } }]
       },
-      select: { id: true, conversationId: true, deliveryStatus: true, externalId: true }
+      select: { id: true, conversationId: true, deliveryStatus: true, externalId: true, deliveredAt: true, readAt: true, playedAt: true }
     });
     message = candidates.find((candidate) => candidate.externalId && matchesStoredBaileysMessageKey(candidate.externalId, key)) || null;
   }
   if (!message || !isDeliveryStatusAdvance(message.deliveryStatus, deliveryStatus)) return;
+  const receiptAt = baileysReceiptDate(update, deliveryStatus);
   const atOrAbove = deliveryStatus === "DELIVERED" ? ["DELIVERED", "READ", "PLAYED"]
     : deliveryStatus === "READ" ? ["READ", "PLAYED"] : ["PLAYED"];
   const changed = await prisma.message.updateMany({
     where: { id: message.id, OR: [{ deliveryStatus: null }, { deliveryStatus: { notIn: atOrAbove } }] },
-    data: { deliveryStatus }
+    data: {
+      deliveryStatus,
+      ...(!message.deliveredAt ? { deliveredAt: receiptAt } : {}),
+      ...((deliveryStatus === "READ" || deliveryStatus === "PLAYED") && !message.readAt ? { readAt: receiptAt } : {}),
+      ...(deliveryStatus === "PLAYED" && !message.playedAt ? { playedAt: receiptAt } : {})
+    }
   });
   if (!changed.count) return;
   const saved = await prisma.message.findUnique({ where: { id: message.id } });
@@ -592,6 +645,13 @@ async function handleIncomingMessage(message: any, historySync = false) {
   const currentSocket = socket;
   const groupSubject = isWhatsAppGroup && currentSocket ? await getWhatsAppGroupSubject(currentSocket, remoteJid) : undefined;
   const alternateJid = String(message.key?.remoteJidAlt || message.key?.participantAlt || "");
+  if (!historySync && !message.key?.fromMe && !isWhatsAppGroup && currentSocket && state.status === "CONNECTED") {
+    const subscribeJids = [...new Set([remoteJid, alternateJid].map((value) => baileysPresenceIdentity(value)?.jid).filter((value): value is string => Boolean(value)))];
+    for (const jid of subscribeJids) {
+      try { await ensureBaileysPresenceSubscription(currentSocket, jid); }
+      catch (error) { console.warn("WhatsApp customer presence subscription after inbound message failed", { jid, error }); }
+    }
+  }
   const phoneNumber = isWhatsAppGroup ? "" : phoneFromJid(alternateJid) || phoneFromJid(remoteJid);
   const externalCustomerId = isWhatsAppGroup ? remoteJid : phoneNumber || remoteJid;
   const profilePictureUrl = !isWhatsAppGroup && currentSocket && state.status === "CONNECTED"
@@ -655,6 +715,7 @@ async function handleIncomingMessage(message: any, historySync = false) {
     metadata: {
       provider: "baileys",
       remoteJid,
+      ...(alternateJid ? { alternateJid } : {}),
       ...(isWhatsAppGroup ? {
         isWhatsAppGroup: true,
         groupSubject,

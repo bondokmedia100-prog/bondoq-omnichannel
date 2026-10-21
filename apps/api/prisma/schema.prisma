@@ -158,6 +158,7 @@ model User {
   conversationLists        ConversationList[]
   favoriteCustomers        CustomerFavorite[]
   messageReactions         MessageReaction[]
+  starredMessages          MessageStar[]
   agentQuickReplies        AgentQuickReply[]
   passwordResetRequest       PasswordResetRequest? @relation("PasswordResetSubject")
   passwordResetReviews       PasswordResetRequest[] @relation("PasswordResetReviewer")
@@ -324,6 +325,9 @@ model Message {
   mediaUrl            String?
   mediaAssetId        String?
   deliveryStatus      String?
+  deliveredAt         DateTime?
+  readAt              DateTime?
+  playedAt            DateTime?
   latitude            Float?
   longitude           Float?
   externalId          String?           @unique
@@ -339,6 +343,7 @@ model Message {
   quotedMessage       Message?          @relation("QuotedMessage", fields: [quotedMessageId], references: [id], onDelete: SetNull)
   replies             Message[]         @relation("QuotedMessage")
   reactions           MessageReaction[]
+  starredBy           MessageStar[]
   cakeReferenceOrders OrderDetails[]    @relation("CakeReferenceImage")
 
   @@index([conversationId, createdAt])
@@ -635,6 +640,18 @@ model MessageReaction {
 
   @@unique([messageId, userId])
   @@index([messageId, createdAt])
+}
+
+model MessageStar {
+  userId    String
+  messageId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@id([userId, messageId])
+  @@index([userId, createdAt])
+  @@index([messageId])
 }
 
 model CsatSurvey {
